@@ -12,8 +12,11 @@ import com.garrietta.relay.rcs.net.RelayApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -57,8 +60,6 @@ object MicrogPairing {
 
     private const val USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
     private const val MULTILOGIN_URL = "https://accounts.google.com/o/oauth2/multilogin"
-
-    private val json = Json { ignoreUnknownKeys = true }
 
     data class MicrogAccount(val name: String)
 
@@ -230,6 +231,8 @@ object MicrogPairing {
     }
 
     // ---------- pure helpers (unit-tested) ----------
+    // NOTE: parsed with Json.parseToJsonElement (no @Serializable codegen —
+    // this module doesn't apply the serialization compiler plugin).
 
     /** Strips the XSSI guard ")]}',\n" prefix Google prepends to JSON responses. */
     fun stripXssi(body: String): String {
@@ -238,8 +241,9 @@ object MicrogPairing {
     }
 
     fun parseUserinfoSub(body: String): String {
-        val sub = json.decodeFromString<UserinfoResponse>(stripXssi(body)).sub
-        if (sub.isBlank()) throw MicrogPairingException("Google userinfo had no account id.")
+        val sub = Json.parseToJsonElement(stripXssi(body))
+            .jsonObject["sub"]?.jsonPrimitive?.contentOrNull
+        if (sub.isNullOrBlank()) throw MicrogPairingException("Google userinfo had no account id.")
         return sub
     }
 
@@ -249,32 +253,24 @@ object MicrogPairing {
      * INVALID_TOKENS is the experiment's negative signal, surfaced verbatim.
      */
     fun parseMultiloginCookies(body: String): Map<String, String> {
-        val parsed = json.decodeFromString<MultiloginResponse>(stripXssi(body))
-        return when (parsed.status) {
-            "OK" -> parsed.cookies.associate { it.name to it.value }
+        val obj = Json.parseToJsonElement(stripXssi(body)).jsonObject
+        return when (val status = obj["status"]?.jsonPrimitive?.contentOrNull ?: "") {
+            "OK" -> obj["cookies"]?.jsonArray?.associate { c ->
+                val co = c.jsonObject
+                (co["name"]?.jsonPrimitive?.contentOrNull ?: "") to
+                    (co["value"]?.jsonPrimitive?.contentOrNull ?: "")
+            }?.filterKeys { it.isNotEmpty() } ?: emptyMap()
             "INVALID_TOKENS" -> throw MicrogPairingException(
                 "Google said INVALID_TOKENS — the minted token wasn't accepted for a web session. " +
                     "This means Google won't issue the OAuthLogin scope to Relay: the microG path is NOT viable, use QR."
             )
-            else -> throw MicrogPairingException("Google multilogin failed: status=${parsed.status}")
+            else -> throw MicrogPairingException("Google multilogin failed: status=$status")
         }
     }
 
     /** "SID=…; HSID=…; …" — the exact format GaiaPairing.begin expects. */
     fun formatCookieHeader(cookies: Map<String, String>): String =
         cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-
-    @Serializable
-    private data class UserinfoResponse(val sub: String = "")
-
-    @Serializable
-    private data class MultiloginCookie(val name: String = "", val value: String = "")
-
-    @Serializable
-    private data class MultiloginResponse(
-        val status: String = "",
-        val cookies: List<MultiloginCookie> = emptyList(),
-    )
 }
 
 /** User-readable failure from the microG pairing chain. Message is UI-safe. */

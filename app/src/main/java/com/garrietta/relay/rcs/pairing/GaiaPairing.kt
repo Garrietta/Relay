@@ -20,6 +20,7 @@ import com.garrietta.relay.rcs.session.AuthStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import okhttp3.Headers
 import okhttp3.OkHttpClient
 import java.security.MessageDigest
 import java.util.Base64
@@ -94,23 +95,17 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 2 to PValue.Str(Base64.getEncoder().encodeToString(ecKeys.public.encoded)),
             )
         )
-        // Google's cookie-authenticated endpoints require the SAPISIDHASH
-        // Authorization header IN ADDITION to the Cookie header — cookies
-        // alone are rejected with HTTP 401 (diagnosed 2026-10-18 from a
-        // device 401 on the correct endpoint with captured cookies).
-        val sapisid = SapisidHash.extractSapisid(cookies)
-        val gaiaClient = client.newBuilder()
-            .addInterceptor { chain ->
-                val reqBuilder = chain.request().newBuilder()
-                    .addHeader("Cookie", cookies)
-                if (sapisid != null) {
-                    reqBuilder.addHeader("Authorization", SapisidHash.authorizationValue(sapisid))
-                } else {
-                    Log.w(TAG, "SignInGaia: no SAPISID cookie — Cookie header goes without SAPISIDHASH")
-                }
-                chain.proceed(reqBuilder.build())
-            }
-            .build()
+        // SignInGaia carries the complete browser-faithful header set
+        // (RelayApi.signInGaiaHeaders): the relay headers (sec-ch-ua with
+        // OUR WebView's Chrome version, x-goog-api-key, origin, referer,
+        // sec-fetch-*, accept-language) plus the cookie-auth pair (Cookie
+        // + Authorization: SAPISIDHASH). Google's cookie-authenticated
+        // endpoints reject requests that carry cookies but no proof of
+        // origin — cookies alone get an HTTP 401 (diagnosed 2026-10-18).
+        val headers = RelayApi.signInGaiaHeaders(cookies)
+        if (SapisidHash.extractSapisid(cookies) == null) {
+            Log.w(TAG, "SignInGaia: no SAPISID cookie — Cookie header goes without SAPISIDHASH")
+        }
         // Gaia mode host per mautrix (pkg/libgm/util/paths.go):
         // instantmessaging-pa.clients6.google.com — NOT bare
         // clients6.google.com, which 404s on the Registration path
@@ -118,12 +113,11 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         // config at messages.google.com/web/config publishes the same host).
         val url = RelayApi.PATH_SIGN_IN_GAIA
         val body = request.toByteArray()
-        // Cookie VALUES are secrets — names/count only. The SAPISIDHASH
-        // value is derived from the secret SAPISID, so log its presence only.
+        // Header NAMES only — values (Cookie, SAPISIDHASH) are secrets and
+        // are never logged.
         Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId " +
-                "ua=WebViewUA cookies=[${cookieNames(cookies)}] " +
-                "authHeader=${if (sapisid != null) "SAPISIDHASH" else "none"}")
-        val res = postSignInGaiaWithRetry(gaiaClient, url, body)
+                "headers=${headers.names()} cookies=[${cookieNames(cookies)}]")
+        val res = postSignInGaiaWithRetry(client, url, headers, body)
 
         val (tokenData, devices) = decodeSignInGaiaResponse(res.text)
         val chosen = devices.filter { it.isPrimary }.maxByOrNull { it.lastSeenMs }
@@ -148,17 +142,15 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
      * one-line message for the UI (never raw HTML).
      */
     private suspend fun postSignInGaiaWithRetry(
-        gaiaClient: OkHttpClient,
+        client: OkHttpClient,
         url: String,
+        headers: Headers,
         body: ByteArray,
     ): RpcResult {
         var last: RpcResult? = null
         var backoffMs = 1000L
         repeat(3) { attempt ->
-            // The session was established by the sign-in WebView — the RPC
-            // must carry the WebView's UA or Google may reject the session.
-            val res = postRpcCancellable(gaiaClient, url, RelayApi.CT_PBLITE, body,
-                userAgent = RelayApi.WEBVIEW_UA)
+            val res = postRpcCancellable(client, url, headers, body)
             if (res.isOk()) return res
             if (res.code in 400..499) {
                 Log.w(TAG, "SignInGaia HTTP ${res.code} (deterministic, not retrying): ${res.text.take(500)}")

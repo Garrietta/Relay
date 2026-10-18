@@ -31,6 +31,25 @@ class SapisidHashTest {
     }
 
     @Test
+    fun authorizationValue_matchesIndependentSha1Vector() {
+        // Expected value computed INDEPENDENTLY of this codebase:
+        //   printf '%s' "1700000000 test_sapisid_value https://messages.google.com" | sha1sum
+        // → 1eb72f0f142e5a3a28ee7b5538c879058c0029ee
+        // This pins the byte-exact formula: Unix SECONDS (not millis),
+        // single spaces, lowercase hex, origin exactly
+        // https://messages.google.com. A wrong formula here = HTTP 401.
+        val v = SapisidHash.authorizationValue(
+            sapisid = "test_sapisid_value",
+            origin = "https://messages.google.com",
+            nowSec = 1700000000L,
+        )
+        assertEquals(
+            "SAPISIDHASH 1700000000_1eb72f0f142e5a3a28ee7b5538c879058c0029ee",
+            v,
+        )
+    }
+
+    @Test
     fun authorizationValue_hasChromiumFormat() {
         val v = SapisidHash.authorizationValue("abc", nowSec = 1L)
         assertTrue(v.matches(Regex("SAPISIDHASH \\d+_[0-9a-f]{40}")))

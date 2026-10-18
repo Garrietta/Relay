@@ -60,6 +60,55 @@ object RelayApi {
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/131.0.0.0 Mobile Safari/537.36"
 
+    /**
+     * Chrome major version parsed from a UA string (e.g. 131 from
+     * "…Chrome/131.0.0.0…"). Used to keep `sec-ch-ua` consistent with the
+     * User-Agent we actually send — a sec-ch-ua claiming v=152 next to a
+     * Chrome/131 User-Agent looks forged to Google.
+     */
+    fun chromeMajorVersion(userAgent: String): Int? =
+        Regex("Chrome/(\\d+)").find(userAgent)?.groupValues?.get(1)?.toIntOrNull()
+
+    /**
+     * Full browser-faithful header set for the SignInGaia RPC — and ONLY
+     * SignInGaia (one verified change at a time; the steady-state
+     * endpoints keep [headers]).
+     *
+     * Replicates the official web client's request construction: the relay
+     * headers (sec-ch-ua, x-user-agent, x-goog-api-key, origin, referer,
+     * sec-fetch-*, accept-language) plus the cookie auth pair (Cookie +
+     * Authorization: SAPISIDHASH). The sec-ch-ua versions are derived from
+     * [WEBVIEW_UA] — the session was established by OUR WebView, so its
+     * actual version goes out, never a hardcoded different one.
+     */
+    fun signInGaiaHeaders(
+        cookies: String,
+        nowSec: Long = System.currentTimeMillis() / 1000,
+    ): Headers {
+        val chromeMajor = chromeMajorVersion(WEBVIEW_UA) ?: 131
+        val builder = Headers.Builder()
+            .add("sec-ch-ua", "\"Google Chrome\";v=\"$chromeMajor\", \"Chromium\";v=\"$chromeMajor\", \"Not-A.Brand\";v=\"24\"")
+            .add("x-user-agent", "grpc-web-javascript/0.1")
+            .add("x-goog-api-key", API_KEY)
+            .add("content-type", CT_PBLITE)
+            .add("sec-ch-ua-mobile", "?1")
+            .add("user-agent", WEBVIEW_UA)
+            .add("sec-ch-ua-platform", "\"Android\"")
+            .add("accept", "*/*")
+            .add("origin", "https://messages.google.com")
+            .add("sec-fetch-site", "cross-site")
+            .add("sec-fetch-mode", "cors")
+            .add("sec-fetch-dest", "empty")
+            .add("referer", "https://messages.google.com/")
+            .add("accept-language", "en-US,en;q=0.9")
+            .add("cookie", cookies)
+        val sapisid = SapisidHash.extractSapisid(cookies)
+        if (sapisid != null) {
+            builder.add("authorization", SapisidHash.authorizationValue(sapisid, nowSec = nowSec))
+        }
+        return builder.build()
+    }
+
     fun headers(contentType: String, userAgent: String = UA): Headers = Headers.Builder()
         .add("x-goog-api-key", API_KEY)
         .add("x-user-agent", "grpc-web-javascript/0.1")
@@ -106,9 +155,36 @@ suspend fun postRpc(
 }
 
 /**
- * Cancellable POST: coroutine cancellation aborts the in-flight HTTP call
- * immediately (instead of waiting out the socket timeout). The pairing flow
- * uses this so backing out mid-pairing is prompt.
+ * Cancellable POST with a fully-specified header set (used by SignInGaia,
+ * which carries the complete browser-faithful header set from
+ * [RelayApi.signInGaiaHeaders]). Coroutine cancellation aborts the
+ * in-flight HTTP call immediately (instead of waiting out the socket
+ * timeout).
+ */
+suspend fun postRpcCancellable(
+    client: OkHttpClient,
+    url: String,
+    headers: Headers,
+    body: ByteArray,
+): RpcResult {
+    return withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(url)
+            .headers(headers)
+            .post(body.toRequestBody(RelayApi.CT_PBLITE.toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val bytes = resp.body!!.bytes()
+            RpcResult(resp.code, bytes, bytes.toString(Charsets.UTF_8))
+        }
+    }
+}
+
+/**
+ * Cancellable POST with the standard relay header set ([RelayApi.headers]).
+ * Coroutine cancellation aborts the in-flight HTTP call immediately
+ * (instead of waiting out the socket timeout). The pairing flows use this
+ * so backing out mid-pairing is prompt.
  */
 suspend fun postRpcCancellable(
     client: OkHttpClient,

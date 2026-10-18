@@ -1,7 +1,6 @@
 package com.garrietta.relay.ui.settings
 
 import android.app.Activity
-import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -64,21 +63,15 @@ class SettingsViewModel(
     }
 
     /**
-     * Request the default-SMS role. Uses RoleManager on API 29+ (official API,
-     * gives a result callback) with the legacy ACTION_CHANGE_DEFAULT intent as
-     * fallback. Must be called with an Activity — RoleManager.requestRole
-     * requires one, and the fallback intent is cleaner from an Activity too.
+     * Request the default-SMS role via ACTION_CHANGE_DEFAULT — the documented,
+     * universal mechanism (works on all API levels).
+     * Must be called with an Activity (not an application context) so the
+     * system role-request dialog can attach correctly.
      */
     fun requestDefaultSmsRole(activity: Activity) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val rm = activity.getSystemService(RoleManager::class.java)
-            if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_SMS) &&
-                !rm.isRoleHeld(RoleManager.ROLE_SMS)
-            ) {
-                rm.requestRole(RoleManager.ROLE_SMS, activity)
-                return
-            }
-        }
+        // ACTION_CHANGE_DEFAULT is the documented, universal way to request
+        // the default-SMS role (works on all API levels; RoleManager.requestRole
+        // is not a public API for this). State refreshes via onResume().
         val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
             putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, activity.packageName)
         }

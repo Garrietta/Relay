@@ -265,6 +265,9 @@ fun encodeReceiveMessagesRequest(requestId: String, tachyonToken: ByteArray): St
     val cfg = ConfigVersion.CURRENT
     val auth = msgArr(
         1 to PValue.Str(requestId),
+        // Field 3 (network): the reference sends "GDitto" for Google-account
+        // sessions (AuthData.AuthNetwork()); omitting it is a deviation.
+        3 to PValue.Str("GDitto"),
         6 to PValue.Bytes(tachyonToken),
         7 to msgArr(
             3 to PValue.Num(cfg.year.toLong()),

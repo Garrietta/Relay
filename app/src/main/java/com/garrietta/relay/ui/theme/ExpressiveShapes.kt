@@ -24,10 +24,11 @@ import kotlin.math.sin
  * the ovals, pills, fans and cookies. True MaterialShapes need the SDK 37 /
  * AGP 9.x toolchain; these are faithful hand-rolled approximations.
  *
- * UNIFORM HEIGHT: every shape is fitted so its visual height always equals
- * the layout height, with its ORIGINAL proportions kept (uniform scale —
- * a skinny shape stays skinny, just at the common height). [aspectRatio]
- * reports the natural width/height so avatar containers size themselves as
+ * UNIFORM FIT: every shape is drawn with a uniform scale that fits its
+ * reference path inside the layout (largest scale fitting both dimensions,
+ * centered) — the shape always renders at its EXACT designed aspect ratio,
+ * never stretched, squashed, or overflowing its box. [aspectRatio] reports
+ * the natural width/height so avatar containers size themselves as
  * height=H, width=H*aspect. Reference paths are built lazily so unit tests
  * (no Android framework) can load the vocabulary.
  *
@@ -61,7 +62,9 @@ private const val REF_R = 100f
 /**
  * Builds one vocabulary shape's reference path: rounded polygon (or star),
  * rotated / non-uniformly scaled per the sheet, centered on the origin.
- * The path is fitted to the layout at draw time (uniform height fit).
+ * The path is fitted uniformly inside the layout at draw time (see
+ * [addFitted]) — the non-uniform scale here is part of the DESIGNED shape,
+ * never a distortion of it.
  */
 private fun m3eReferencePath(
     numVertices: Int,
@@ -114,20 +117,23 @@ private fun modulatedBlobReferencePath(waves: Int, amplitude: Float): android.gr
 }
 
 /**
- * Fits [ref] into [size] with a UNIFORM scale so the shape's visual height
- * always equals the layout height while its original proportions are kept.
- * The reference path is never mutated (a copy is transformed).
+ * Fits [ref] into [size] with a UNIFORM scale so the whole shape is always
+ * visible at its EXACT designed aspect ratio — the scale is the largest that
+ * fits BOTH dimensions, centered. The reference path is never mutated (a
+ * copy is transformed). This is the hard ratio lock: no matter what
+ * container a vocabulary shape lands in, it can never stretch, squash, or
+ * bleed outside its box.
  */
-private fun androidx.compose.ui.graphics.Path.addFittedByHeight(
+private fun androidx.compose.ui.graphics.Path.addFitted(
     ref: android.graphics.Path,
     size: Size,
 ) {
-    if (size.height <= 0f) return
+    if (size.height <= 0f || size.width <= 0f) return
     val src = android.graphics.Path(ref)
     val bounds = android.graphics.RectF()
     src.computeBounds(bounds, true)
-    if (bounds.height() <= 0f) return
-    val s = size.height / bounds.height()
+    if (bounds.height() <= 0f || bounds.width() <= 0f) return
+    val s = minOf(size.width / bounds.width(), size.height / bounds.height())
     val fit = android.graphics.Matrix()
     fit.setScale(s, s)
     fit.postTranslate(
@@ -155,7 +161,7 @@ private fun namedPolygon(
     var ref: android.graphics.Path? = null
     val shape: Shape = GenericShape { size, _ ->
         val r = ref ?: builder().also { ref = it }
-        addFittedByHeight(r, size)
+        addFitted(r, size)
     }
     return NamedShape(name, shape, builder)
 }
@@ -165,7 +171,7 @@ private fun namedBlob(name: String, waves: Int, amplitude: Float): NamedShape {
     var ref: android.graphics.Path? = null
     val shape: Shape = GenericShape { size, _ ->
         val r = ref ?: builder().also { ref = it }
-        addFittedByHeight(r, size)
+        addFitted(r, size)
     }
     return NamedShape(name, shape, builder)
 }
@@ -197,55 +203,3 @@ val ExpressiveAvatarShapes: List<NamedShape> = listOf(
 /** Looks up a vocabulary shape by name; falls back to the wavy blob. */
 fun expressiveShape(name: String): Shape =
     ExpressiveAvatarShapes.firstOrNull { it.name == name }?.shape ?: WavyBlobShape
-
-/**
- * Mostly-rectangle bar with SHORT pointed sides — the toned-down
- * New-conversation bar. Straight top and bottom edges; each end carries a
- * small pointed flourish extending only ~5% of the width, never sweeping
- * toward the middle. Expressive character, none of the drama.
- */
-val RibbonBarShape = GenericShape { size, _ ->
-    val w = size.width
-    val h = size.height
-    if (w <= 0f || h <= 0f) return@GenericShape
-    val tipX = w * 0.055f   // short point extent on each side
-    val topY = h * 0.14f
-    val botY = h * 0.86f
-    val r = h * 0.10f       // small corner rounding into the straight edges
-    moveTo(0f, h / 2f)                       // left tip
-    lineTo(tipX, topY + r)
-    quadraticTo(tipX, topY, tipX + r, topY)  // round into the top edge
-    lineTo(w - tipX - r, topY)               // straight top edge
-    quadraticTo(w - tipX, topY, w - tipX, topY + r)
-    lineTo(w, h / 2f)                        // right tip
-    lineTo(w - tipX, botY - r)
-    quadraticTo(w - tipX, botY, w - tipX - r, botY)
-    lineTo(tipX + r, botY)                   // straight bottom edge
-    quadraticTo(tipX, botY, tipX, botY - r)
-    close()
-}
-
-/**
- * A horizontally-stretched version of a vocabulary shape: the reference path
- * is mapped onto the FULL layout rect (non-uniform scale), so the shape's
- * points, corners and curves span the whole width with its character intact.
- * Used for the full-width New-conversation bar (stretched Clamshell).
- */
-fun stretchedExpressiveShape(name: String): Shape {
-    val named = ExpressiveAvatarShapes.firstOrNull { it.name == name } ?: return WavyBlobShape
-    return GenericShape { size, _ ->
-        if (size.width <= 0f || size.height <= 0f) return@GenericShape
-        val src = android.graphics.Path(named.referencePath)
-        val bounds = android.graphics.RectF()
-        src.computeBounds(bounds, true)
-        if (bounds.width() <= 0f || bounds.height() <= 0f) return@GenericShape
-        val fit = android.graphics.Matrix()
-        fit.setRectToRect(
-            android.graphics.RectF(bounds.left, bounds.top, bounds.right, bounds.bottom),
-            android.graphics.RectF(0f, 0f, size.width, size.height),
-            android.graphics.Matrix.ScaleToFit.FILL,
-        )
-        src.transform(fit)
-        addPath(src.asComposePath())
-    }
-}

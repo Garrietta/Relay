@@ -50,6 +50,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -107,6 +110,14 @@ class RcsSession(context: Context) {
 
     /** Completes when the long-poll channel is first established. Reset on (re)start. */
     @Volatile private var pollReady = CompletableDeferred<Unit>()
+
+    /**
+     * Latest long-poll failure detail (HTTP code + body snippet, or the
+     * exception message). Set on every failed poll attempt; read by
+     * [sendGaia] if the channel never establishes, so the UI/logcat show the
+     * UNDERLYING cause instead of a generic "never established".
+     */
+    @Volatile private var pollLastError: String? = null
 
     /**
      * Injects auth state without persisting (pairing handshake: the provisional
@@ -255,6 +266,7 @@ class RcsSession(context: Context) {
         gaiaCookies = cookies
         if (scope == null) {
             pollReady = CompletableDeferred()
+            pollLastError = null
             val s = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             scope = s
             s.launch { pollLoop() }
@@ -263,7 +275,9 @@ class RcsSession(context: Context) {
         try {
             withTimeout(15_000) { pollReady.await() }
         } catch (e: TimeoutCancellationException) {
-            throw RcsException("long-poll channel never established — check network/cookies")
+            val detail = pollLastError ?: "no poll attempt completed"
+            Log.w(TAG, "GaiaPairing sendGaia: long-poll channel never established ($detail)")
+            throw RcsException("long-poll channel never established ($detail)")
         }
         val requestId = UUID.randomUUID().toString()
         val rpcData = encodeOutgoingRpcDataUnencrypted(requestId, action, container, a.sessionId)
@@ -299,32 +313,167 @@ class RcsSession(context: Context) {
                 // Gaia mode: cookie-authenticated endpoints on the Gaia host,
                 // like the reference when HasCookies().
                 val cookies = gaiaCookies
-                val res = if (cookies != null) {
-                    postRpcCancellable(
-                        pollClient, RelayApi.PATH_RECEIVE_MESSAGES_GAIA,
-                        RelayApi.signInGaiaHeaders(cookies), body.toByteArray(),
-                    )
+                // The call is executed directly (not via the one-shot
+                // postRpc helper): a long-poll is a HANGING stream, so the
+                // channel counts as ESTABLISHED the moment HTTP 2xx headers
+                // arrive — like the reference's onFirstConnect ("Long polling
+                // opened"), which fires before the stream is read. Waiting
+                // for the full body (resp.body.bytes()) would block for the
+                // whole 60s+ poll window, so pollReady could never satisfy
+                // sendGaia's 15s gate (diagnosed 2026-10-18: "long-poll
+                // channel never established" on a healthy channel).
+                val req = if (cookies != null) {
+                    Request.Builder()
+                        .url(RelayApi.PATH_RECEIVE_MESSAGES_GAIA)
+                        .headers(RelayApi.signInGaiaHeaders(cookies))
+                        .post(body.toByteArray().toRequestBody(RelayApi.CT_PBLITE.toMediaType()))
+                        .build()
                 } else {
-                    postRpc(pollClient, RelayApi.PATH_RECEIVE_MESSAGES, RelayApi.CT_PBLITE, body.toByteArray())
+                    Request.Builder()
+                        .url(RelayApi.PATH_RECEIVE_MESSAGES)
+                        .headers(RelayApi.headers(RelayApi.CT_PBLITE))
+                        .post(body.toByteArray().toRequestBody(RelayApi.CT_PBLITE.toMediaType()))
+                        .build()
                 }
-                backoffMs = 500L
-                when (res.code) {
-                    401, 403, 404 -> {
-                        _events.emit(SessionEvent.AuthExpired)
-                        throw RcsException("auth expired (HTTP ${res.code}) — re-pair required")
+                pollClient.newCall(req).execute().use { resp ->
+                    backoffMs = 500L
+                    if (!resp.isSuccessful) {
+                        val snippet = runCatching { resp.body?.string() }.getOrNull()?.take(200)
+                        pollLastError = "long-poll HTTP ${resp.code}" +
+                                (if (!snippet.isNullOrBlank()) ": $snippet" else "")
+                        Log.w(TAG, "GaiaPairing $pollLastError")
+                        if (resp.code == 401 || resp.code == 403 || resp.code == 404) {
+                            _events.emit(SessionEvent.AuthExpired)
+                            throw RcsException("auth expired (HTTP ${resp.code}) — re-pair required")
+                        }
+                        throw RcsException("long-poll HTTP ${resp.code}")
                     }
+                    // 2xx headers arrived: the channel is OPEN. Signal
+                    // readiness BEFORE consuming the hanging stream.
+                    if (!pollReady.isCompleted) pollReady.complete(Unit)
+                    // Read the hanging stream INCREMENTALLY (see
+                    // readPollStream): the server flushes one pblite
+                    // LongPollingPayload per chunk and holds the poll open
+                    // ~60s. Payloads must dispatch as they arrive —
+                    // SERVER_INIT correlation depends on it.
+                    readPollStream(resp)
                 }
-                if (!res.isOk()) throw RcsException("long-poll HTTP ${res.code}")
-                if (!pollReady.isCompleted) pollReady.complete(Unit)
-                for (payload in decodeLongPollBody(res.text)) handlePayload(payload)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // HTTP failures above already recorded "long-poll HTTP <code>"
+                // (+ body snippet) in pollLastError; anything else records
+                // its own message here so sendGaia can surface the cause.
+                if (e !is RcsException) {
+                    pollLastError = "long-poll error: ${e.message ?: e.javaClass.simpleName}"
+                    Log.w(TAG, "GaiaPairing $pollLastError")
+                }
                 _events.emit(SessionEvent.PollError(e.message ?: "poll failed"))
                 delay(backoffMs)
                 backoffMs = minOf(backoffMs * 2, 60_000)
             }
         }
+    }
+
+    /**
+     * Incrementally reads a long-poll response stream, dispatching each
+     * pblite payload the moment it arrives. Framing (reference readLongPoll):
+     * the stream opens with "[[", then a comma-separated series of
+     * LongPollingPayload JSON values, then "]]" + EOF (the server holds each
+     * poll ~60s). Blocking reads run on Dispatchers.IO (this loop's
+     * dispatcher); scope cancellation interrupts the read and the outer loop
+     * exits.
+     */
+    private suspend fun readPollStream(resp: okhttp3.Response) {
+        val reader = resp.body?.charStream()?.buffered(8192) ?: return
+        val buf = StringBuilder()
+        val chunk = CharArray(32768)
+        var opened = false
+        try {
+            while (true) {
+                val n = reader.read(chunk)
+                if (n < 0) break // EOF: server closed the poll window
+                buf.append(chunk, 0, n)
+                if (!opened) {
+                    var i = 0
+                    while (i < buf.length && buf[i].isWhitespace()) i++
+                    if (buf.length - i < 2) continue // need more bytes
+                    if (buf[i] != '[' || buf[i + 1] != '[') {
+                        Log.w(TAG, "GaiaPairing long-poll: unexpected stream opening")
+                        return
+                    }
+                    buf.delete(0, i + 2)
+                    opened = true
+                }
+                while (drainOnePayload(buf)) { /* keep draining */ }
+                if (buf.startsWith("]]")) return // stream end marker
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: java.io.InterruptedIOException) {
+            // Scope cancelled mid-read — the outer loop observes it via
+            // isActive/delay and exits; no error to record.
+        } catch (e: Exception) {
+            Log.w(TAG, "GaiaPairing long-poll stream ended: ${e.message}")
+        }
+    }
+
+    /**
+     * Extracts and dispatches one complete payload from [buf] if present.
+     * Returns true when a payload was dispatched (caller keeps draining).
+     */
+    private suspend fun drainOnePayload(buf: StringBuilder): Boolean {
+        var i = 0
+        while (i < buf.length && (buf[i] == ',' || buf[i].isWhitespace())) i++
+        if (i > 0) buf.delete(0, i)
+        if (buf.isEmpty() || buf.startsWith("]]")) return false
+        val json = extractCompleteJson(buf) ?: return false
+        runCatching {
+            // Reuse the exact one-shot decode path on a single payload.
+            for (payload in decodeLongPollBody("[$json]")) handlePayload(payload)
+        }.onFailure { e ->
+            Log.w(TAG, "GaiaPairing poll payload decode failed: ${e.message}")
+        }
+        return true
+    }
+
+    /**
+     * Extracts the first complete top-level JSON value from [buf] and removes
+     * it. Bracket depth is tracked with string/escape awareness, so brackets
+     * inside strings never confuse framing.
+     */
+    private fun extractCompleteJson(buf: StringBuilder): String? {
+        var depth = 0
+        var inString = false
+        var escape = false
+        var started = false
+        for (idx in buf.indices) {
+            val c = buf[idx]
+            if (inString) {
+                when {
+                    escape -> escape = false
+                    c == '\\' -> escape = true
+                    c == '"' -> inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '[', '{' -> {
+                    depth++
+                    started = true
+                }
+                ']', '}' -> {
+                    depth--
+                    if (started && depth == 0) {
+                        val value = buf.substring(0, idx + 1)
+                        buf.delete(0, idx + 1)
+                        return value
+                    }
+                }
+            }
+        }
+        return null
     }
 
     private suspend fun handlePayload(payload: PollPayload) {

@@ -70,7 +70,6 @@ import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.CloverShape
 import com.garrietta.relay.ui.theme.ContactAvatar
-import com.garrietta.relay.ui.theme.RibbonBarShape
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
@@ -263,12 +262,11 @@ private fun CollapsingMessagesHeader(
 }
 
 /**
- * Floating "New conversation" bar — mostly a rectangle with short pointed
- * sides (RibbonBarShape): straight top/bottom edges, small pointed flourishes
- * on the left and right that never sweep toward the middle. Full width, real
- * elevation + shadow so it reads as floating above the conversation list.
- * Bouncy press-scale in the unified spring language; the densest color in
- * the scheme, per the expressive contrast rule.
+ * Floating "New conversation" bar — a plain full-width, slightly rounded
+ * rectangle (18dp corners). Real elevation + shadow so it reads as floating
+ * above the conversation list. Bouncy press-scale in the unified spring
+ * language; the densest color in the scheme, per the expressive contrast
+ * rule.
  */
 @Composable
 private fun NewConversationPill(
@@ -285,9 +283,8 @@ private fun NewConversationPill(
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        // Mostly-rectangle bar with short pointed sides — expressive
-        // character without the dramatic full-bleed eye shape.
-        shape = RibbonBarShape,
+        // Plain slightly-rounded rectangle — Garrett's call: no flourishes.
+        shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,

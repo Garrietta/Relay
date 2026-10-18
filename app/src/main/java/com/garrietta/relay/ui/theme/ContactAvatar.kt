@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
@@ -33,10 +34,11 @@ import coil.compose.AsyncImagePainter
  * [AvatarShapeAssigner] rotation (a different M3E shape per contact,
  * reshuffled every app startup). When null, [shape] is used as-is.
  *
- * UNIFORM HEIGHT: [size] is the avatar's height. With a rotation shape, the
- * container widths itself as size * shape.aspectRatio so EVERY shape renders
- * at the same visual height with its original proportions (a skinny shape
- * stays skinny, just at the common height); the photo center-crops to fit.
+ * UNIFORM HEIGHT + HARD RATIO LOCK: [size] is the avatar's height. With a
+ * rotation shape, the avatar is drawn at the shape's full natural size
+ * (height × height×aspectRatio, uniform scale — the shape's exact designed
+ * ratio, never distorted), center-cropped to at most 1.25x the height so
+ * wide shapes can't become lozenges; the photo center-crops to fit.
  * Explicit [shape] avatars keep a square box.
  *
  * When a photo IS present, it also feeds the per-contact Palette theming
@@ -60,8 +62,14 @@ fun ContactAvatar(
         null
     }
     val resolvedShape = namedShape?.shape ?: shape
-    // Same height for every shape; width follows the shape's nature.
+    // Same height for every shape; width follows the shape's nature —
+    // HARD RATIO LOCK: the shape is always drawn at its full natural size
+    // (uniform scale, exact designed aspect — never distorted), and any
+    // width beyond 1.25x the height is center-CROPPED, so genuinely wide
+    // shapes (Pill, Clamshell) can't become lozenges.
     val aspect = namedShape?.aspectRatio ?: 1f
+    val fullWidth = size * aspect
+    val visibleWidth = minOf(fullWidth, size * MAX_AVATAR_ASPECT)
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(
@@ -71,41 +79,55 @@ fun ContactAvatar(
         )
         palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
     }
+    // Outer box = the visible slot (cropped to the max width); inner box =
+    // the shape's full natural size. The caller's modifier (shared-element,
+    // press scale, cluster offsets) lands on the visible slot.
     Box(
         modifier = modifier
             .height(size)
-            .width(size * aspect)
-            .clip(resolvedShape)
-            .background(bg),
+            .width(visibleWidth)
+            .clipToBounds(),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            style = textStyle,
-            color = fg,
-        )
-        if (photoUri != null) {
-            // Expressive loading state: the seven-shape loop while the
-            // photo resolves, instead of a spinner or a blank blob.
-            var imgState by remember(photoUri) {
-                mutableStateOf<AsyncImagePainter.State>(AsyncImagePainter.State.Empty)
-            }
-            AsyncImage(
-                model = photoUri,
-                contentDescription = "Profile photo for $name",
-                onState = { imgState = it },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(resolvedShape),
-                contentScale = ContentScale.Crop,
+        Box(
+            modifier = Modifier
+                .height(size)
+                .width(fullWidth)
+                .clip(resolvedShape)
+                .background(bg),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                style = textStyle,
+                color = fg,
             )
-            if (imgState is AsyncImagePainter.State.Loading) {
-                SevenShapeLoadingIndicator(
-                    diameter = size * 0.45f,
-                    color = fg,
+            if (photoUri != null) {
+                // Expressive loading state: the seven-shape loop while the
+                // photo resolves, instead of a spinner or a blank blob.
+                var imgState by remember(photoUri) {
+                    mutableStateOf<AsyncImagePainter.State>(AsyncImagePainter.State.Empty)
+                }
+                AsyncImage(
+                    model = photoUri,
+                    contentDescription = "Profile photo for $name",
+                    onState = { imgState = it },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(resolvedShape),
+                    contentScale = ContentScale.Crop,
                 )
+                if (imgState is AsyncImagePainter.State.Loading) {
+                    SevenShapeLoadingIndicator(
+                        diameter = size * 0.45f,
+                        color = fg,
+                    )
+                }
             }
         }
     }
 }
+
+/** Avatars are never wider than 1.25x their height — wider shapes center-crop. */
+private const val MAX_AVATAR_ASPECT = 1.25f
 

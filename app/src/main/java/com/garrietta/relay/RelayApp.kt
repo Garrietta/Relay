@@ -30,6 +30,13 @@ class RelayApp : Application() {
         // Fresh avatar-shape variety on every cold start (Garrett: shapes
         // "maybe even changing shape on each startup").
         AvatarShapeAssigner.reshuffle()
+        // RCS: when paired, make sure the session is up on cold start.
+        // RcsTransport is lazy — touching it runs init, which starts the
+        // session when a pairing exists — and the foreground service keeps
+        // the long-poll alive under Doze.
+        if (rcsTransport.isPairedNow) {
+            com.garrietta.relay.rcs.service.RcsService.start(this)
+        }
     }
 }
 

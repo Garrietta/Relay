@@ -105,6 +105,8 @@ fun ChatScreen(
     threadId: Long,
     threadIds: List<Long>,
     transportLabel: String = "SMS",
+    /** Server conversation id for RCS rows (paired mode); null = Telephony. */
+    rcsConversationId: String? = null,
     onBack: () -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()

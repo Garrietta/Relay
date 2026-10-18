@@ -22,6 +22,11 @@ class ChatViewModel(
     private val threadIds: List<Long> = listOf(threadId),
     /** Recipient address — used to re-resolve threads if the ID key goes stale. */
     private val address: String = "",
+    /**
+     * Server conversation id for RCS rows (paired mode). When set, message
+     * loads/sends go through the RCS session, never the Telephony provider.
+     */
+    private val rcsConversationId: String? = null,
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())

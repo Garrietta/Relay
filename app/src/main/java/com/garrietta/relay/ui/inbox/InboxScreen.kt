@@ -84,9 +84,7 @@ import java.util.Locale
 @Composable
 fun InboxScreen(
     viewModel: InboxViewModel,
-    isDefaultSmsApp: Boolean,
     userMessages: SharedFlow<String>,
-    onRequestDefaultSms: () -> Unit,
     onOpenChat: (Conversation) -> Unit,
     onOpenSettings: () -> Unit,
     onNewConversation: () -> Unit,
@@ -134,9 +132,6 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                if (!isDefaultSmsApp) {
-                    DefaultSmsBanner(onRequestDefaultSms)
-                }
                 // Search — soft pill, expressive radius.
                 OutlinedTextField(
                     value = query,
@@ -319,46 +314,6 @@ private fun NewConversationPill(
 }
 
 @Composable
-private fun DefaultSmsBanner(onRequest: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(28.dp))
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .clickable(onClick = onRequest)
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "Make Relay your texting app",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-            Text(
-                "Set as default to send and receive SMS & MMS.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-        }
-        Text(
-            "Set default",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            // Belt-and-suspenders: the whole banner Row is clickable, and the
-            // label itself is an explicit button-role target too.
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(
-                    role = Role.Button,
-                    onClick = onRequest,
-                )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-        )
-    }
-}
 
 @Composable
 private fun EmptyInbox() {

@@ -48,16 +48,12 @@ import com.garrietta.relay.data.transport.RcsPairingState
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
-    onRequestDefaultSms: () -> Unit,
     onOpenRcsPairing: () -> Unit = {},
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val rcsState by viewModel.rcsPairingState.collectAsState()
-    val isDefault by viewModel.isDefaultSmsAppFlow.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Surface set-default failures here too — previously userMessages was only
-    // collected in the inbox, so Settings-path failures were invisible.
     LaunchedEffect(Unit) {
         viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
     }
@@ -96,13 +92,6 @@ fun SettingsScreen(
             }
 
             SettingsCard(title = "Texting", icon = Icons.Filled.Send) {
-                SettingsRow(
-                    title = "Default SMS app",
-                    subtitle = if (isDefault) "Relay handles your texts"
-                    else "Relay needs this to send & receive",
-                    actionLabel = if (isDefault) null else "Set default",
-                    onAction = if (isDefault) null else onRequestDefaultSms,
-                )
                 SettingsRow(
                     title = "Notifications",
                     subtitle = "Sounds, badges, and previews",

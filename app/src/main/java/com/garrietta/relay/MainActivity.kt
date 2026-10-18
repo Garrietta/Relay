@@ -4,7 +4,6 @@ import android.Manifest
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
-import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
@@ -13,7 +12,6 @@ import android.os.Bundle
 import android.view.animation.DecelerateInterpolator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -124,35 +122,9 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val themeMode by settingsVm.themeMode.collectAsState()
-            val isDefaultSmsApp by settingsVm.isDefaultSmsAppFlow.collectAsState()
             // App-wide persistent contact color (Item 5): the last-viewed
             // contact's seed tints the whole app until a new photo replaces it.
             val appSeed by app.appSeedStore.seed.collectAsState()
-
-            // SMS role request via the Activity Result API. The ViewModel builds
-            // the RoleManager intent; the result callback refreshes state
-            // immediately instead of waiting for onResume.
-            val roleRequestLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.StartActivityForResult()
-            ) { result ->
-                settingsVm.onSmsRoleResult(
-                    this@MainActivity,
-                    result.resultCode == Activity.RESULT_OK,
-                )
-            }
-            fun requestSmsRole() {
-                val intent = settingsVm.smsRoleRequestIntent(this@MainActivity)
-                if (intent != null) {
-                    try {
-                        roleRequestLauncher.launch(intent)
-                    } catch (_: Exception) {
-                        // Role intent didn't resolve — cascade visibly.
-                        settingsVm.openDefaultAppsSettings(this@MainActivity)
-                    }
-                } else {
-                    settingsVm.openDefaultAppsSettings(this@MainActivity)
-                }
-            }
 
             RelayTheme(themeMode = themeMode, seedColor = appSeed) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -160,15 +132,9 @@ class MainActivity : ComponentActivity() {
                     // chat when wide (unfolded Fold / tablet), single-pane
                     // backstack when narrow (folded phone).
                     if (maxWidth >= 720.dp) {
-                        RelayTwoPane(
-                            isDefaultSmsApp = isDefaultSmsApp,
-                            onRequestDefaultSms = ::requestSmsRole,
-                        )
+                        RelayTwoPane()
                     } else {
-                        RelaySinglePane(
-                            isDefaultSmsApp = isDefaultSmsApp,
-                            onRequestDefaultSms = ::requestSmsRole,
-                        )
+                        RelaySinglePane()
                     }
                 }
             }
@@ -182,10 +148,7 @@ class MainActivity : ComponentActivity() {
      */
     @OptIn(ExperimentalSharedTransitionApi::class)
     @Composable
-    private fun RelaySinglePane(
-        isDefaultSmsApp: Boolean,
-        onRequestDefaultSms: () -> Unit,
-    ) {
+    private fun RelaySinglePane() {
         val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
         var navForward by remember { mutableStateOf(true) }
         fun push(s: Screen) {
@@ -242,11 +205,9 @@ class MainActivity : ComponentActivity() {
                             )
                             InboxScreen(
                                 viewModel = inboxVm,
-                                isDefaultSmsApp = isDefaultSmsApp,
                                 userMessages = settingsVm.userMessages,
-                                onRequestDefaultSms = onRequestDefaultSms,
                                 onOpenChat = {
-                                    push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds, it.transportLabel))
+                                    push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds, it.transportLabel, it.rcsConversationId))
                                 },
                                 onOpenSettings = { push(Screen.Settings) },
                                 onNewConversation = { push(Screen.NewConversation) },
@@ -255,7 +216,7 @@ class MainActivity : ComponentActivity() {
                         is Screen.Chat -> {
                             val chatVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address),
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId),
                             )
                             ChatScreen(
                                 viewModel = chatVm,
@@ -264,6 +225,7 @@ class MainActivity : ComponentActivity() {
                                 threadId = screen.threadId,
                                 threadIds = screen.threadIds,
                                 transportLabel = screen.transportLabel,
+                                rcsConversationId = screen.rcsConversationId,
                                 onBack = ::pop,
                             )
                         }
@@ -271,7 +233,6 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 viewModel = settingsVm,
                                 onBack = ::pop,
-                                onRequestDefaultSms = onRequestDefaultSms,
                                 onOpenRcsPairing = { push(Screen.RcsPairing) },
                             )
                         }
@@ -307,10 +268,7 @@ class MainActivity : ComponentActivity() {
      */
     @OptIn(ExperimentalSharedTransitionApi::class)
     @Composable
-    private fun RelayTwoPane(
-        isDefaultSmsApp: Boolean,
-        onRequestDefaultSms: () -> Unit,
-    ) {
+    private fun RelayTwoPane() {
         var selected by remember { mutableStateOf<Conversation?>(null) }
         var showSettings by remember { mutableStateOf(false) }
         var showNewConversation by remember { mutableStateOf(false) }
@@ -343,9 +301,7 @@ class MainActivity : ComponentActivity() {
                         )
                         InboxScreen(
                             viewModel = inboxVm,
-                            isDefaultSmsApp = isDefaultSmsApp,
                             userMessages = settingsVm.userMessages,
-                            onRequestDefaultSms = onRequestDefaultSms,
                             onOpenChat = { selected = it },
                             onOpenSettings = { showSettings = true },
                             onNewConversation = { showNewConversation = true },
@@ -375,7 +331,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val chatVm: ChatViewModel = viewModel(
                                         key = "chat_${convo.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds, convo.address),
+                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds, convo.address, convo.rcsConversationId),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
@@ -384,6 +340,7 @@ class MainActivity : ComponentActivity() {
                                         threadId = convo.threadId,
                                         threadIds = convo.threadIds,
                                         transportLabel = convo.transportLabel,
+                                        rcsConversationId = convo.rcsConversationId,
                                         onBack = { selected = null },
                                     )
                                 }
@@ -419,7 +376,6 @@ class MainActivity : ComponentActivity() {
             SettingsScreen(
                 viewModel = settingsVm,
                 onBack = { showSettings = false },
-                onRequestDefaultSms = onRequestDefaultSms,
                 onOpenRcsPairing = { showRcsPairing = true },
             )
         }
@@ -475,15 +431,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         app.repository.refresh()
-        // Refresh so the "Set default" banner disappears right after the grant.
-        settingsVm.refreshDefaultSmsState()
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        // The system role dialog is a floating system window: this activity may
-        // never go through onResume when it's dismissed, so refresh on focus too.
-        if (hasFocus) settingsVm.refreshDefaultSmsState()
     }
 
     /**
@@ -555,8 +502,6 @@ class MainActivity : ComponentActivity() {
         val needed = mutableListOf(
             Manifest.permission.READ_SMS,
             Manifest.permission.SEND_SMS,
-            Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.RECEIVE_MMS,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.GET_ACCOUNTS,
         )
@@ -584,10 +529,11 @@ private class ChatViewModelFactory(
     private val threadId: Long,
     private val threadIds: List<Long> = listOf(threadId),
     private val address: String = "",
+    private val rcsConversationId: String? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(repo, appSeedStore, threadId, threadIds, address) as T
+        ChatViewModel(repo, appSeedStore, threadId, threadIds, address, rcsConversationId) as T
 }
 
 private class SettingsViewModelFactory(

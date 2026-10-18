@@ -15,12 +15,13 @@ import kotlinx.coroutines.withContext
 /**
  * SMS/MMS transport over public Android APIs.
  *
- * Sending: [SmsManager] (multipart-aware). Sent messages are written to the
- * SMS provider so the conversation list stays consistent — required behavior
- * for the default SMS app.
+ * Sending: [SmsManager] (multipart-aware). Writing sent messages to the SMS
+ * provider is best-effort — only the default SMS app may write there, and
+ * Relay is deliberately NOT the default (Google Messages keeps that role).
  *
- * Receiving: [com.garrietta.relay.sms.SmsDeliverReceiver] parses PDUs, writes
- * to the provider, and emits into [incoming]; this transport just exposes it.
+ * Receiving: incoming SMS/MMS arrives in Google Messages (the default app);
+ * Relay reads the provider read-only (READ_SMS) as the unpaired fallback.
+ * When RCS-paired, the server sync is the single source of truth instead.
  */
 class SmsTransport(private val context: Context) : Transport {
 

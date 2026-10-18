@@ -59,6 +59,9 @@ class RcsTransport(context: Context) : Transport {
     /** Human-readable pairing state for the Settings screen. */
     val pairingState: Flow<RcsPairingState> = _pairingState.asStateFlow()
 
+    /** Synchronous paired check (cold-start wiring, repository branching). */
+    val isPairedNow: Boolean get() = _pairingState.value == RcsPairingState.PAIRED
+
     override val isAvailable: Flow<Boolean> = _pairingState.map { it == RcsPairingState.PAIRED }
 
     private val _incoming = MutableSharedFlow<IncomingMessage>(extraBufferCapacity = 64)

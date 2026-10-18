@@ -15,6 +15,8 @@ sealed interface Screen {
         val threadIds: List<Long> = listOf(threadId),
         /** Transport of the conversation's latest message ("SMS"/"MMS"). */
         val transportLabel: String = "SMS",
+        /** Server conversation id for RCS rows (paired mode); null = Telephony. */
+        val rcsConversationId: String? = null,
     ) : Screen
     data object Settings : Screen
     data object NewConversation : Screen

@@ -117,14 +117,6 @@ class AuthStore(context: Context) {
         prefs.edit().clear().apply()
     }
 
-    /** Persists Google session cookies (Gaia pairing). Encrypted at rest. */
-    fun saveCookies(cookies: String) {
-        putEncrypted("gaia_cookies", cookies.toByteArray(Charsets.UTF_8))
-    }
-
-    fun loadCookies(): String? =
-        getEncrypted("gaia_cookies")?.toString(Charsets.UTF_8)
-
     companion object {
         private const val KEY_ALIAS = "relay_rcs_master"
 

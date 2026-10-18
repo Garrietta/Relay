@@ -78,35 +78,3 @@ suspend fun postRpc(
         RpcResult(resp.code, bytes, bytes.toString(Charsets.UTF_8))
     }
 }
-
-/**
- * Cancellable POST: coroutine cancellation aborts the in-flight HTTP call
- * immediately (instead of waiting out the socket timeout). The pairing flow
- * uses this so backing out mid-pairing is prompt.
- */
-suspend fun postRpcCancellable(
-    client: OkHttpClient,
-    url: String,
-    contentType: String,
-    body: ByteArray,
-    onCall: (okhttp3.Call) -> Unit = {},
-): RpcResult = withContext(Dispatchers.IO) {
-    kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-        val req = Request.Builder()
-            .url(url)
-            .headers(RelayApi.headers(contentType))
-            .post(body.toRequestBody(contentType.toMediaType()))
-            .build()
-        val call = client.newCall(req)
-        onCall(call)
-        cont.invokeOnCancellation { call.cancel() }
-        try {
-            call.execute().use { resp ->
-                val bytes = resp.body!!.bytes()
-                cont.resume(RpcResult(resp.code, bytes, bytes.toString(Charsets.UTF_8)))
-            }
-        } catch (e: Exception) {
-            cont.resumeWithException(e)
-        }
-    }
-}

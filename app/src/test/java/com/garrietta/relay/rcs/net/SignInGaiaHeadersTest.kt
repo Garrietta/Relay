@@ -11,7 +11,7 @@ import org.junit.Test
  * exact-header-replication round). The device 401 persisted after the
  * endpoint fix + SAPISIDHASH + UA alignment because the request was still
  * missing the browser-faithful headers the official web client sends
- * (sec-fetch-*, accept-language, accept: */*, referer) and carried a
+ * (sec-fetch-*, accept-language, accept-all, referer) and carried a
  * sec-ch-ua claiming a different Chrome version than the User-Agent.
  *
  * Values of secret headers (cookie, authorization) are asserted by

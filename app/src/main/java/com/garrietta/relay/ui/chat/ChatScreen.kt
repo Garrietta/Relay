@@ -444,7 +444,7 @@ private fun Composer(
                 if (sending) {
                     // Expressive sending state: the seven-shape loop.
                     SevenShapeLoadingIndicator(
-                        size = 26.dp,
+                        diameter = 26.dp,
                         color = MaterialTheme.colorScheme.primary,
                     )
                 } else {

@@ -38,7 +38,7 @@ import androidx.graphics.shapes.transformed
 @Composable
 fun SevenShapeLoadingIndicator(
     modifier: Modifier = Modifier,
-    size: Dp = 32.dp,
+    diameter: Dp = 32.dp,
     color: Color = MaterialTheme.colorScheme.primary,
     morphMillis: Int = 380,
 ) {
@@ -55,8 +55,10 @@ fun SevenShapeLoadingIndicator(
 
     Box(
         modifier
-            .size(size)
+            .size(diameter)
             .drawWithCache {
+                // `size` here is CacheDrawScope.size (pixels) — the layout
+                // is square by construction, so center the shapes on it.
                 val r = size.minDimension / 2f
                 val cx = size.width / 2f
                 val cy = size.height / 2f

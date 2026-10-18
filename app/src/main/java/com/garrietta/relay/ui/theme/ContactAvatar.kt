@@ -79,7 +79,7 @@ fun ContactAvatar(
             )
             if (imgState is AsyncImagePainter.State.Loading) {
                 SevenShapeLoadingIndicator(
-                    size = size * 0.45f,
+                    diameter = size * 0.45f,
                     color = fg,
                 )
             }

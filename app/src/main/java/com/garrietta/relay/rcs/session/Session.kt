@@ -14,6 +14,7 @@ import com.garrietta.relay.rcs.pblite.str
 import com.garrietta.relay.rcs.proto.PollPayload
 import com.garrietta.relay.rcs.proto.RcsConversation
 import com.garrietta.relay.rcs.proto.RcsMessage
+import com.garrietta.relay.rcs.proto.RcsParticipant
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
 import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
@@ -164,17 +165,22 @@ class RcsSession(context: Context) {
         return decodeConversationsResponse(inner)
     }
 
-    suspend fun listMessages(conversationId: String, count: Long = 50): List<RcsMessage> {
+    suspend fun listMessages(
+        conversationId: String,
+        count: Long = 50,
+        participants: List<RcsParticipant> = emptyList(),
+    ): List<RcsMessage> {
         val inner = rpc(Rpc.ACTION_LIST_MESSAGES, encodeListMessagesRequest(conversationId, count))
-        return decodeMessagesResponse(inner)
+        return decodeMessagesResponse(inner, participants)
     }
 
     /**
      * Sends a text message. Returns the tmpID used for echo correlation.
-     * Throws on transport failure.
+     * The caller may supply [tmpId] (e.g. the optimistic bubble's id) so the
+     * server echo can be matched; otherwise one is generated. Throws on
+     * transport failure.
      */
-    suspend fun sendText(conversationId: String, text: String): String {
-        val tmpId = UUID.randomUUID().toString()
+    suspend fun sendText(conversationId: String, text: String, tmpId: String = UUID.randomUUID().toString()): String {
         val inner = rpc(
             Rpc.ACTION_SEND_MESSAGE,
             encodeSendMessageRequest(conversationId, tmpId, text, forceRcs = true),

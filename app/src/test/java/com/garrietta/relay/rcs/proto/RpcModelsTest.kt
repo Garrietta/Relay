@@ -109,4 +109,69 @@ class RpcModelsTest {
         assertEquals("ack-1", ack.str(1))
         assertEquals(5L, ack.msg(2)!!.num(1))
     }
+
+    // ---------- participant parsing (field 20/21) ----------
+
+    private fun participantArr(pid: String, number: String, name: String, isMe: Boolean) =
+        msgArr(
+            1 to msgArr(2 to PValue.Str(number), 3 to PValue.Str(pid)),
+            2 to PValue.Str(name),
+            3 to PValue.Str(name),
+            6 to PValue.Bool(isMe),
+        )
+
+    @Test fun `conversation decodes participants and otherParticipantIds`() {
+        val conv = msgArr(
+            1 to PValue.Str("c1"),
+            2 to PValue.Str("Alice, Bob"),
+            10 to PValue.Bool(true),
+            20 to PValue.Arr(
+                listOf(
+                    participantArr("p-me", "+15550001111", "Me", true),
+                    participantArr("p-alice", "+15550002222", "Alice", false),
+                )
+            ),
+            21 to PValue.Arr(listOf(PValue.Str("p-alice"))),
+        )
+        val c = decodeConversation(conv.asMsg())
+        assertEquals(2, c.participants.size)
+        val alice = c.participants.first { it.participantId == "p-alice" }
+        assertEquals("+15550002222", alice.number)
+        assertEquals("Alice", alice.fullName)
+        assertEquals(false, alice.isMe)
+        assertEquals(true, c.participants.first { it.isMe }.participantId == "p-me")
+        assertEquals(listOf("p-alice"), c.otherParticipantIds)
+    }
+
+    @Test fun `message direction resolves from participant isMe`() {
+        val parts = listOf(
+            RcsParticipant("p-me", "+15550001111", "Me", "Me", true),
+            RcsParticipant("p-alice", "+15550002222", "Alice", "Alice", false),
+        )
+        val mine = msgArr(1 to PValue.Str("m1"), 9 to PValue.Str("p-me"))
+        val theirs = msgArr(1 to PValue.Str("m2"), 9 to PValue.Str("p-alice"))
+        assertEquals(true, decodeRcsMessage(mine.asMsg(), parts).fromMe)
+        assertEquals(false, decodeRcsMessage(theirs.asMsg(), parts).fromMe)
+    }
+
+    @Test fun `message direction falls back to status code`() {
+        // No participants (push path): OUTGOING_* (<100) = mine, INCOMING_* (>=100) = theirs.
+        val out = msgArr(1 to PValue.Str("m1"), 4 to msgArr(2 to PValue.Num(2)))
+        val inc = msgArr(1 to PValue.Str("m2"), 4 to msgArr(2 to PValue.Num(108)))
+        val unk = msgArr(1 to PValue.Str("m3"))
+        assertEquals(true, decodeRcsMessage(out.asMsg()).fromMe)
+        assertEquals(false, decodeRcsMessage(inc.asMsg()).fromMe)
+        assertEquals(false, decodeRcsMessage(unk.asMsg()).fromMe)
+    }
+
+    @Test fun `message decodes participantId and transport type`() {
+        val m = msgArr(
+            1 to PValue.Str("m1"),
+            9 to PValue.Str("p-alice"),
+            11 to PValue.Num(4),
+        )
+        val decoded = decodeRcsMessage(m.asMsg())
+        assertEquals("p-alice", decoded.participantId)
+        assertEquals(4, decoded.msgTransportType)
+    }
 }

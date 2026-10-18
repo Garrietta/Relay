@@ -60,7 +60,37 @@ data class RcsConversation(
     val isGroup: Boolean,
     val type: Int,
     val pinned: Boolean,
+    /** conversations.Conversation.participants (field 20). */
+    val participants: List<RcsParticipant> = emptyList(),
+    /**
+     * conversations.Conversation.otherParticipants (field 21): participant
+     * IDs excluding me — the server's own answer, no heuristics needed.
+     */
+    val otherParticipantIds: List<String> = emptyList(),
 )
+
+/**
+ * conversations.Participant: ID=1 (SmallInfo{1:type, 2:number,
+ * 3:participantID}), firstName=2, fullName=3, isMe=6.
+ */
+data class RcsParticipant(
+    val participantId: String,
+    val number: String,
+    val firstName: String,
+    val fullName: String,
+    val isMe: Boolean,
+)
+
+fun decodeRcsParticipant(m: Map<Int, PValue>): RcsParticipant {
+    val id = m.msg(1)
+    return RcsParticipant(
+        participantId = id?.str(3).orEmpty(),
+        number = id?.str(2).orEmpty(),
+        firstName = m.str(2).orEmpty(),
+        fullName = m.str(3).orEmpty(),
+        isMe = m.bool(6) ?: false,
+    )
+}
 
 data class RcsMessage(
     val id: String,
@@ -70,6 +100,10 @@ data class RcsMessage(
     val fromMe: Boolean,
     val status: Int,
     val tmpId: String,
+    /** conversations.Message.participantID (field 9): the sender. */
+    val participantId: String = "",
+    /** conversations.Message.type (field 11): 1=sms, 2/3=mms, 4=rcs. */
+    val msgTransportType: Int = 0,
 )
 
 // ---------- outgoing envelope ----------
@@ -392,23 +426,54 @@ private fun decodeMessageInfo(m: Map<Int, PValue>): String? {
     return null
 }
 
-fun decodeRcsMessage(m: Map<Int, PValue>, fallbackFromMe: Boolean = false): RcsMessage {
+fun decodeRcsMessage(
+    m: Map<Int, PValue>,
+    participants: List<RcsParticipant> = emptyList(),
+    fallbackFromMe: Boolean = false,
+): RcsMessage {
     val infos = m.rep(10).mapNotNull { (it as? PValue.Arr)?.asMsg()?.let(::decodeMessageInfo) }
     return RcsMessage(
         id = m.str(1).orEmpty(),
         conversationId = m.str(7).orEmpty(),
         body = infos.firstOrNull().orEmpty(),
         timestampMs = m.num(5) ?: 0L,
-        fromMe = fallbackFromMe,
+        fromMe = resolveFromMe(m, participants, fallbackFromMe),
         status = m.msg(4)?.num(2)?.toInt() ?: 0,
         tmpId = m.str(12).orEmpty(),
+        participantId = m.str(9).orEmpty(),
+        msgTransportType = m.num(11)?.toInt() ?: 0,
     )
 }
 
+/**
+ * Message direction. Primary: conversations.Message.participantID (field 9)
+ * matched against the conversation's participants — Participant.isMe
+ * (field 6) is the server's own answer. Fallback when participants are
+ * unavailable (push events): the MessageStatus code — OUTGOING_* values are
+ * <100 and nonzero (2=delivered, 11=displayed), INCOMING_* are >=100
+ * (108=delivered, 109=displayed).
+ */
+fun resolveFromMe(
+    m: Map<Int, PValue>,
+    participants: List<RcsParticipant>,
+    fallback: Boolean,
+): Boolean {
+    val pid = m.str(9)
+    if (!pid.isNullOrEmpty()) {
+        participants.firstOrNull { it.participantId == pid }?.let { return it.isMe }
+    }
+    val status = m.msg(4)?.num(2)?.toInt() ?: 0
+    if (status != 0) return status < 100
+    return fallback
+}
+
 /** events.MessageEvent{2:[Message]} → messages. */
-fun decodeMessageEvent(m: Map<Int, PValue>): List<RcsMessage> =
+fun decodeMessageEvent(
+    m: Map<Int, PValue>,
+    participants: List<RcsParticipant> = emptyList(),
+): List<RcsMessage> =
     m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }
-        .map { decodeRcsMessage(it) }
+        .map { decodeRcsMessage(it, participants) }
 
 /** events.UpdateEvents oneof{2:conversationEvent, 3:messageEvent, 4:typingEvent}. */
 sealed interface UpdateEvent {
@@ -446,6 +511,10 @@ fun decodeConversation(m: Map<Int, PValue>): RcsConversation {
         isGroup = m.bool(10) ?: false,
         type = m.num(22)?.toInt() ?: 0,
         pinned = m.bool(26) ?: false,
+        participants = m.rep(20)
+            .mapNotNull { (it as? PValue.Arr)?.asMsg() }
+            .map(::decodeRcsParticipant),
+        otherParticipantIds = m.rep(21).mapNotNull { (it as? PValue.Str)?.v },
     )
 }
 
@@ -456,9 +525,13 @@ fun decodeConversationsResponse(pbliteBody: String): List<RcsConversation> {
 }
 
 /** client.ListMessagesResponse{2:[Message]} → messages. */
-fun decodeMessagesResponse(pbliteBody: String): List<RcsMessage> {
+fun decodeMessagesResponse(
+    pbliteBody: String,
+    participants: List<RcsParticipant> = emptyList(),
+): List<RcsMessage> {
     val m = Pblite.decode(pbliteBody)
-    return m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }.map { decodeRcsMessage(it) }
+    return m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }
+        .map { decodeRcsMessage(it, participants) }
 }
 
 /** client.SendMessageResponse{3:status}. */

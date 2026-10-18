@@ -91,7 +91,7 @@ suspend fun postRpcCancellable(
     body: ByteArray,
     onCall: (okhttp3.Call) -> Unit = {},
 ): RpcResult = withContext(Dispatchers.IO) {
-    kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+    kotlinx.coroutines.suspendCancellableCoroutine<RpcResult> { cont ->
         val req = Request.Builder()
             .url(url)
             .headers(RelayApi.headers(contentType))

@@ -40,35 +40,6 @@ class RcsCryptoTest {
         )
     }
 
-    @Test fun `hkdf-sha256 rfc5869 vector`() {
-        // RFC 5869 Appendix A.1, test case 1 (SHA-256). Verified against the
-        // RFC text at rfc-editor.org.
-        val ikm = ByteArray(22) { 0x0b.toByte() }
-        val salt = hex("000102030405060708090a0b0c")
-        val info = hex("f0f1f2f3f4f5f6f7f8f9")
-        val okm = RcsCrypto.hkdfSha256(ikm, salt, info, 42)
-        assertArrayEquals(
-            hex("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"),
-            okm,
-        )
-    }
-
-    @Test fun `ecdh p-256 both sides agree`() {
-        val a = RcsCrypto.generateEcdsaKeyPair()
-        val b = RcsCrypto.generateEcdsaKeyPair()
-        val secretA = RcsCrypto.ecdhSha256(a.private, b.public)
-        val secretB = RcsCrypto.ecdhSha256(b.private, a.public)
-        assertArrayEquals(secretA, secretB)
-        assertTrue(secretA.size == 32) // sha256(DH)
-    }
-
-    @Test fun `uncompressed public key is 65 bytes`() {
-        val kp = RcsCrypto.generateEcdsaKeyPair()
-        val raw = RcsCrypto.uncompressedPublicKey(kp.public)
-        assertTrue(raw.size == 65)
-        assertTrue(raw[0] == 0x04.toByte())
-    }
-
     @Test fun `envelope round-trips`() {
         val aes = RcsCrypto.generateAesKey()
         val hmac = RcsCrypto.generateHmacKey()

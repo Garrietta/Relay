@@ -41,13 +41,14 @@ class RcsCryptoTest {
     }
 
     @Test fun `hkdf-sha256 rfc5869 vector`() {
-        // RFC 5869 test case 1 (SHA-256).
+        // RFC 5869 Appendix A.1, test case 1 (SHA-256). Verified against the
+        // RFC text at rfc-editor.org.
         val ikm = ByteArray(22) { 0x0b.toByte() }
         val salt = hex("000102030405060708090a0b0c")
         val info = hex("f0f1f2f3f4f5f6f7f8f9")
         val okm = RcsCrypto.hkdfSha256(ikm, salt, info, 42)
         assertArrayEquals(
-            hex("3cb25f25faacd57a90471f842d4f73d0c2f645484f032dc7458b5b69b5d"),
+            hex("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"),
             okm,
         )
     }

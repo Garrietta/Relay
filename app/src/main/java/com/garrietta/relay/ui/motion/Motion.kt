@@ -161,16 +161,24 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
 
         put(
             MotionKind.BACKWARD,
-            (slideInHorizontally(t.move) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
-                fadeIn(
-                    tween(
-                        M3Duration.FADE_IN,
-                        delayMillis = M3Duration.FADE_OUT,
-                        easing = M3Easing.EmphasizedDecelerate,
-                    ),
-                )) togetherWith
-                (slideOutHorizontally(t.move) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
-                    fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))),
+            // Pop: the exiting screen fades and shrinks WITHIN its bounds
+            // (already clipped to its container) — no horizontal slide, so
+            // its content can never sweep across the incoming destination.
+            // The inbox fades in beneath it.
+            fadeIn(
+                tween(
+                    M3Duration.FADE_IN,
+                    easing = M3Easing.EmphasizedDecelerate,
+                ),
+            ) togetherWith
+                (fadeOut(tween(150, easing = M3Easing.Standard)) +
+                    scaleOut(
+                        tween(
+                            M3Duration.Short4,
+                            easing = M3Easing.EmphasizedDecelerate,
+                        ),
+                        targetScale = 0.96f,
+                    )),
         )
     }
 
@@ -208,6 +216,17 @@ val LocalSharedTransitionScope = staticCompositionLocalOf<SharedTransitionScope?
 /** AnimatedVisibilityScope for the current destination; provided by the nav root. */
 val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
+/**
+ * Navigation direction for the current transition, provided by the nav root.
+ * Shared-element morphs run on push only: on pop the shared bounds are
+ * disabled so the exiting screen fades and shrinks within its own bounds —
+ * nothing from the exiting screen may draw above the incoming one (the
+ * transition overlay always renders above both destinations). Defaults to
+ * true so surfaces outside the single-pane backstack (two-pane detail,
+ * previews) keep the morph behavior.
+ */
+val LocalNavForward = staticCompositionLocalOf { true }
+
 /** Namespaced keys prevent duplicate-key collisions across features. */
 object SharedElementKeys {
     fun conversation(id: Any?): String = "conversation/$id"
@@ -229,6 +248,10 @@ fun Modifier.motionSharedBounds(
     shape: Shape? = null,
     scaleToFit: ContentScale? = null,
 ): Modifier {
+    // No shared morph on pop: the transition overlay renders above both
+    // destinations, so a morphing exiting screen would draw over the
+    // incoming one (e.g. thread text ghosting over the inbox pill).
+    if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()
@@ -280,6 +303,7 @@ fun Modifier.motionSharedBounds(
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.motionSharedElement(key: String, shape: Shape? = null): Modifier {
+    if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()

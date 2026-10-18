@@ -12,6 +12,8 @@ import kotlinx.coroutines.launch
 class ChatViewModel(
     private val repository: UnifiedInboxRepository,
     private val threadId: Long,
+    /** All provider threads merged into this conversation (see Screen.Chat). */
+    private val threadIds: List<Long> = listOf(threadId),
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
@@ -71,8 +73,9 @@ class ChatViewModel(
 
     fun reload() {
         viewModelScope.launch {
-            _messages.value = repository.loadMessages(activeThreadId)
-            if (activeThreadId >= 0) repository.markThreadRead(activeThreadId)
+            // Merged conversations load the full history across thread_ids.
+            _messages.value = repository.loadMessages(threadIds)
+            if (activeThreadId >= 0) repository.markThreadRead(threadIds)
         }
     }
 

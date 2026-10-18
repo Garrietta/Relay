@@ -31,6 +31,23 @@ import kotlinx.coroutines.withContext
 private const val TAG = "UnifiedInbox"
 
 /**
+ * One provider thread row before inbox merging. The provider splits SMS and
+ * MMS into separate thread_ids when address formatting differs; [recipients]
+ * (normalized distinct addresses) distinguishes 1:1 threads (mergeable) from
+ * group threads (never merged).
+ */
+private data class RawThread(
+    val threadId: Long,
+    val address: String,
+    val recipients: Set<String>,
+    val date: Long,
+    val snippet: String,
+    val unread: Boolean,
+    val messageCount: Int,
+    val transportLabel: String,
+)
+
+/**
  * Merges all [Transport]s into one chronological unified inbox.
  *
  * Conversation/message reads go through the Telephony providers
@@ -117,9 +134,14 @@ class UnifiedInboxRepository(
      * Telephony.Threads URI; the `simple` flag is honored by AOSP's
      * MmsSmsProvider. Note its `snippet` column comes back blank for MMS
      * threads on Samsung's provider, hence the [fallbackSnippet] below.
+     *
+     * 1:1 threads that resolve to the same normalized address are MERGED
+     * into one Conversation (the provider splits SMS and MMS into separate
+     * thread_ids when address formatting differs, e.g. "+15551234567" vs
+     * "5551234567"). Group (multi-recipient) threads are never merged.
      */
     suspend fun loadConversations(): List<Conversation>? = withContext(Dispatchers.IO) {
-        val out = mutableListOf<Conversation>()
+        val raw = mutableListOf<RawThread>()
         try {
             val uri = Uri.parse("content://mms-sms/conversations?simple=true")
             val projection = arrayOf("_id", "date", "message_count", "snippet", "read")
@@ -148,17 +170,16 @@ class UnifiedInboxRepository(
                     }
                     val providerSnippet = if (snippetI >= 0) c.getString(snippetI).orEmpty() else ""
                     val snippet = providerSnippet.ifBlank { fallbackSnippet(threadId) }
-                    out.add(
-                        Conversation(
+                    raw.add(
+                        RawThread(
                             threadId = threadId,
                             address = address,
-                            displayName = contactLookup.displayName(address),
-                            snippet = snippet,
+                            recipients = threadRecipients(threadId),
                             date = if (dateI >= 0) c.getLong(dateI) else 0L,
+                            snippet = snippet,
                             unread = !(readI >= 0 && c.getInt(readI) == 1),
                             messageCount = if (countI >= 0) c.getInt(countI) else 0,
                             transportLabel = if (looksLikeMmsThread(threadId)) "MMS" else "SMS",
-                            photoUri = contactLookup.photoUri(address),
                         )
                     )
                 }
@@ -177,21 +198,162 @@ class UnifiedInboxRepository(
             Log.w(TAG, "loadConversations: query failed", e)
             return@withContext null
         }
-        out
+        mergeThreads(raw).sortedByDescending { it.date }
     }
 
-    suspend fun loadMessages(threadId: Long): List<Message> = withContext(Dispatchers.IO) {
+    /**
+     * Merges 1:1 threads that resolve to the same normalized address into a
+     * single [Conversation]. Group (multi-recipient) threads are never merged
+     * with anything — they keep their own row. Threads whose address can't be
+     * normalized to a real phone number (short codes, alphanumeric senders)
+     * are never merged either.
+     */
+    private fun mergeThreads(raw: List<RawThread>): List<Conversation> {
+        val singles = raw.filter { it.recipients.size <= 1 }
+        val groups = raw.filter { it.recipients.size > 1 }
+        // Bucket mergeable 1:1 threads by normalized address; anything that
+        // doesn't normalize to a real number keeps its own bucket.
+        val buckets = mutableMapOf<String, MutableList<RawThread>>()
+        val unmerged = mutableListOf<RawThread>()
+        for (t in singles) {
+            val key = mergeKey(t.address)
+            if (key == null) unmerged.add(t)
+            else buckets.getOrPut(key) { mutableListOf() }.add(t)
+        }
+        val out = mutableListOf<Conversation>()
+        for (bucket in buckets.values) out.add(mergeBucket(bucket))
+        for (t in unmerged) out.add(t.toConversation(listOf(t.threadId)))
+        for (t in groups) {
+            Log.d(TAG, "mergeThreads: keeping group thread ${t.threadId} separate")
+            out.add(t.toConversation(listOf(t.threadId)))
+        }
+        return out
+    }
+
+    /** Merges one bucket of same-address 1:1 threads. Latest wins for the
+     *  row fields; unread is OR-ed; message counts are summed. */
+    private fun mergeBucket(bucket: List<RawThread>): Conversation {
+        val sorted = bucket.sortedByDescending { it.date }
+        val primary = sorted.first()
+        val ids = sorted.map { it.threadId }
+        if (ids.size > 1) {
+            Log.d(TAG, "mergeThreads: merged ${ids.size} threads for ${primary.address}: $ids")
+        }
+        return Conversation(
+            threadId = primary.threadId,
+            address = primary.address,
+            displayName = contactLookup.displayName(primary.address),
+            snippet = primary.snippet,
+            date = primary.date,
+            unread = sorted.any { it.unread },
+            messageCount = sorted.sumOf { it.messageCount },
+            transportLabel = primary.transportLabel,
+            photoUri = contactLookup.photoUri(primary.address),
+            threadIds = ids,
+        )
+    }
+
+    private fun RawThread.toConversation(ids: List<Long>): Conversation =
+        Conversation(
+            threadId = threadId,
+            address = address,
+            displayName = contactLookup.displayName(address),
+            snippet = snippet,
+            date = date,
+            unread = unread,
+            messageCount = messageCount,
+            transportLabel = transportLabel,
+            photoUri = contactLookup.photoUri(address),
+            threadIds = ids,
+        )
+
+    /**
+     * Normalizes an address to a merge key: digits only; NANP numbers compare
+     * by last 10 digits. Returns null when the address isn't a mergeable
+     * phone number (short codes, alphanumeric senders) — those are never
+     * merged.
+     */
+    private fun mergeKey(address: String): String? {
+        val digits = address.filter { it.isDigit() }
+        if (digits.length < 7) return null
+        return if (digits.length == 11 && digits.startsWith("1")) digits.substring(1) else digits
+    }
+
+    /** Digits-only normalization used for recipient-set comparison. */
+    private fun normalizeAddress(address: String): String = address.filter { it.isDigit() }
+
+    /**
+     * All distinct normalized recipient addresses in a thread — latest SMS
+     * address plus every SMS address plus MMS TO/FROM addresses. More than
+     * one distinct recipient means a group thread.
+     */
+    private fun threadRecipients(threadId: Long): Set<String> {
+        val out = mutableSetOf<String>()
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://sms"),
+                arrayOf("address"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC",
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val a = c.getString(0)
+                    if (!a.isNullOrBlank()) out.add(normalizeAddress(a))
+                }
+            }
+        } catch (_: Exception) { }
+        // MMS side: the latest message's addresses are representative — every
+        // message in a group MMS thread carries the full recipient list.
+        try {
+            var mmsId = -1L
+            context.contentResolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) mmsId = c.getLong(0)
+            }
+            if (mmsId >= 0) {
+                context.contentResolver.query(
+                    Uri.parse("content://mms/$mmsId/addr"),
+                    arrayOf("address", "type"), null, null, null,
+                )?.use { c ->
+                    val addrI = c.getColumnIndex("address")
+                    val typeI = c.getColumnIndex("type")
+                    while (c.moveToNext()) {
+                        val a = if (addrI >= 0) c.getString(addrI) else null
+                        if (a.isNullOrBlank() || a == "insert-address-token") continue
+                        val t = if (typeI >= 0) c.getInt(typeI) else -1
+                        // 137 (0x89) = FROM, 151 (0x97) = TO
+                        if (t == 137 || t == 151) out.add(normalizeAddress(a))
+                    }
+                }
+            }
+        } catch (_: Exception) { }
+        return out
+    }
+
+    /**
+     * Loads messages across all [threadIds] of a (possibly merged)
+     * conversation, oldest first. Merged 1:1 threads show one full history.
+     */
+    suspend fun loadMessages(threadIds: List<Long>): List<Message> = withContext(Dispatchers.IO) {
         val out = mutableListOf<Message>()
+        if (threadIds.isEmpty()) return@withContext out
+        val placeholders = threadIds.joinToString(",") { "?" }
+        val args = threadIds.map { it.toString() }.toTypedArray()
+        // Representative thread id for the merged view (latest thread).
+        val primaryThreadId = threadIds.first()
         try {
             // SMS parts
             context.contentResolver.query(
                 Uri.parse("content://sms"),
                 arrayOf("_id", "thread_id", "address", "body", "date", "type", "read"),
-                "thread_id=?",
-                arrayOf(threadId.toString()),
+                "thread_id IN ($placeholders)",
+                args,
                 "date ASC",
             )?.use { c ->
                 val idI = c.getColumnIndex("_id")
+                val threadI = c.getColumnIndex("thread_id")
                 val addrI = c.getColumnIndex("address")
                 val bodyI = c.getColumnIndex("body")
                 val dateI = c.getColumnIndex("date")
@@ -201,7 +363,7 @@ class UnifiedInboxRepository(
                     out.add(
                         Message(
                             id = if (idI >= 0) c.getLong(idI) else 0L,
-                            threadId = threadId,
+                            threadId = if (threadI >= 0) c.getLong(threadI) else primaryThreadId,
                             address = if (addrI >= 0) c.getString(addrI).orEmpty() else "",
                             body = if (bodyI >= 0) c.getString(bodyI).orEmpty() else "",
                             date = if (dateI >= 0) c.getLong(dateI) else 0L,
@@ -215,12 +377,13 @@ class UnifiedInboxRepository(
             // MMS parts (text only for v1)
             context.contentResolver.query(
                 Uri.parse("content://mms"),
-                arrayOf("_id", "date", "msg_box", "read"),
-                "thread_id=?",
-                arrayOf(threadId.toString()),
+                arrayOf("_id", "thread_id", "date", "msg_box", "read"),
+                "thread_id IN ($placeholders)",
+                args,
                 "date ASC",
             )?.use { c ->
                 val idI = c.getColumnIndex("_id")
+                val threadI = c.getColumnIndex("thread_id")
                 val dateI = c.getColumnIndex("date")
                 val boxI = c.getColumnIndex("msg_box")
                 val readI = c.getColumnIndex("read")
@@ -231,7 +394,7 @@ class UnifiedInboxRepository(
                     out.add(
                         Message(
                             id = -mmsId, // negative to avoid colliding with SMS ids
-                            threadId = threadId,
+                            threadId = if (threadI >= 0) c.getLong(threadI) else primaryThreadId,
                             address = mmsAddress(mmsId).orEmpty(),
                             body = text,
                             date = if (dateI >= 0) c.getLong(dateI) * 1000L else 0L,
@@ -247,43 +410,58 @@ class UnifiedInboxRepository(
         out.sortedBy { it.date }
     }
 
-    suspend fun markThreadRead(threadId: Long) = withContext(Dispatchers.IO) {
+    /** Single-thread convenience; delegates to the merged loader. */
+    suspend fun loadMessages(threadId: Long): List<Message> = loadMessages(listOf(threadId))
+
+    suspend fun markThreadRead(threadIds: List<Long>) = withContext(Dispatchers.IO) {
         try {
             val values = ContentValues().apply { put("read", 1) }
-            context.contentResolver.update(
-                Uri.parse("content://sms/inbox"), values,
-                "thread_id=? AND read=0", arrayOf(threadId.toString()),
-            )
-            context.contentResolver.update(
-                Uri.parse("content://mms/inbox"), values,
-                "thread_id=? AND read=0", arrayOf(threadId.toString()),
-            )
+            for (threadId in threadIds) {
+                context.contentResolver.update(
+                    Uri.parse("content://sms/inbox"), values,
+                    "thread_id=? AND read=0", arrayOf(threadId.toString()),
+                )
+                context.contentResolver.update(
+                    Uri.parse("content://mms/inbox"), values,
+                    "thread_id=? AND read=0", arrayOf(threadId.toString()),
+                )
+            }
         } catch (_: Exception) { }
         refresh()
     }
 
-    suspend fun markThreadUnread(threadId: Long) = withContext(Dispatchers.IO) {
+    suspend fun markThreadRead(threadId: Long) = markThreadRead(listOf(threadId))
+
+    suspend fun markThreadUnread(threadIds: List<Long>) = withContext(Dispatchers.IO) {
         try {
             val values = ContentValues().apply { put("read", 0) }
-            context.contentResolver.update(
-                Uri.parse("content://sms/inbox"), values,
-                "thread_id=?", arrayOf(threadId.toString()),
-            )
+            for (threadId in threadIds) {
+                context.contentResolver.update(
+                    Uri.parse("content://sms/inbox"), values,
+                    "thread_id=?", arrayOf(threadId.toString()),
+                )
+            }
         } catch (_: Exception) { }
         refresh()
     }
 
-    suspend fun deleteThread(threadId: Long): Boolean = withContext(Dispatchers.IO) {
+    suspend fun markThreadUnread(threadId: Long) = markThreadUnread(listOf(threadId))
+
+    suspend fun deleteThread(threadIds: List<Long>): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
-            context.contentResolver.delete(
-                Uri.parse("content://mms-sms/conversations/$threadId"), null, null,
-            )
+            for (threadId in threadIds) {
+                context.contentResolver.delete(
+                    Uri.parse("content://mms-sms/conversations/$threadId"), null, null,
+                )
+            }
             refresh()
             true
         } catch (_: Exception) {
             false
         }
     }
+
+    suspend fun deleteThread(threadId: Long): Boolean = deleteThread(listOf(threadId))
 
     suspend fun resolveDisplayName(address: String): String =
         withContext(Dispatchers.IO) { contactLookup.displayName(address) }

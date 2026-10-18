@@ -13,6 +13,13 @@ data class Conversation(
     val transportLabel: String,
     /** Contacts profile photo URI (PHOTO_URI), or null when there is none. */
     val photoUri: String?,
+    /**
+     * All provider thread_ids merged into this conversation. The Telephony
+     * provider splits SMS and MMS into separate threads when address
+     * formatting differs; 1:1 threads resolving to the same normalized
+     * address are merged. threadId is the primary (latest) one.
+     */
+    val threadIds: List<Long> = listOf(threadId),
 )
 
 /** A single message inside a conversation. */

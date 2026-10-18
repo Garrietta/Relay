@@ -72,6 +72,7 @@ import com.garrietta.relay.ui.chat.ChatViewModel
 import com.garrietta.relay.ui.inbox.InboxScreen
 import com.garrietta.relay.ui.inbox.InboxViewModel
 import com.garrietta.relay.ui.motion.LocalAnimatedVisibilityScope
+import com.garrietta.relay.ui.motion.LocalNavForward
 import com.garrietta.relay.ui.motion.LocalSharedTransitionScope
 import com.garrietta.relay.ui.motion.MotionKind
 import com.garrietta.relay.ui.motion.rememberMotionTransforms
@@ -208,6 +209,12 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(
                     LocalSharedTransitionScope provides this@SharedTransitionLayout,
                     LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                    // Shared-element morphs run on push only. On pop the
+                    // shared bounds are disabled so the exiting chat fades and
+                    // shrinks within its own bounds — nothing from the chat
+                    // may draw above the incoming inbox (e.g. thread text
+                    // ghosting over the "New conversation" pill).
+                    LocalNavForward provides navForward,
                 ) {
                     when (screen) {
                         is Screen.Inbox -> {
@@ -220,7 +227,7 @@ class MainActivity : ComponentActivity() {
                                 userMessages = settingsVm.userMessages,
                                 onRequestDefaultSms = onRequestDefaultSms,
                                 onOpenChat = {
-                                    push(Screen.Chat(it.threadId, it.address, it.displayName))
+                                    push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds))
                                 },
                                 onOpenSettings = { push(Screen.Settings) },
                                 onNewConversation = { push(Screen.NewConversation) },
@@ -229,13 +236,14 @@ class MainActivity : ComponentActivity() {
                         is Screen.Chat -> {
                             val chatVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, screen.threadId),
+                                factory = ChatViewModelFactory(app.repository, screen.threadId, screen.threadIds),
                             )
                             ChatScreen(
                                 viewModel = chatVm,
                                 displayName = screen.displayName,
                                 recipient = screen.address,
                                 threadId = screen.threadId,
+                                threadIds = screen.threadIds,
                                 onBack = ::pop,
                             )
                         }
@@ -347,13 +355,14 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val chatVm: ChatViewModel = viewModel(
                                         key = "chat_${convo.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, convo.threadId),
+                                        factory = ChatViewModelFactory(app.repository, convo.threadId, convo.threadIds),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
                                         displayName = convo.displayName,
                                         recipient = convo.address,
                                         threadId = convo.threadId,
+                                        threadIds = convo.threadIds,
                                         onBack = { selected = null },
                                     )
                                 }
@@ -550,10 +559,11 @@ private class InboxViewModelFactory(
 private class ChatViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
     private val threadId: Long,
+    private val threadIds: List<Long> = listOf(threadId),
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(repo, threadId) as T
+        ChatViewModel(repo, threadId, threadIds) as T
 }
 
 private class SettingsViewModelFactory(

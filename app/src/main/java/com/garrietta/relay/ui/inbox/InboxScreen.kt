@@ -183,10 +183,10 @@ fun InboxScreen(
                                     conversation = conversation,
                                     onClick = { onOpenChat(conversation) },
                                     onMarkRead = {
-                                        if (conversation.unread) viewModel.markRead(conversation.threadId)
-                                        else viewModel.markUnread(conversation.threadId)
+                                        if (conversation.unread) viewModel.markRead(conversation.threadIds)
+                                        else viewModel.markUnread(conversation.threadIds)
                                     },
-                                    onDelete = { viewModel.delete(conversation.threadId) },
+                                    onDelete = { viewModel.delete(conversation.threadIds) },
                                 )
                             }
                         }

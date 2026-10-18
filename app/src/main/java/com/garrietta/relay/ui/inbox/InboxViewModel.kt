@@ -32,15 +32,15 @@ class InboxViewModel(private val repository: UnifiedInboxRepository) : ViewModel
 
     fun refresh() = repository.refresh()
 
-    fun markRead(threadId: Long) {
-        viewModelScope.launch { repository.markThreadRead(threadId) }
+    fun markRead(threadIds: List<Long>) {
+        viewModelScope.launch { repository.markThreadRead(threadIds) }
     }
 
-    fun markUnread(threadId: Long) {
-        viewModelScope.launch { repository.markThreadUnread(threadId) }
+    fun markUnread(threadIds: List<Long>) {
+        viewModelScope.launch { repository.markThreadUnread(threadIds) }
     }
 
-    fun delete(threadId: Long) {
-        viewModelScope.launch { repository.deleteThread(threadId) }
+    fun delete(threadIds: List<Long>) {
+        viewModelScope.launch { repository.deleteThread(threadIds) }
     }
 }

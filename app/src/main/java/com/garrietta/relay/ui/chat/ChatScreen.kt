@@ -6,15 +6,14 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,9 +39,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -75,6 +71,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
@@ -98,6 +95,7 @@ fun ChatScreen(
     displayName: String,
     recipient: String,
     threadId: Long,
+    threadIds: List<Long>,
     onBack: () -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()
@@ -346,9 +344,9 @@ private fun lerpBubbleShape(
 }
 
 /**
- * M3 Expressive composer: a LARGE tall text-box bubble, a + FAB that fans
- * out an attachment menu (replacing the old static attachment row), and a
- * LARGE circular send button with a spring pop on send.
+ * M3 Expressive composer: a LARGE tall text-box bubble, a + button that
+ * toggles a Koda-style segmented attachment pill, and a LARGE circular send
+ * button with a spring pop on send.
  */
 @Composable
 private fun Composer(
@@ -409,19 +407,56 @@ private fun Composer(
             minLines = 3,
             maxLines = 6,
         )
+        // Koda-style segmented attachment pill: expands below the text box
+        // when + is tapped. Full row width so every segment breathes.
+        AnimatedVisibility(
+            visible = menuExpanded,
+            enter = expandVertically(
+                animationSpec = tween(300, easing = M3Easing.EmphasizedDecelerate),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(tween(200)),
+            exit = shrinkVertically(
+                animationSpec = tween(200, easing = M3Easing.Standard),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(tween(150)),
+            label = "attachPill",
+        ) {
+            AttachmentSplitPill(
+                onPick = {
+                    menuExpanded = false
+                    onAttachmentSoon()
+                },
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Bottom,
         ) {
-            AttachmentFabMenu(
-                expanded = menuExpanded,
-                onToggle = { menuExpanded = !menuExpanded },
-                onPick = {
-                    menuExpanded = false
-                    onAttachmentSoon()
-                },
+            // The + morphs toward × as the pill opens — shape-as-state.
+            val rotation by animateFloatAsState(
+                targetValue = if (menuExpanded) 45f else 0f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+                label = "attachToggleRotation",
             )
+            FloatingActionButton(
+                onClick = { menuExpanded = !menuExpanded },
+                shape = CircleShape,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier
+                    .size(56.dp)
+                    .graphicsLayer { rotationZ = rotation },
+            ) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = if (menuExpanded) "Close attachments" else "Add attachment",
+                )
+            }
             Spacer(Modifier.weight(1f))
             // Large circular send button — the densest color in the scheme.
             IconButton(
@@ -460,122 +495,72 @@ private fun Composer(
 }
 
 /**
- * M3 Expressive FAB menu: the + button becomes a circle whose children fan
- * out above it with spring entrances, in a contrasting color with large
- * touch targets. Replaces the old static attachment row.
+ * Koda-style segmented attachment pill: a horizontal pill container whose
+ * segments (Gallery | Camera | GIF | Files) stagger in; the picked segment
+ * gets the filled treatment. Picks are stubbed ("coming soon") — no faked
+ * functionality.
  */
 @Composable
-private fun AttachmentFabMenu(
-    expanded: Boolean,
-    onToggle: () -> Unit,
+private fun AttachmentSplitPill(
     onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    // The + morphs toward × as the menu opens — shape-as-state.
-    val rotation by animateFloatAsState(
-        targetValue = if (expanded) 45f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
-        label = "fabMenuRotation",
-    )
-    // Children draw above the FAB, overlapping the composer bubble; the Box
-    // intentionally lets them overflow its collapsed height.
-    Box(contentAlignment = Alignment.BottomStart) {
-        Column(
-            modifier = Modifier.padding(bottom = 66.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            AttachMenuItem("Gallery", expanded, 0, onPick) {
-                Icon(Icons.Filled.Image, contentDescription = null)
-            }
-            AttachMenuItem("Camera", expanded, 1, onPick) {
-                Icon(Icons.Filled.PhotoCamera, contentDescription = null)
-            }
-            AttachMenuItem("GIF", expanded, 2, onPick) {
-                Text(
-                    "GIF",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            AttachMenuItem("Files", expanded, 3, onPick) {
-                Icon(Icons.Filled.AttachFile, contentDescription = null)
-            }
-        }
-        FloatingActionButton(
-            onClick = onToggle,
-            shape = CircleShape,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            modifier = Modifier
-                .size(56.dp)
-                .graphicsLayer { rotationZ = rotation },
-        ) {
-            Icon(
-                Icons.Filled.Add,
-                contentDescription = if (expanded) "Close attachments" else "Add attachment",
-            )
-        }
-    }
-}
+    val segments = remember { listOf("Gallery", "Camera", "GIF", "Files") }
+    var picked by remember { mutableStateOf<Int?>(null) }
 
-@Composable
-private fun AttachMenuItem(
-    label: String,
-    expanded: Boolean,
-    index: Int,
-    onPick: (String) -> Unit,
-    icon: @Composable () -> Unit,
-) {
-    AnimatedVisibility(
-        visible = expanded,
-        enter = fadeIn(tween(140, delayMillis = index * 45)) +
-            scaleIn(
-                spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                initialScale = 0.5f,
-            ) +
-            slideInVertically(
-                spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ) { it / 2 },
-        exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.6f),
-        label = "attachItem$label",
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 2.dp,
+        shadowElevation = 4.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp),
     ) {
         Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { onPick(label) },
-            ),
         ) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.tertiaryContainer,
-                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                shadowElevation = 4.dp,
-            ) {
-                Text(
-                    label,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                )
-            }
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.tertiaryContainer,
-                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                shadowElevation = 4.dp,
-                modifier = Modifier.size(48.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) { icon() }
+            segments.forEachIndexed { index, label ->
+                // Staggered entrance per segment — expressive, not noisy.
+                AnimatedVisibility(
+                    visible = true,
+                    enter = fadeIn(
+                        tween(180, delayMillis = index * 55, easing = M3Easing.Standard),
+                    ) + slideInHorizontally(
+                        tween(220, delayMillis = index * 55, easing = M3Easing.EmphasizedDecelerate),
+                    ) { it / 3 },
+                    label = "attachSegment$label",
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val selected = picked == index
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                else Color.Transparent,
+                            )
+                            .clickable {
+                                picked = index
+                                onPick(label)
+                            }
+                            .padding(horizontal = 4.dp),
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (selected)
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
     }

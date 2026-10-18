@@ -3,7 +3,6 @@ package com.garrietta.relay.rcs.pairing
 import com.garrietta.relay.rcs.crypto.RcsCrypto
 import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.net.postRpc
-import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.pblite.Pblite
 import com.garrietta.relay.rcs.proto.BrowserDetails
 import com.garrietta.relay.rcs.proto.DeviceInfo
@@ -42,14 +41,6 @@ import java.util.UUID
  * this MVP — see the pairing screen, which reserves a slot for it.
  */
 class QrPairing(private val client: OkHttpClient = RelayApi.client()) {
-
-    @Volatile
-    private var currentCall: okhttp3.Call? = null
-
-    /** Aborts the in-flight long-poll, if any. */
-    fun cancel() {
-        currentCall?.cancel()
-    }
 
     data class BegunPairing(
         val qrContent: String,
@@ -129,25 +120,21 @@ class QrPairing(private val client: OkHttpClient = RelayApi.client()) {
         begun: BegunPairing,
         onPoll: suspend () -> Unit = {},
         maxAttempts: Int = 40,
-    ): com.garrietta.relay.rcs.proto.PairedData {
+    ): com.garrietta.relay.rcs.proto.PairedData = withContext(Dispatchers.IO) {
         val lpClient = RelayApi.client(longPoll = true)
         repeat(maxAttempts) {
             onPoll()
             val body = com.garrietta.relay.rcs.proto.encodeReceiveMessagesRequest(
                 UUID.randomUUID().toString(), begun.initialToken,
             )
-            val res = postRpcCancellable(
-                lpClient, RelayApi.PATH_RECEIVE_MESSAGES, RelayApi.CT_PBLITE, body.toByteArray(),
-                onCall = { currentCall = it },
-            )
-            currentCall = null
+            val res = postRpc(lpClient, RelayApi.PATH_RECEIVE_MESSAGES, RelayApi.CT_PBLITE, body.toByteArray())
             if (!res.isOk()) throw PairingException("ReceiveMessages HTTP ${res.code}")
             for (payload in com.garrietta.relay.rcs.proto.decodeLongPollBody(res.text)) {
                 val data = payload as? PollPayload.Data ?: continue
                 if (data.message.bugleRoute != Rpc.ROUTE_PAIR_EVENT) continue
                 val paired = decodeRpcPairData(data.message.messageData)
                     ?: throw PairingException("Pairing was revoked by the phone")
-                return paired
+                return@withContext paired
             }
             // No pair event in this round — immediately re-poll (server already timed out).
         }

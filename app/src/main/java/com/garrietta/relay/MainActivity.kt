@@ -226,11 +226,13 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(
                     LocalSharedTransitionScope provides this@SharedTransitionLayout,
                     LocalAnimatedVisibilityScope provides this@AnimatedContent,
-                    // Shared-element morphs run on push only. On pop the
-                    // shared bounds are disabled so the exiting chat fades and
-                    // shrinks within its own bounds — nothing from the chat
+                    // Container shared-element morphs run on push only. On pop
+                    // the shared bounds are disabled so the exiting chat fades
+                    // and shrinks within its own bounds — nothing from the chat
                     // may draw above the incoming inbox (e.g. thread text
-                    // ghosting over the "New conversation" pill).
+                    // ghosting over the "New conversation" pill). The avatar
+                    // is exempt via motionSharedAvatar: it reverse-morphs
+                    // down into its row on pop too.
                     LocalNavForward provides navForward,
                 ) {
                     when (screen) {

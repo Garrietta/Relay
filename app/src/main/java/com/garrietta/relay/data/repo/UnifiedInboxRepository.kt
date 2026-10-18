@@ -202,89 +202,41 @@ class UnifiedInboxRepository(
     }
 
     /**
-     * Merges 1:1 threads that resolve to the same normalized address into a
-     * single [Conversation]. Group (multi-recipient) threads are never merged
-     * with anything — they keep their own row. Threads whose address can't be
-     * normalized to a real phone number (short codes, alphanumeric senders)
-     * are never merged either.
+     * Merges 1:1 threads into conversations via the pure [mergeCandidates]
+     * merger (unit-tested). Contact IDs/names/photos are resolved here, up
+     * front, so the merger itself stays JVM-testable.
+     *
+     * Contact-ID-first bucketing handles the same person on different numbers;
+     * normalized-address bucketing handles the provider splitting SMS/MMS
+     * legs by address format. Group threads and short codes never merge, and
+     * two different contact IDs never merge.
      */
     private fun mergeThreads(raw: List<RawThread>): List<Conversation> {
-        val singles = raw.filter { it.recipients.size <= 1 }
-        val groups = raw.filter { it.recipients.size > 1 }
-        // Bucket mergeable 1:1 threads by normalized address; anything that
-        // doesn't normalize to a real number keeps its own bucket.
-        val buckets = mutableMapOf<String, MutableList<RawThread>>()
-        val unmerged = mutableListOf<RawThread>()
-        for (t in singles) {
-            // Primary key: contact ID (same person, possibly different
-            // numbers — e.g. the two "Alec Siurek" threads). Fallback:
-            // normalized address. Either one buckets the thread.
-            val key = contactLookup.contactId(t.address)?.let { "contact:$it" }
-                ?: mergeKey(t.address)?.let { "addr:$it" }
-            if (key == null) {
-                Log.d(TAG, "mergeThreads: no merge key for thread ${t.threadId} (${t.address})")
-                unmerged.add(t)
-            } else {
-                buckets.getOrPut(key) { mutableListOf() }.add(t)
+        val candidates = raw.map { t ->
+            MergeCandidate(
+                threadId = t.threadId,
+                address = t.address,
+                recipients = t.recipients,
+                date = t.date,
+                snippet = t.snippet,
+                unread = t.unread,
+                messageCount = t.messageCount,
+                transportLabel = t.transportLabel,
+                contactId = contactLookup.contactId(t.address),
+                displayName = contactLookup.displayName(t.address),
+                photoUri = contactLookup.photoUri(t.address),
+            )
+        }
+        val merged = mergeCandidates(candidates)
+        for (c in merged) {
+            if (c.threadIds.size > 1) {
+                Log.d(TAG, "mergeThreads: merged ${c.threadIds.size} threads for ${c.address}: ${c.threadIds}")
             }
         }
-        val out = mutableListOf<Conversation>()
-        for (bucket in buckets.values) out.add(mergeBucket(bucket))
-        for (t in unmerged) out.add(t.toConversation(listOf(t.threadId)))
-        for (t in groups) {
-            Log.d(TAG, "mergeThreads: keeping group thread ${t.threadId} separate")
-            out.add(t.toConversation(listOf(t.threadId)))
+        if (merged.size < candidates.size) {
+            Log.d(TAG, "mergeThreads: ${candidates.size - merged.size} thread(s) merged away or hidden as provider noise")
         }
-        return out
-    }
-
-    /** Merges one bucket of same-address 1:1 threads. Latest wins for the
-     *  row fields; unread is OR-ed; message counts are summed. */
-    private fun mergeBucket(bucket: List<RawThread>): Conversation {
-        val sorted = bucket.sortedByDescending { it.date }
-        val primary = sorted.first()
-        val ids = sorted.map { it.threadId }
-        if (ids.size > 1) {
-            Log.d(TAG, "mergeThreads: merged ${ids.size} threads for ${primary.address}: $ids")
-        }
-        return Conversation(
-            threadId = primary.threadId,
-            address = primary.address,
-            displayName = contactLookup.displayName(primary.address),
-            snippet = primary.snippet,
-            date = primary.date,
-            unread = sorted.any { it.unread },
-            messageCount = sorted.sumOf { it.messageCount },
-            transportLabel = primary.transportLabel,
-            photoUri = contactLookup.photoUri(primary.address),
-            threadIds = ids,
-        )
-    }
-
-    private fun RawThread.toConversation(ids: List<Long>): Conversation =
-        Conversation(
-            threadId = threadId,
-            address = address,
-            displayName = contactLookup.displayName(address),
-            snippet = snippet,
-            date = date,
-            unread = unread,
-            messageCount = messageCount,
-            transportLabel = transportLabel,
-            photoUri = contactLookup.photoUri(address),
-            threadIds = ids,
-        )
-
-    /**
-     * Normalizes an address to a merge key: digits only; NANP numbers compare
-     * by last 10 digits. Returns null when the address isn't a mergeable
-     * phone number (short codes, alphanumeric senders) — those are never
-     * merged.
-     */
-    private fun mergeKey(address: String): String? {
-        val digits = address.filter { it.isDigit() }
-        if (digits.length < 7) return null
-        return if (digits.length == 11 && digits.startsWith("1")) digits.substring(1) else digits
+        return merged
     }
 
     /** Digits-only normalization used for recipient-set comparison. */
@@ -685,73 +637,86 @@ private class ContactLookup(private val context: Context) {
     private val cache = mutableMapOf<String, String>()
     private val photoCache = mutableMapOf<String, String?>()
 
-    @Synchronized
-    fun displayName(address: String): String {
-        cache[address]?.let { return it }
-        val name = try {
+    /**
+     * Every address format worth trying against PhoneLookup for one number.
+     * The provider stores the same number in different formats across
+     * SMS/MMS legs ("+15551234567" vs "5551234567"), and a lookup that fails
+     * on one leg's format is what left duplicate conversation rows unmerged.
+     */
+    private fun addressVariants(address: String): List<String> {
+        val digits = address.filter { it.isDigit() }
+        return buildList {
+            add(address)
+            if (digits.isNotEmpty() && digits != address) {
+                add(digits)
+                if (digits.length == 10) {
+                    add("+1$digits")
+                    add("1$digits")
+                }
+                if (digits.length == 11 && digits.startsWith("1")) {
+                    add(digits.substring(1))
+                    add("+$digits")
+                }
+            }
+        }.distinct()
+    }
+
+    /** First non-null value of [column] for [address], or null. */
+    private fun phoneLookupFirst(address: String, column: String): String? {
+        return try {
             var result: String? = null
             context.contentResolver.query(
                 Uri.withAppendedPath(
                     ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
                     Uri.encode(address),
                 ),
-                arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                arrayOf(column),
                 null, null, null,
             )?.use { c ->
                 if (c.moveToFirst()) result = c.getString(0)
-            }
-            result ?: address
-        } catch (_: Exception) {
-            address
-        }
-        cache[address] = name
-        return name
-    }
-
-    /**
-     * Raw contact ID for [address], or null when not in contacts. Used as a
-     * merge key so two different numbers for the SAME person (e.g. mobile +
-     * work) land in one conversation.
-     */
-    @Synchronized
-    fun contactId(address: String): Long? {
-        return try {
-            var result: Long? = null
-            context.contentResolver.query(
-                Uri.withAppendedPath(
-                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
-                    Uri.encode(address),
-                ),
-                arrayOf(ContactsContract.PhoneLookup._ID),
-                null, null, null,
-            )?.use { c ->
-                if (c.moveToFirst()) result = c.getLong(0)
             }
             result
         } catch (_: Exception) {
             null
         }
+    }
+
+    @Synchronized
+    fun displayName(address: String): String {
+        cache[address]?.let { return it }
+        var name: String? = null
+        for (variant in addressVariants(address)) {
+            name = phoneLookupFirst(variant, ContactsContract.PhoneLookup.DISPLAY_NAME)
+            if (name != null) break
+        }
+        val result = name ?: address
+        cache[address] = result
+        return result
+    }
+
+    /**
+     * Raw contact ID for [address], or null when not in contacts. Tries every
+     * address variant, so one leg's odd format can't strand a duplicate row.
+     * Used as a merge key so two different numbers for the SAME person land
+     * in one conversation.
+     */
+    @Synchronized
+    fun contactId(address: String): Long? {
+        for (variant in addressVariants(address)) {
+            phoneLookupFirst(variant, ContactsContract.PhoneLookup._ID)
+                ?.toLongOrNull()?.let { return it }
+        }
+        return null
     }
 
     /** Profile photo URI for [address], or null when the contact has none. */
     @Synchronized
     fun photoUri(address: String): String? {
         if (photoCache.containsKey(address)) return photoCache[address]
-        val uri = try {
-            var result: String? = null
-            context.contentResolver.query(
-                Uri.withAppendedPath(
-                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
-                    Uri.encode(address),
-                ),
-                arrayOf(ContactsContract.PhoneLookup.PHOTO_URI),
-                null, null, null,
-            )?.use { c ->
-                if (c.moveToFirst()) result = c.getString(0)
-            }
-            result
-        } catch (_: Exception) {
-            null
+        var uri: String? = null
+        for (variant in addressVariants(address)) {
+            uri = phoneLookupFirst(variant, ContactsContract.PhoneLookup.PHOTO_URI)
+            if (uri != null) break
         }
         photoCache[address] = uri
         return uri

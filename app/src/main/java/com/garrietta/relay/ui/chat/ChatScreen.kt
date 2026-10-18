@@ -1,14 +1,11 @@
 package com.garrietta.relay.ui.chat
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -71,12 +68,13 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
-import com.garrietta.relay.ui.motion.M3Duration
-import com.garrietta.relay.ui.motion.M3Easing
+import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
+import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
+import com.garrietta.relay.ui.theme.SquircleShape
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import java.text.SimpleDateFormat
@@ -125,11 +123,14 @@ fun ChatScreen(
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Shared-element target: the inbox avatar morphs here.
+                            // Shared-element target: the inbox avatar morphs here on
+                            // push — and morphs BACK down on pop via
+                            // motionSharedAvatar (message content is exempt,
+                            // so the #45 ghosting fix holds).
                             ChatAvatar(
                                 name = displayName,
                                 photoUri = photoUri,
-                                modifier = Modifier.motionSharedBounds(
+                                modifier = Modifier.motionSharedAvatar(
                                     SharedElementKeys.avatar(threadId),
                                     shape = WavyBlobShape,
                                 ),
@@ -240,10 +241,7 @@ private fun MessageBubble(
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
-        animationSpec = tween(
-            durationMillis = M3Duration.Short2,
-            easing = M3Easing.Standard,
-        ),
+        animationSpec = RelaySprings.bouncy(),
         label = "bubbleSquareness",
     )
     val shape = remember(squareness, message.isOutgoing, position) {
@@ -360,16 +358,10 @@ private fun Composer(
         if (!canSend) return
         onSend(text.trim())
         text = ""
-        // Spring pop on send — one of the few sanctioned expressive springs.
+        // Spring pop on send — the unified bouncy language.
         scope.launch {
             sendPop.snapTo(0.82f)
-            sendPop.animateTo(
-                1f,
-                spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium,
-                ),
-            )
+            sendPop.animateTo(1f, RelaySprings.bouncy())
         }
     }
 
@@ -468,8 +460,9 @@ private fun Composer(
 }
 
 /**
- * One persistent attachment button: rounded-square (expressive radii),
- * tonal container, no toggle behavior. Picks are stubbed ("coming soon").
+ * One persistent attachment button: SQUIRCLE (expressive superellipse),
+ * tonal container, no toggle behavior. Presses bounce and the squircle
+ * tightens slightly — shape-as-state. Picks are stubbed ("coming soon").
  */
 @Composable
 private fun AttachmentBarButton(
@@ -477,12 +470,25 @@ private fun AttachmentBarButton(
     label: String,
     onClick: () -> Unit,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.88f else 1f,
+        animationSpec = RelaySprings.bouncy(),
+        label = "attachPress",
+    )
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(18.dp),
+        interactionSource = interactionSource,
+        shape = SquircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 1.dp,
-        modifier = Modifier.size(52.dp),
+        modifier = Modifier
+            .size(52.dp)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            },
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(

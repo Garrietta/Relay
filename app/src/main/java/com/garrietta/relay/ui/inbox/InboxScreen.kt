@@ -3,9 +3,6 @@ package com.garrietta.relay.ui.inbox
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -24,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -34,7 +32,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -45,11 +42,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -58,19 +55,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.garrietta.relay.data.model.Conversation
-import com.garrietta.relay.ui.motion.M3Duration
-import com.garrietta.relay.ui.motion.M3Easing
+import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
+import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.CloverShape
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
+import com.garrietta.relay.ui.theme.WavyBlobShapePressed
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -90,39 +89,39 @@ fun InboxScreen(
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val query by viewModel.query.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val snackbarHostState = remember { SnackbarHostState() }
+    val listState = rememberLazyListState()
+
+    // Aggressive collapsing header: the big "Messages" title shrinks all the
+    // way down to a compact bar title as the list scrolls. The collapse
+    // fraction is spring-smoothed so the header feels fluid and bouncy,
+    // never rigid.
+    val rawCollapse by remember {
+        derivedStateOf {
+            val offset = listState.firstVisibleItemScrollOffset.toFloat()
+            val jump = if (listState.firstVisibleItemIndex > 0) 360f else 0f
+            ((jump + offset) / 360f).coerceIn(0f, 1f)
+        }
+    }
+    val collapse by animateFloatAsState(
+        targetValue = rawCollapse,
+        animationSpec = RelaySprings.bouncy(),
+        label = "headerCollapse",
+    )
 
     LaunchedEffect(Unit) {
         userMessages.collect { snackbarHostState.showSnackbar(it) }
     }
 
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         // Transparent: the screen lives inside the list-pane container (or
         // the window background in single-pane) — the conversation list is
         // its own rounded container, visually independent of the app bar.
         containerColor = Color.Transparent,
         topBar = {
-            LargeTopAppBar(
-                title = {
-                    Text(
-                        "Messages",
-                        // Emphasized display type for the eye-stop moment.
-                        style = MaterialTheme.typography.displayLarge,
-                        fontWeight = FontWeight.ExtraBold,
-                    )
-                },
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                    }
-                },
-                scrollBehavior = scrollBehavior,
-                colors = TopAppBarDefaults.largeTopAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent,
-                ),
+            CollapsingMessagesHeader(
+                collapse = collapse,
+                onOpenSettings = onOpenSettings,
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -169,6 +168,7 @@ fun InboxScreen(
                         EmptyInbox()
                     } else {
                         LazyColumn(
+                            state = listState,
                             modifier = Modifier.fillMaxSize(),
                             // Bottom inset clears the floating pill so the
                             // last row is never hidden underneath it.
@@ -208,10 +208,54 @@ fun InboxScreen(
 }
 
 /**
+ * The "Messages" header collapses aggressively on scroll: the 52sp display
+ * title shrinks all the way down to a compact 20sp bar title, and the header
+ * tints as it collapses. Driven by the spring-smoothed collapse fraction —
+ * fluid and bouncy, never rigid.
+ */
+@Composable
+private fun CollapsingMessagesHeader(
+    collapse: Float,
+    onOpenSettings: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.background.copy(alpha = collapse * 0.92f),
+        tonalElevation = if (collapse > 0.6f) 2.dp else 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = 20.dp,
+                    end = 8.dp,
+                    top = (20 - 12 * collapse).dp,
+                    bottom = (4 + 4 * collapse).dp,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Messages",
+                // Emphasized display type for the eye-stop moment; shrinks
+                // with the collapse fraction.
+                style = MaterialTheme.typography.displayLarge,
+                fontSize = (52 - 32 * collapse).sp,
+                lineHeight = (56 - 30 * collapse).sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings")
+            }
+        }
+    }
+}
+
+/**
  * Floating "New conversation" pill — Google Messages M3E pattern. Wide pill,
  * large corner radius, primary container color, real elevation + shadow so it
- * reads as floating above the conversation list. Gentle spring press-scale
- * (one of the sanctioned expressive springs).
+ * reads as floating above the conversation list. Bouncy press-scale AND
+ * corner morph (shape-as-state) in the unified spring language.
  */
 @Composable
 private fun NewConversationPill(
@@ -222,16 +266,19 @@ private fun NewConversationPill(
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
+        animationSpec = RelaySprings.bouncy(),
         label = "pillPress",
+    )
+    // Shape-as-state: the pill's corners tighten while pressed.
+    val corner by animateDpAsState(
+        targetValue = if (pressed) 20.dp else 32.dp,
+        animationSpec = RelaySprings.bouncy(),
+        label = "pillCorner",
     )
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        shape = RoundedCornerShape(32.dp),
+        shape = RoundedCornerShape(corner),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,
@@ -349,16 +396,13 @@ private fun ConversationRow(
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
-    // Shape-as-state on press: the row's corners square off slightly while
-    // pressed, then relax back — restraint, not decoration.
+    // Shape-as-state on press: the row's corners square off while pressed,
+    // then bounce back — the unified spring language.
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val rowCorner by animateDpAsState(
         targetValue = if (pressed) 18.dp else 24.dp,
-        animationSpec = tween(
-            durationMillis = M3Duration.Short2,
-            easing = M3Easing.Standard,
-        ),
+        animationSpec = RelaySprings.bouncy(),
         label = "rowPress",
     )
 
@@ -442,7 +486,7 @@ private fun ConversationRow(
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(conversation)
+            Avatar(conversation, pressed)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -493,15 +537,31 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Avatar(conversation: Conversation) {
+private fun Avatar(conversation: Conversation, pressed: Boolean) {
+    // Shape-as-state: the blob morphs tighter while pressed, with a bouncy
+    // press scale — the avatar feels alive under the finger. The avatar is
+    // the ONE shared element that reverse-morphs on pop (motionSharedAvatar);
+    // message content carries no shared modifiers, preserving the #45
+    // text-ghosting fix.
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.9f else 1f,
+        animationSpec = RelaySprings.bouncy(),
+        label = "avatarPress",
+    )
     ContactAvatar(
         photoUri = conversation.photoUri,
         name = conversation.displayName,
-        modifier = Modifier.motionSharedBounds(
-            SharedElementKeys.avatar(conversation.threadId),
-            shape = WavyBlobShape,
-        ),
+        modifier = Modifier
+            .motionSharedAvatar(
+                SharedElementKeys.avatar(conversation.threadId),
+                shape = WavyBlobShape,
+            )
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            },
         size = 56.dp,
+        shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
     )
 }
 
@@ -512,9 +572,9 @@ private fun TransportChip(label: String) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(CloverShape)
             .background(MaterialTheme.colorScheme.secondaryContainer)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = 14.dp, vertical = 6.dp),
     )
 }
 

@@ -78,6 +78,25 @@ object M3Duration {
     const val Long2 = 500
 }
 
+/**
+ * Relay's unified bouncy motion language. Every animated transition in the
+ * app uses these — no hand-rolled tweens at call sites. Springs on meaningful
+ * transitions (nav, morphs, presses, entrances); everything eased, nothing
+ * linear.
+ */
+object RelaySprings {
+    const val STIFFNESS = 380f
+    const val DAMPING = 0.62f
+
+    /** The default: bouncy spring for presses, morphs, slides, entrances. */
+    fun <T> bouncy(): FiniteAnimationSpec<T> =
+        spring(stiffness = STIFFNESS, dampingRatio = DAMPING)
+
+    /** Calmer spring for large, slow container motion. */
+    fun <T> gentle(): FiniteAnimationSpec<T> =
+        spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy)
+}
+
 /** Shared-axis travel is a fraction of the container width, not a fixed dp value. */
 const val SHARED_AXIS_TRAVEL_DIVISOR = 4
 
@@ -133,12 +152,11 @@ class MotionTransforms internal constructor(
 
 @Composable
 fun rememberMotionTransforms(): MotionTransforms {
-    val tokens = MotionTokens.resolve()
     val reducedMotion = LocalReducedMotion.current
-    return remember(tokens, reducedMotion) { MotionTransforms(buildTransforms(tokens, reducedMotion)) }
+    return remember(reducedMotion) { MotionTransforms(buildTransforms(reducedMotion)) }
 }
 
-private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<MotionKind, ContentTransform> = buildMap {
+private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTransform> = buildMap {
     put(MotionKind.TOP_LEVEL, crossfade())
 
     if (reducedMotion) {
@@ -147,7 +165,9 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
     } else {
         put(
             MotionKind.FORWARD,
-            (slideInHorizontally(t.move) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
+            // Fluid bouncy travel: the spring overshoots slightly and
+            // settles — no linear slides anywhere.
+            (slideInHorizontally(RelaySprings.bouncy()) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
                 fadeIn(
                     tween(
                         M3Duration.FADE_IN,
@@ -155,16 +175,17 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
                         easing = M3Easing.EmphasizedDecelerate,
                     ),
                 )) togetherWith
-                (slideOutHorizontally(t.move) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
+                (slideOutHorizontally(RelaySprings.bouncy()) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
                     fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))),
         )
 
         put(
             MotionKind.BACKWARD,
-            // Pop: the exiting screen fades and shrinks WITHIN its bounds
-            // (already clipped to its container) — no horizontal slide, so
-            // its content can never sweep across the incoming destination.
-            // The inbox fades in beneath it.
+            // Pop: the exiting screen fades and springs down WITHIN its
+            // bounds (already clipped to its container) — no horizontal
+            // slide, so its content can never sweep across the incoming
+            // destination. The inbox fades in beneath it. The avatar is
+            // exempt: it reverse-morphs via motionSharedAvatar.
             fadeIn(
                 tween(
                     M3Duration.FADE_IN,
@@ -173,10 +194,7 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
             ) togetherWith
                 (fadeOut(tween(150, easing = M3Easing.Standard)) +
                     scaleOut(
-                        tween(
-                            M3Duration.Short4,
-                            easing = M3Easing.EmphasizedDecelerate,
-                        ),
+                        RelaySprings.bouncy(),
                         targetScale = 0.96f,
                     )),
         )
@@ -221,7 +239,9 @@ val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilitySc
  * Shared-element morphs run on push only: on pop the shared bounds are
  * disabled so the exiting screen fades and shrinks within its own bounds —
  * nothing from the exiting screen may draw above the incoming one (the
- * transition overlay always renders above both destinations). Defaults to
+ * transition overlay always renders above both destinations). The AVATAR is
+ * exempt via [motionSharedAvatar]: it reverse-morphs on pop too, scoped
+ * narrowly enough that no text can ghost. Defaults to
  * true so surfaces outside the single-pane backstack (two-pane detail,
  * previews) keep the morph behavior.
  */
@@ -297,6 +317,42 @@ fun Modifier.motionSharedBounds(
 }
 
 /**
+ * AVATAR-ONLY shared bounds — stays active on pop too, so the avatar morphs
+ * BACK down into its inbox row on chat exit (a true reverse shared-element
+ * transition), while everything else in the chat fades+shrinks in place.
+ *
+ * Scoped NARROWLY to the avatar: message content carries no shared
+ * modifiers, so the #45 text-ghosting fix is preserved — only the small
+ * clipped avatar ever draws in the transition overlay on pop.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.motionSharedAvatar(key: String, shape: Shape? = null): Modifier {
+    val sharedScope = LocalSharedTransitionScope.current ?: return this
+    val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
+    val boundsTransform = rememberExpressiveBoundsTransform()
+
+    return with(sharedScope) {
+        val sharedContentState = rememberSharedContentState(key)
+        val overlayClip = shape?.let { OverlayClip(it) }
+        if (overlayClip != null) {
+            this@motionSharedAvatar.sharedBounds(
+                sharedContentState = sharedContentState,
+                animatedVisibilityScope = animatedScope,
+                boundsTransform = boundsTransform,
+                clipInOverlayDuringTransition = overlayClip,
+            )
+        } else {
+            this@motionSharedAvatar.sharedBounds(
+                sharedContentState = sharedContentState,
+                animatedVisibilityScope = animatedScope,
+                boundsTransform = boundsTransform,
+            )
+        }
+    }
+}
+
+/**
  * Shared ELEMENT (not bounds) — the content itself morphs. Use for a single icon/image
  * that travels between two layouts. Same key + scope rules as [motionSharedBounds].
  */
@@ -331,13 +387,12 @@ fun Modifier.motionSharedElement(key: String, shape: Shape? = null): Modifier {
 @Composable
 private fun rememberExpressiveBoundsTransform(): BoundsTransform {
     val reducedMotion = LocalReducedMotion.current
+    // Bouncy morph: the shared element overshoots slightly and settles —
+    // this is the fluid avatar travel Garrett asked for.
     val spec: FiniteAnimationSpec<Rect> = if (reducedMotion) {
         tween(durationMillis = M3Duration.FADE_IN)
     } else {
-        spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow,
-        )
+        RelaySprings.bouncy()
     }
     return remember(spec) { BoundsTransform { _, _ -> spec } }
 }

@@ -101,11 +101,10 @@ private val RelayShapes = Shapes(
 val outgoingBubbleShape = RoundedCornerShape(24.dp, 24.dp, 8.dp, 24.dp)
 val incomingBubbleShape = RoundedCornerShape(24.dp, 24.dp, 24.dp, 8.dp)
 
-// Motion-budget note: there is intentionally no shared spring helper here.
-// Springs are sanctioned only for send pop, the FAB-menu fan-out, container
-// transforms, and the pill press — each call site declares its own spec so
-// the budget stays visible. Everything else uses the centralized ui.motion
-// tokens (standard easing + duration tokens).
+// Motion-budget note: springs live in one place — ui.motion.RelaySprings
+// (the unified bouncy language). Springs on meaningful transitions (nav,
+// morphs, presses, entrances); everything eased, nothing linear. Feature
+// code never hand-rolls its own specs.
 
 @Composable
 fun RelayTheme(

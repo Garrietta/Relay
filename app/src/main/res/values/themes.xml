@@ -17,8 +17,9 @@
     <style name="Theme.Relay.Dialog" parent="android:Theme.Material.Dialog">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsFloating">true</item>
-        <!-- Compose draws its own scrim (DialogProperties.scrimColor from the
-             M3 theme); the platform dim would double-darken behind it. -->
-        <item name="android:backgroundDimEnabled">false</item>
+        <!-- The platform dim BEHIND the dialog window is the scrim: plain
+             black-translucent, correct in both light and dark mode. The window
+             itself is transparent so it can never flash a light panel. -->
+        <item name="android:backgroundDimEnabled">true</item>
     </style>
 </resources>

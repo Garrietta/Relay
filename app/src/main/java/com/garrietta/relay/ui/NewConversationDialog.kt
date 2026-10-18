@@ -44,12 +44,14 @@ import androidx.compose.ui.window.DialogWindowProvider
  * dialog theme painted a light panel background for the first frame even in
  * dark mode. Fixed at two levels:
  *  1. Theme level: Theme.Relay.Dialog (android:dialogTheme) has a transparent
- *     windowBackground and no platform dim — no unthemed frame, ever.
- *  2. Compose level: plain Dialog (not AlertDialog) with an explicit
- *     theme-driven scrim — colorScheme.scrim at 32% alpha, dark in both
- *     modes, nothing hardcoded. The SideEffect transparent-background is kept
- *     as belt-and-suspenders for any Compose version that doesn't resolve
- *     android:dialogTheme.
+ *     windowBackground — no unthemed frame, ever. The platform dim behind the
+ *     window is the scrim (plain black-translucent, correct in both modes).
+ *     Note: this Compose version's DialogProperties has no scrimColor
+ *     parameter, so the platform dim is the only scrim mechanism — which is
+ *     why the theme-level transparent background matters so much.
+ *  2. Compose level: plain Dialog (not AlertDialog) plus a SideEffect that
+ *     forces the window background transparent, as belt-and-suspenders for
+ *     any Compose version that doesn't resolve android:dialogTheme.
  * Surface is surfaceContainerHigh — theme-correct in both modes.
  */
 @Composable
@@ -61,10 +63,7 @@ fun NewConversationDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f),
-        ),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         val view = LocalView.current
         SideEffect {

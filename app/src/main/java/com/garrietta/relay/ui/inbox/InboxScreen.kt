@@ -222,6 +222,12 @@ private fun CollapsingMessagesHeader(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.background.copy(alpha = collapse * 0.92f),
+        // Explicit content color: at collapse=0 the surface is fully
+        // transparent, and contentColorFor() can't resolve a proper tone
+        // from a transparent color — dark mode then rendered the title
+        // near-invisible (diagnosed 2026-10-18). onBackground is legible
+        // in both themes at every collapse fraction.
+        contentColor = MaterialTheme.colorScheme.onBackground,
         tonalElevation = if (collapse > 0.6f) 2.dp else 0.dp,
     ) {
         Row(
@@ -554,22 +560,42 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
         animationSpec = RelaySprings.bouncy(),
         label = "avatarPress",
     )
-    ContactAvatar(
-        photoUri = conversation.photoUri,
-        name = conversation.displayName,
-        shapeKey = conversation.address.ifBlank { conversation.displayName },
-        modifier = Modifier
-            .motionSharedAvatar(
-                SharedElementKeys.avatar(conversation.threadId),
-                shape = WavyBlobShape,
-            )
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            },
-        size = 56.dp,
-        shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
-    )
+    // The avatar sits centered in a uniform-width slot so the column
+    // forms a straight edge regardless of each shape's width.
+    AvatarSlot {
+        ContactAvatar(
+            photoUri = conversation.photoUri,
+            name = conversation.displayName,
+            shapeKey = conversation.address.ifBlank { conversation.displayName },
+            modifier = Modifier
+                .motionSharedAvatar(
+                    SharedElementKeys.avatar(conversation.threadId),
+                    shape = WavyBlobShape,
+                )
+                .graphicsLayer {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                },
+            size = 56.dp,
+            shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
+        )
+    }
+}
+
+/**
+ * Avatar slot: every inbox avatar is centered in a UNIFORM-WIDTH box
+ * (72dp — the 56dp height's 1.25x max avatar width plus breathing room),
+ * so the avatar column forms a clean straight edge no matter how wide
+ * each contact's shape is. Uniform height + locked ratios are unchanged.
+ */
+@Composable
+private fun AvatarSlot(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier.width(72.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
 }
 
 /**

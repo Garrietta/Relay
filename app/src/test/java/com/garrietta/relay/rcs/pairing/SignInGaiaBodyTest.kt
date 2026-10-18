@@ -129,4 +129,41 @@ class SignInGaiaBodyTest {
     fun parseResponse_missingTokenData_throws() {
         GaiaPairing.parseSignInGaiaResponse("""[["hdr"],null,[]]""")
     }
+
+    @Test
+    fun parseResponse_decodesPbliteBinaryRegIds() {
+        // Regression test for the 2026-10-18 device HTTP 404
+        // (TachyonError[29] "Requested entity was not found"): the reference
+        // proto marks destOrSourceUUID with [(pblite.pblite_binary) = true],
+        // so the server sends it base64-encoded and the reference decodes it
+        // to the plain dashed UUID. Reading the raw JSON string produced a
+        // double-base64 destRegistrationID on our uplink.
+        val uuid = "123e4567-e89b-12d3-a456-426614174000"
+        val b64 = Pblite.encodeBase64(uuid.toByteArray(Charsets.UTF_8))
+        val json = """
+            [
+              ["hdr"],
+              "YnJvd3Nlci11dWlk",
+              [null,
+               [["$b64",null,null,1,null,null,42]],
+               [["$b64",null,null,null,null,null,1700000000000000]]
+              ],
+              ["dG9rZW4=",86400]
+            ]
+        """.trimIndent()
+        val parsed = GaiaPairing.parseSignInGaiaResponse(json)
+        assertEquals(1, parsed.devices.size)
+        // The device ID must be the PLAIN dashed UUID — this exact string
+        // goes out (single-base64) as destRegistrationIDs on the uplink.
+        assertEquals(uuid, parsed.devices[0].deviceId)
+        assertTrue(parsed.devices[0].isPrimary)
+        assertEquals(1700000000000L, parsed.devices[0].lastSeenMs)
+    }
+
+    @Test
+    fun decodeRegId_keepsPlainUuidAsIs() {
+        val uuid = "123e4567-e89b-12d3-a456-426614174000"
+        assertEquals(uuid, GaiaPairing.decodeRegId(uuid))
+        assertNull(GaiaPairing.decodeRegId(null))
+    }
 }

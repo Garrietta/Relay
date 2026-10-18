@@ -636,6 +636,33 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
          * - field 1 (Header) and field 2 (maybeBrowserUUID, pblite_binary
          *   string) are parsed leniently and ignored.
          */
+        /**
+         * Decodes a pblite_binary registration UUID. The reference proto marks
+         * `destOrSourceUUID` with `[(pblite.pblite_binary) = true]`, so the
+         * server sends the UUID base64-encoded in the pblite JSON (and the
+         * reference's pblite layer decodes it back to the plain dashed UUID
+         * before use). Reading the raw JSON string without decoding produced
+         * a DOUBLE-base64 destRegistrationID on our uplink, which the Tachyon
+         * frontend answered with HTTP 404 "Requested entity was not found"
+         * (TachyonError[29]) — diagnosed 2026-10-18 from a device 404.
+         * Only the decoded form is accepted when it looks like a real
+         * dashed UUID; otherwise the raw value is kept (never crash parsing).
+         */
+        internal fun decodeRegId(raw: String?): String? {
+            if (raw == null) return null
+            val decoded = runCatching {
+                Pblite.decodeBase64(raw).toString(Charsets.UTF_8)
+            }.getOrNull()
+            return if (decoded != null && decoded.length == 36 &&
+                decoded[8] == '-' && decoded[13] == '-' &&
+                decoded[18] == '-' && decoded[23] == '-'
+            ) {
+                decoded
+            } else {
+                raw
+            }
+        }
+
         internal fun parseSignInGaiaResponse(pblite: String): ParsedGaiaResponse {
             try {
                 val decoded = Pblite.decode(pblite)
@@ -650,7 +677,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 if (deviceData != null) {
                     for (item in deviceData.rep(3)) {
                         val m = (item as? PValue.Arr)?.asMsg() ?: continue
-                        val regId = m.str(1) ?: continue
+                        val regId = decodeRegId(m.str(1)) ?: continue
                         val micros = m.num(7) ?: continue
                         lastSeenByRegId[regId] = micros
                     }
@@ -658,7 +685,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 val devices = if (deviceData != null) {
                     deviceData.rep(2).mapNotNull { item ->
                         val m = (item as? PValue.Arr)?.asMsg() ?: return@mapNotNull null
-                        val regId = m.str(1) ?: return@mapNotNull null
+                        val regId = decodeRegId(m.str(1)) ?: return@mapNotNull null
                         val isPrimary = (m.num(4) ?: 0L) == 1L
                         GaiaDevice(
                             deviceId = regId,

@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -180,7 +181,13 @@ fun NewConversationDialog(
                 tonalElevation = 6.dp,
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    // fillMaxSize (not wrap-content): the end-aligned Cancel
+                    // row below must measure against the real sheet width —
+                    // without this the row could overflow past the screen's
+                    // right edge (diagnosed 2026-10-18: "Cance" clipped).
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
                 ) {
                     // Compact header — the search field sits near the top so
                     // results are visible while typing.
@@ -257,7 +264,8 @@ fun NewConversationDialog(
                         }
                     }
                     Row(
-                        modifier = Modifier.align(Alignment.End),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
                     ) {
                         // Tonal button in a cookie shape — dialog actions are
                         // part of the shape family too, not default pills.

@@ -100,19 +100,26 @@ val SquircleShape = GenericShape { size, _ ->
 }
 
 /**
- * Four-lobe clover — a playful organic chip shape for small labels like the
- * transport tag. Stretched horizontally so text chips read naturally.
+ * True 4-leaf clover (quatrefoil): four round lobes on the axes with deep
+ * concave waists on the diagonals — proper clover geometry, not a wavy
+ * blob. Fitted to the chip box so the "MMS" label stays legible: the
+ * modulation (1.0 at lobe tips, 0.55 at the waists) keeps the center wide
+ * where the text sits.
  */
 val CloverShape = GenericShape { size, _ ->
     val cx = size.width / 2f
     val cy = size.height / 2f
-    val baseR = min(size.width, size.height) / 2f
-    val steps = 96
+    val rx = size.width / 2f
+    val ry = size.height / 2f
+    val steps = 128
     for (i in 0..steps) {
         val a = (i / steps.toFloat()) * (2f * PI.toFloat())
-        val r = baseR * (1f + 0.14f * cos(4 * a))
-        val x = cx + r * cos(a) * 1.9f
-        val y = cy + r * sin(a)
+        // Deep 4-fold modulation: full radius at the lobe tips (axes),
+        // pulled in to 0.55 at the waists (diagonals) — the concave
+        // indentations that make it read as a clover.
+        val m = 0.775f + 0.225f * cos(4 * a)
+        val x = cx + rx * m * cos(a)
+        val y = cy + ry * m * sin(a)
         if (i == 0) moveTo(x, y) else lineTo(x, y)
     }
     close()

@@ -324,49 +324,121 @@ class RcsTransport(context: Context) : Transport {
     }
 
     /**
-     * Completes Gaia pairing after the user confirms the emoji match:
-     * sends CLIENT_FINISHED as an unencrypted BUGLE_MESSAGE (with the
-     * private-API confirmation string), handles the phone's finish
-     * error codes, runs the Ditto v1 key derivation, persists the final
-     * AuthData + cookies, and keeps the Gaia-mode session running.
+     * Progress of the CLIENT_FINISHED step, surfaced to the pairing UI.
      */
-    suspend fun finishGaiaPairing(h: GaiaHandshakeResult): Boolean {
+    sealed interface GaiaFinishProgress {
+        /** A CLIENT_FINISHED attempt was sent (1-based attempt number). */
+        data class Sending(val attempt: Int) : GaiaFinishProgress
+        /** The server hasn't confirmed yet — still waiting on the phone tap. */
+        data object WaitingForPhone : GaiaFinishProgress
+    }
+
+    /**
+     * Completes Gaia pairing AFTER the user taps the matching emoji on the
+     * phone. Authorization happens IN GOOGLE MESSAGES (the phone tap) —
+     * Relay never authorizes; the UI only proceeds after the user confirms
+     * on the phone.
+     *
+     * Sends CLIENT_FINISHED as an unencrypted BUGLE_MESSAGE (with the
+     * private-API confirmation string). There is no separate
+     * phone-confirmation event on the long-poll — the correlated FINISHED
+     * response IS the signal (per the reference sendGaiaPairingMessage, which
+     * blocks on it): the server answers once the phone's tap reaches it. If
+     * the tap hasn't landed yet the server holds or rejects, so this sends
+     * up to [FINISH_MAX_ATTEMPTS] attempts with backoff under a
+     * [FINISH_TIMEOUT_MS] total cap, reporting [GaiaFinishProgress] — it
+     * never hangs forever.
+     *
+     * On success runs the Ditto v1 key derivation, persists the final
+     * AuthData + cookies, and keeps the Gaia-mode session running. If our
+     * side already persisted a pairing (e.g. a retry after the phone
+     * confirmed), this completes gracefully instead of erroring.
+     */
+    suspend fun finishGaiaPairing(
+        h: GaiaHandshakeResult,
+        onProgress: suspend (GaiaFinishProgress) -> Unit = {},
+    ): Boolean {
+        // Already paired locally (e.g. retry after a successful finish) —
+        // complete gracefully.
+        if (session.isPaired) {
+            Log.d(TAG, "GaiaPairing finish: already paired locally, completing gracefully")
+            _pairingState.value = RcsPairingState.PAIRED
+            return true
+        }
         var done = false
         try {
-            withTimeout(PAIRING_TIMEOUT_MS) {
-                val begun = h.begun
-                val container = GaiaPairing.buildFinishContainer(h.handshake, RelayApi.WEBVIEW_UA)
-                val responseBytes = session.sendGaia(
-                    action = Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED,
-                    container = container,
-                    messageType = Rpc.MSG_TYPE_BUGLE,
-                    destRegIds = listOf(begun.chosenDevice.deviceId),
-                    cookies = begun.cookies,
-                )
-                val finish = GaiaPairing.parseFinishResponse(responseBytes)
-                if (finish.finishErrorType != 0L) {
-                    throw PairingException(finishErrorMessage(finish))
+            val begun = h.begun
+            val deadlineMs = System.currentTimeMillis() + FINISH_TIMEOUT_MS
+            var attempt = 0
+            var backoffMs = 2000L
+            var lastError: Exception? = null
+            while (attempt < FINISH_MAX_ATTEMPTS && System.currentTimeMillis() < deadlineMs) {
+                attempt++
+                onProgress(GaiaFinishProgress.Sending(attempt))
+                try {
+                    val container =
+                        GaiaPairing.buildFinishContainer(h.handshake, RelayApi.WEBVIEW_UA)
+                    Log.d(TAG, "GaiaPairing CLIENT_FINISHED attempt=$attempt/$FINISH_MAX_ATTEMPTS " +
+                            "container=${container.size}B phone=${begun.chosenDevice.deviceId}")
+                    val responseBytes = session.sendGaia(
+                        action = Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED,
+                        container = container,
+                        messageType = Rpc.MSG_TYPE_BUGLE,
+                        destRegIds = listOf(begun.chosenDevice.deviceId),
+                        cookies = begun.cookies,
+                        timeoutMs = FINISH_ATTEMPT_TIMEOUT_MS,
+                    )
+                    Log.d(TAG, "GaiaPairing CLIENT_FINISHED response=${responseBytes.size}B " +
+                            "attempt=$attempt")
+                    val finish = GaiaPairing.parseFinishResponse(responseBytes)
+                    if (finish.finishErrorType == 0L) {
+                        persistFinishedPairing(h)
+                        done = true
+                        break
+                    }
+                    // The phone reported an error — retry only the
+                    // timeout-ish ones (the tap may not have landed yet).
+                    when (finish.finishErrorCode) {
+                        5L -> throw PairingException(
+                            "Wrong emoji — it didn't match the one on your phone. Try again.")
+                        7L -> throw PairingException("Pairing was cancelled on your phone.")
+                        2L, 3L, 6L -> {
+                            Log.w(TAG, "GaiaPairing finish rejected (phone error " +
+                                    "${finish.finishErrorType}/${finish.finishErrorCode}); " +
+                                    "waiting for phone confirmation")
+                            onProgress(GaiaFinishProgress.WaitingForPhone)
+                            lastError = PairingException(
+                                "Your phone hasn't confirmed yet — tap the emoji in " +
+                                    "Google Messages, then try again.")
+                        }
+                        else -> throw PairingException(
+                            "Pairing failed (phone error ${finish.finishErrorType}/" +
+                                "${finish.finishErrorCode})")
+                    }
+                } catch (e: PairingException) {
+                    throw e // user-actionable: never retry
+                } catch (e: TimeoutCancellationException) {
+                    // No correlated response in time — the server is likely
+                    // holding FINISHED until the phone tap lands.
+                    Log.w(TAG, "GaiaPairing CLIENT_FINISHED attempt=$attempt response timeout; " +
+                            "waiting for phone confirmation")
+                    onProgress(GaiaFinishProgress.WaitingForPhone)
+                    lastError = e
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "GaiaPairing CLIENT_FINISHED attempt=$attempt failed: ${e.message}")
+                    lastError = e
                 }
-                val (aesKey, hmacKey) = GaiaPairing.deriveDittoV1Keys(h.nextKey)
-                val ttlMs = (if (begun.tokenData.ttlSeconds > 0) begun.tokenData.ttlSeconds else 24 * 3600) * 1000L
-                val finalAuth = AuthData(
-                    aesKey = aesKey,
-                    hmacKey = hmacKey,
-                    refreshPrivateKey = byteArrayOf(),
-                    refreshPublicKey = begun.refreshPublicKey,
-                    tachyonToken = begun.tokenData.token,
-                    tachyonExpiryMs = System.currentTimeMillis() + ttlMs,
-                    sessionId = begun.sessionUuid,
-                    pairingId = h.handshake.pairingAttemptId,
-                    mobileB64 = java.util.Base64.getEncoder()
-                        .encodeToString(encodeDevice(begun.mobileDevice)),
-                    browserB64 = "",
-                )
-                val store = AuthStore(appContext)
-                store.save(finalAuth)
-                store.saveCookies(begun.cookies)
-                session.injectAuth(finalAuth)
-                done = true
+                if (attempt < FINISH_MAX_ATTEMPTS) {
+                    val remaining = deadlineMs - System.currentTimeMillis()
+                    if (remaining <= 0) break
+                    delay(minOf(backoffMs, remaining))
+                    backoffMs *= 2
+                }
+            }
+            if (!done) {
+                throw lastError ?: PairingException("Pairing timed out — try again")
             }
             _pairingState.value = RcsPairingState.PAIRED
             // The session is already up in Gaia mode; refresh the conversation
@@ -377,7 +449,7 @@ class RcsTransport(context: Context) : Transport {
             com.garrietta.relay.rcs.service.RcsService.start(appContext)
             return true
         } catch (e: TimeoutCancellationException) {
-            Log.w(TAG, "Gaia pairing finish timed out after ${PAIRING_TIMEOUT_MS}ms")
+            Log.w(TAG, "Gaia pairing finish timed out")
             throw PairingException("Pairing timed out — try again")
         } finally {
             pairingJob = null
@@ -388,6 +460,30 @@ class RcsTransport(context: Context) : Transport {
                     if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
             }
         }
+    }
+
+    /** Derives the Ditto v1 keys, persists AuthData + cookies, injects the session. */
+    private fun persistFinishedPairing(h: GaiaHandshakeResult) {
+        val begun = h.begun
+        val (aesKey, hmacKey) = GaiaPairing.deriveDittoV1Keys(h.nextKey)
+        val ttlMs = (if (begun.tokenData.ttlSeconds > 0) begun.tokenData.ttlSeconds else 24 * 3600) * 1000L
+        val finalAuth = AuthData(
+            aesKey = aesKey,
+            hmacKey = hmacKey,
+            refreshPrivateKey = byteArrayOf(),
+            refreshPublicKey = begun.refreshPublicKey,
+            tachyonToken = begun.tokenData.token,
+            tachyonExpiryMs = System.currentTimeMillis() + ttlMs,
+            sessionId = begun.sessionUuid,
+            pairingId = h.handshake.pairingAttemptId,
+            mobileB64 = java.util.Base64.getEncoder()
+                .encodeToString(encodeDevice(begun.mobileDevice)),
+            browserB64 = "",
+        )
+        val store = AuthStore(appContext)
+        store.save(finalAuth)
+        store.saveCookies(begun.cookies)
+        session.injectAuth(finalAuth)
     }
 
     /** Maps the phone's finish error codes to user-facing messages. */
@@ -413,6 +509,10 @@ class RcsTransport(context: Context) : Transport {
         private const val TAG = "RcsTransport"
         /** Whole pairing attempt bound: 5 minutes, then back to idle. */
         private const val PAIRING_TIMEOUT_MS = 5 * 60 * 1000L
+        /** CLIENT_FINISHED: up to 3 attempts, 20s per-attempt response wait, 60s total cap. */
+        private const val FINISH_MAX_ATTEMPTS = 3
+        private const val FINISH_ATTEMPT_TIMEOUT_MS = 20_000L
+        private const val FINISH_TIMEOUT_MS = 60_000L
     }
 }
 

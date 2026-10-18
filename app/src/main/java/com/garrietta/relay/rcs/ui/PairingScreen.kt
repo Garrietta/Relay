@@ -241,60 +241,93 @@ fun RcsPairingScreen(
             }
             Phase.GAIA_VERIFY -> {
                 // Real emoji from the phone's SERVER_INIT (never a placeholder).
+                // Authorization happens ON THE PHONE (the emoji tap in Google
+                // Messages) — Relay never authorizes. The sub-states below are
+                // mutually exclusive: exactly one renders at a time.
                 val result = handshakeResult
-                var finishing by remember { mutableStateOf(false) }
+                var verifyUi by remember { mutableStateOf(VerifyUi.MATCH) }
+                var finishStatus by remember { mutableStateOf("Completing pairing…") }
                 var error by remember { mutableStateOf<String?>(null) }
                 if (result == null) {
                     Text("Something went wrong — no handshake.", color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(16.dp))
                     Button(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
                 } else {
-                    // Log the emoji derivation inputs for diagnosing mismatches
-                    // (Build #104: our emoji 🍼 didn't match the phone's 🫠🧴🛴).
+                    // Log the emoji derivation inputs for diagnosing mismatches.
                     LaunchedEffect(result) {
                         result.debugHex?.let { dbg ->
                             Log.d("PairingEmoji", "emoji=${result.emoji} version=${result.verificationCodeVersion}")
                             for ((k, v) in dbg) Log.d("PairingEmoji", "$k=$v")
                         }
                     }
-                    Text("Match the emoji", style = MaterialTheme.typography.headlineSmall)
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Does this emoji match the one on your phone?",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(Modifier.height(24.dp))
-                    if (finishing) {
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(16.dp))
-                        Text("Completing pairing…", style = MaterialTheme.typography.bodyMedium)
-                        LaunchedEffect(Unit) {
-                            transport.trackPairingJob(coroutineContext[Job])
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    transport.finishGaiaPairing(result)
+                    when (verifyUi) {
+                        VerifyUi.MATCH -> {
+                            Text("Match the emoji", style = MaterialTheme.typography.headlineSmall)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "On your phone, tap the emoji that matches this one in Google Messages.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(24.dp))
+                            Text(result.emoji, fontSize = 72.sp)
+                            Spacer(Modifier.height(24.dp))
+                            Button(
+                                onClick = {
+                                    finishStatus = "Completing pairing…"
+                                    error = null
+                                    verifyUi = VerifyUi.FINISHING
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("I've confirmed on my phone") }
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Cancel") }
+                        }
+                        VerifyUi.FINISHING -> {
+                            CircularProgressIndicator()
+                            Spacer(Modifier.height(16.dp))
+                            Text(finishStatus, style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(16.dp))
+                            TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Cancel") }
+                            LaunchedEffect(Unit) {
+                                transport.trackPairingJob(coroutineContext[Job])
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        transport.finishGaiaPairing(result, onProgress = { p ->
+                                            withContext(Dispatchers.Main) {
+                                                finishStatus = when (p) {
+                                                    is RcsTransport.GaiaFinishProgress.Sending ->
+                                                        if (p.attempt > 1) "Retrying… (attempt ${p.attempt} of 3)"
+                                                        else "Completing pairing…"
+                                                    RcsTransport.GaiaFinishProgress.WaitingForPhone ->
+                                                        "Waiting for your phone…"
+                                                }
+                                            }
+                                        })
+                                    }
+                                    phase = Phase.PAIRED
+                                } catch (e: Exception) {
+                                    if (e is CancellationException) throw e
+                                    error = e.message ?: "Pairing failed"
+                                    verifyUi = VerifyUi.ERROR
                                 }
-                                phase = Phase.PAIRED
-                            } catch (e: Exception) {
-                                if (e is kotlinx.coroutines.CancellationException) throw e
-                                error = e.message ?: "Pairing failed"
-                                finishing = false
                             }
                         }
-                    } else {
-                        Text(result.emoji, fontSize = 72.sp)
-                        Spacer(Modifier.height(24.dp))
-                        Button(
-                            onClick = { finishing = true; error = null },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Yes, it matches") }
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Cancel") }
-                    }
-                    error?.let {
-                        Spacer(Modifier.height(8.dp))
-                        Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                        VerifyUi.ERROR -> {
+                            Text("Pairing didn't complete", style = MaterialTheme.typography.headlineSmall)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                error ?: "Pairing failed",
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            // Back to the handshake for a clean retry: a fresh
+                            // CLIENT_INIT means a fresh emoji on the phone.
+                            Button(onClick = { phase = Phase.GAIA_HANDSHAKE }) { Text("Try again") }
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
+                        }
                     }
                 }
             }
@@ -313,6 +346,9 @@ fun RcsPairingScreen(
 }
 
 private enum class Phase { CHOOSING, MICROG, GAIA_SIGNIN, GAIA_HANDSHAKE, GAIA_VERIFY, QR, PAIRED }
+
+/** Mutually exclusive sub-states of the GAIA_VERIFY phase. */
+private enum class VerifyUi { MATCH, FINISHING, ERROR }
 
 /**
  * microG pairing flow: enumerate the phone's Google accounts, mint an

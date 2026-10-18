@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -269,9 +270,11 @@ fun NewConversationDialog(
                     ) {
                         // Tonal button in a cookie shape — dialog actions are
                         // part of the shape family too, not default pills.
+                        // Generous content padding: the label must never clip.
                         FilledTonalButton(
                             onClick = onDismiss,
                             shape = expressiveShape("Cookie4"),
+                            contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp),
                         ) { Text("Cancel") }
                     }
                 }

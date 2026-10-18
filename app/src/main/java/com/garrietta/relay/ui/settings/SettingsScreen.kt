@@ -115,7 +115,7 @@ fun SettingsScreen(
                 SettingsRow(
                     title = "RCS messaging",
                     subtitle = when (rcsState) {
-                        RcsPairingState.NOT_PAIRED -> "Not paired — scan a QR with Google Messages"
+                        RcsPairingState.NOT_PAIRED -> "Not paired — pair with your Google account"
                         RcsPairingState.PAIRING -> "Pairing…"
                         RcsPairingState.PAIRED -> "Connected"
                     },

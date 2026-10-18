@@ -26,6 +26,15 @@ class InboxViewModel(private val repository: UnifiedInboxRepository) : ViewModel
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    /**
+     * Verbatim RCS sync errors (paired mode). Garrett has no logcat access,
+     * so these surface exactly as reported — the inbox shows them.
+     */
+    val syncError: StateFlow<String?> = repository.rcsSyncErrors()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    fun clearSyncError() = repository.clearRcsSyncError()
+
     fun setQuery(q: String) {
         _query.value = q
     }

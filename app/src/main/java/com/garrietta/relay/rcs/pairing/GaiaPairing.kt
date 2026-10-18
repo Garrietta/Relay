@@ -136,23 +136,57 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         val ecKeys = RcsCrypto.generateEcdsaKeyPair()
         val keyDer = ecKeys.public.encoded // x509/PKIX DER (see encodeDataField3Binary)
 
-        // SignInGaia carries the complete browser-faithful header set
-        // (RelayApi.signInGaiaHeaders): the relay headers (sec-ch-ua with
-        // OUR WebView's Chrome version, x-goog-api-key, origin, referer,
-        // sec-fetch-*, accept-language) plus the cookie-auth pair (Cookie
-        // + Authorization: SAPISIDHASH). Google's cookie-authenticated
-        // endpoints reject requests that carry cookies but no proof of
-        // origin — cookies alone get an HTTP 401 (diagnosed 2026-10-18).
+        val ok = signInGaia(cookies, requestId, sessionHex, keyDer)
+        val tokenData = TokenData(ok.token, ok.ttlSeconds)
+        val devices = ok.devices
+        val chosen = devices.filter { it.isPrimary }.maxByOrNull { it.lastSeenMs }
+            ?: devices.maxByOrNull { it.lastSeenMs }
+            ?: throw PairingException("SignInGaia: no devices on the account")
+        BegunGaia(
+            sessionUuid = sessionHex,
+            deviceId = deviceId,
+            cookies = cookies,
+            refreshPublicKey = keyDer,
+            tokenData = tokenData,
+            devices = devices,
+            chosenDevice = chosen,
+            mobileDevice = ok.mobileDevice,
+        )
+    }
+
+    /**
+     * Re-issues SignInGaia with the EXISTING session id + stored refresh
+     * public key to mint a fresh Tachyon token (token refresh, ~24h TTL).
+     * No new keypair, no device selection — the pairing itself is unchanged.
+     * Used by the session's expiry watchdog and the auth-expired recovery.
+     */
+    suspend fun refreshToken(
+        cookies: String,
+        sessionHex: String,
+        refreshPublicKey: ByteArray,
+    ): TokenData = withContext(Dispatchers.IO) {
+        if (cookies.isBlank()) throw PairingException("Token refresh needs Google session cookies")
+        if (refreshPublicKey.isEmpty()) throw PairingException("Token refresh needs the stored refresh key")
+        val ok = signInGaia(cookies, UUID.randomUUID().toString(), sessionHex, refreshPublicKey)
+        TokenData(ok.token, ok.ttlSeconds)
+    }
+
+    /**
+     * Core SignInGaia POST (both field-36 forms) + response parse, shared by
+     * [begin] (fresh pairing) and [refreshToken] (token renewal).
+     */
+    private suspend fun signInGaia(
+        cookies: String,
+        requestId: String,
+        sessionHex: String,
+        keyDer: ByteArray,
+    ): ParsedGaiaResponse {
         val headers = RelayApi.signInGaiaHeaders(cookies)
         if (SapisidHash.extractSapisid(cookies) == null) {
             Log.w(TAG, "SignInGaia: no SAPISID cookie — Cookie header goes without SAPISIDHASH")
         }
-        // Gaia mode host per mautrix (pkg/libgm/util/paths.go):
-        // instantmessaging-pa.clients6.google.com — NOT bare
-        // clients6.google.com, which 404s on the Registration path
-        // (diagnosed 2026-10-18 from a device 404; the live web client
-        // config at messages.google.com/web/config publishes the same host).
         val url = RelayApi.PATH_SIGN_IN_GAIA
+        val deviceId = "messages-web-$sessionHex"
         // Field-36 encoding: the binary form first; if the server 400s it,
         // fall back to the nested-JSON form. The log records which form the
         // server accepted, so the next round can drop the loser.
@@ -179,23 +213,8 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
             Log.w(TAG, "SignInGaia HTTP 400 with field-36 form=$formName; trying next form: " +
                     res.text.take(300))
         }
-        val ok = parsed
+        return parsed
             ?: throw PairingException("SignInGaia failed (HTTP $lastCode) with both field-36 forms")
-        val tokenData = TokenData(ok.token, ok.ttlSeconds)
-        val devices = ok.devices
-        val chosen = devices.filter { it.isPrimary }.maxByOrNull { it.lastSeenMs }
-            ?: devices.maxByOrNull { it.lastSeenMs }
-            ?: throw PairingException("SignInGaia: no devices on the account")
-        BegunGaia(
-            sessionUuid = sessionHex,
-            deviceId = deviceId,
-            cookies = cookies,
-            refreshPublicKey = keyDer,
-            tokenData = tokenData,
-            devices = devices,
-            chosenDevice = chosen,
-            mobileDevice = ok.mobileDevice,
-        )
     }
 
     /**

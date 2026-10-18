@@ -10,6 +10,8 @@ import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.pairing.GaiaPairing
 import com.garrietta.relay.rcs.proto.DeviceInfo
 import com.garrietta.relay.rcs.proto.RcsConversation
+import com.garrietta.relay.rcs.proto.RcsMessage
+import com.garrietta.relay.rcs.proto.RcsParticipant
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.encodeDevice
 import com.garrietta.relay.rcs.session.AuthData
@@ -71,6 +73,93 @@ class RcsTransport(context: Context) : Transport {
     private val _rcsConversations = MutableStateFlow<List<RcsConversation>>(emptyList())
     val rcsConversations: Flow<List<RcsConversation>> = _rcsConversations.asStateFlow()
 
+    /**
+     * Verbatim sync/send errors for the UI — Garrett has no logcat access,
+     * so every sync/send failure surfaces here exactly as the server/client
+     * reported it (same diagnosability standard as the pairing rounds).
+     */
+    private val _syncError = MutableStateFlow<String?>(null)
+    val syncError: Flow<String?> = _syncError.asStateFlow()
+    fun clearSyncError() { _syncError.value = null }
+
+    /** Last-good server conversation list — the paired inbox's source. */
+    fun currentRcsConversations(): List<RcsConversation> = _rcsConversations.value
+
+    /** Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim. */
+    suspend fun refreshConversations() {
+        try {
+            _rcsConversations.value = session.listConversations()
+        } catch (e: Exception) {
+            val msg = "Conversations sync failed: ${e.message ?: e.javaClass.simpleName}"
+            Log.w(TAG, msg, e)
+            _syncError.value = msg
+        }
+    }
+
+    /** Resolves a number to a server conversation, creating it if needed. */
+    suspend fun conversationForNumber(number: String): String =
+        session.conversationFor(number)
+
+    /** Server message history for one conversation (direction via [participants]). */
+    suspend fun rcsMessages(
+        conversationId: String,
+        participants: List<RcsParticipant> = emptyList(),
+    ): List<RcsMessage> = session.listMessages(conversationId, participants = participants)
+
+    /** Live incoming RCS messages (server echoes + new arrivals). */
+    fun observeRcsMessages(): Flow<RcsMessage> = session.incoming
+
+    /**
+     * Sends text via the RCS session. Returns the tmpId for echo
+     * correlation; throws RcsException with the verbatim failure reason.
+     */
+    suspend fun sendRcsText(conversationId: String, text: String, tmpId: String): String =
+        session.sendText(conversationId, text, tmpId)
+
+    suspend fun markRcsRead(conversationId: String, messageId: String) {
+        runCatching { session.markRead(conversationId, messageId) }
+    }
+
+    /**
+     * Tachyon token watchdog (TTL ~24h): refreshes when <1h remains by
+     * re-issuing SignInGaia with the stored session id + refresh public key
+     * — no re-pair, the pairing itself is untouched. Returns false (with a
+     * verbatim [syncError]) when refresh isn't possible.
+     */
+    suspend fun maybeRefreshToken(): Boolean {
+        val store = AuthStore(appContext)
+        val a = store.load() ?: return false
+        if (System.currentTimeMillis() + 3_600_000 < a.tachyonExpiryMs) return true
+        return refreshTokenNow()
+    }
+
+    suspend fun refreshTokenNow(): Boolean {
+        val store = AuthStore(appContext)
+        val a = store.load()
+        val cookies = store.loadCookies()
+        if (a == null || cookies.isNullOrBlank()) {
+            _syncError.value = "RCS session expired and no saved sign-in — please pair again."
+            return false
+        }
+        return try {
+            val td = GaiaPairing().refreshToken(cookies, a.sessionId, a.refreshPublicKey)
+            val ttlMs = (if (td.ttlSeconds > 0) td.ttlSeconds else 24 * 3600) * 1000L
+            val updated = a.copy(
+                tachyonToken = td.token,
+                tachyonExpiryMs = System.currentTimeMillis() + ttlMs,
+            )
+            store.save(updated)
+            session.injectAuth(updated)
+            Log.d(TAG, "RcsTransport: Tachyon token refreshed, new TTL ${ttlMs / 3_600_000}h")
+            true
+        } catch (e: Exception) {
+            val msg = "RCS token refresh failed: ${e.message ?: e.javaClass.simpleName}"
+            Log.w(TAG, msg, e)
+            _syncError.value = msg
+            false
+        }
+    }
+
     init {
         if (session.isPaired) {
             _pairingState.value = RcsPairingState.PAIRED
@@ -80,10 +169,31 @@ class RcsTransport(context: Context) : Transport {
             session.events.collect { event ->
                 when (event) {
                     is SessionEvent.AuthExpired, SessionEvent.Unpaired -> {
-                        _pairingState.value = RcsPairingState.NOT_PAIRED
-                        session.stop()
+                        // One recovery attempt before declaring the pairing
+                        // dead: refresh the Tachyon token and restart the
+                        // session. Only if that fails do we drop to NOT_PAIRED.
+                        val recovered = try { refreshTokenNow() } catch (_: Exception) { false }
+                        if (recovered) {
+                            session.stop()
+                            if (session.start()) {
+                                refreshConversations()
+                            }
+                        } else {
+                            _pairingState.value = RcsPairingState.NOT_PAIRED
+                            session.stop()
+                            _syncError.value = "RCS signed out — please pair again."
+                        }
                     }
                     else -> Unit
+                }
+            }
+        }
+        // Token watchdog: the Tachyon TTL is ~24h; check every 15 minutes.
+        scope.launch {
+            while (true) {
+                delay(15 * 60 * 1000L)
+                if (_pairingState.value == RcsPairingState.PAIRED) {
+                    runCatching { maybeRefreshToken() }
                 }
             }
         }

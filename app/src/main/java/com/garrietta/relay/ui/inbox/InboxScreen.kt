@@ -113,6 +113,16 @@ fun InboxScreen(
         userMessages.collect { snackbarHostState.showSnackbar(it) }
     }
 
+    // RCS sync errors, verbatim — Garrett has no logcat access, so a broken
+    // sync must say exactly what failed, right in the inbox.
+    val syncError by viewModel.syncError.collectAsState()
+    LaunchedEffect(syncError) {
+        syncError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearSyncError()
+        }
+    }
+
     Scaffold(
         // Transparent: the screen lives inside the list-pane container (or
         // the window background in single-pane) — the conversation list is
@@ -312,8 +322,6 @@ private fun NewConversationPill(
         }
     }
 }
-
-@Composable
 
 @Composable
 private fun EmptyInbox() {

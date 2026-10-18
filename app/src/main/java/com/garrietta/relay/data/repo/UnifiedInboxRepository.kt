@@ -103,6 +103,12 @@ class UnifiedInboxRepository(
             }
         }
 
+        // Paired-mode switch: when the RCS pairing flips, the inbox source
+        // flips with it (paired = server only, never the Telephony provider).
+        scope.launch {
+            rcsTransport.pairingState.collect { refresh() }
+        }
+
         scope.launch { refresh() }
     }
 
@@ -142,6 +148,12 @@ class UnifiedInboxRepository(
      * "5551234567"). Group (multi-recipient) threads are never merged.
      */
     suspend fun loadConversations(): List<Conversation>? = withContext(Dispatchers.IO) {
+        // PAIRED: the Google Messages sync is the SINGLE source of truth for
+        // SMS+MMS+RCS — the Telephony provider is NEVER read here (no
+        // duplicates, no second copy). UNPAIRED: the Telephony fallback below.
+        if (rcsTransport.isPairedNow) {
+            return@withContext loadRcsConversations()
+        }
         val raw = mutableListOf<RawThread>()
         try {
             val uri = Uri.parse("content://mms-sms/conversations?simple=true")
@@ -205,6 +217,129 @@ class UnifiedInboxRepository(
             return@withContext null
         }
         mergeThreads(raw).sortedByDescending { it.date }
+    }
+
+    // ---------- RCS (paired mode) ----------
+
+    /** Synchronous paired check for send-path routing. */
+    fun isRcsPaired(): Boolean = rcsTransport.isPairedNow
+
+    /** Verbatim RCS sync errors for the UI (no logcat on his device). */
+    fun rcsSyncErrors(): Flow<String?> = rcsTransport.syncError
+    fun clearRcsSyncError() = rcsTransport.clearSyncError()
+
+    /** Live incoming RCS messages (server echoes + new arrivals). */
+    fun observeRcsMessages(): Flow<com.garrietta.relay.rcs.proto.RcsMessage> =
+        rcsTransport.observeRcsMessages()
+
+    /** Resolves a number to a server conversation, creating it if needed. */
+    suspend fun rcsConversationFor(number: String): String =
+        rcsTransport.conversationForNumber(number)
+
+    private fun loadRcsConversations(): List<Conversation> {
+        return rcsTransport.currentRcsConversations()
+            .map { mapRcsConversation(it) }
+            .sortedByDescending { it.date }
+    }
+
+    private fun mapRcsConversation(c: com.garrietta.relay.rcs.proto.RcsConversation): Conversation {
+        val others = c.participants.filter { !it.isMe }
+        val name = c.name.ifBlank {
+            others.joinToString(", ") {
+                it.fullName.ifBlank { it.firstName }.ifBlank { it.number }
+            }
+        }.ifBlank { c.id }
+        val address = others.firstOrNull()?.number ?: name
+        return Conversation(
+            threadId = ("rcs:" + c.id).hashCode().toLong(),
+            address = address,
+            displayName = name,
+            snippet = c.snippet,
+            date = c.timestampMs,
+            unread = c.unread,
+            messageCount = 0,
+            transportLabel = "RCS",
+            photoUri = contactLookup.photoUri(address),
+            threadIds = emptyList(),
+            rcsConversationId = c.id,
+        )
+    }
+
+    /** Latest server messages per conversation (for read marking). */
+    private val rcsServerMessages = mutableMapOf<String, List<com.garrietta.relay.rcs.proto.RcsMessage>>()
+
+    /**
+     * Server message history for an RCS conversation, oldest first — the
+     * same shape as the Telephony loader so the thread screen stays
+     * transport-blind.
+     */
+    suspend fun rcsMessages(conversationId: String): List<Message> = withContext(Dispatchers.IO) {
+        val conv = rcsTransport.currentRcsConversations().firstOrNull { it.id == conversationId }
+        val participants = conv?.participants ?: emptyList()
+        val threadKey = ("rcs:" + conversationId).hashCode().toLong()
+        val server = rcsTransport.rcsMessages(conversationId, participants)
+        synchronized(rcsServerMessages) { rcsServerMessages[conversationId] = server }
+        server.map { m ->
+            val senderNumber = participants
+                .firstOrNull { it.participantId == m.participantId }?.number.orEmpty()
+            Message(
+                id = m.id.hashCode().toLong(),
+                threadId = threadKey,
+                address = senderNumber,
+                body = m.body,
+                date = m.timestampMs,
+                isOutgoing = m.fromMe,
+                isMms = false,
+                read = true,
+                tmpId = m.tmpId.ifBlank { null },
+            )
+        }.sortedBy { it.date }
+    }
+
+    /** Server participants for an RCS conversation, with self flagged. */
+    suspend fun getRcsParticipants(conversationId: String): List<Participant> =
+        withContext(Dispatchers.IO) {
+            val conv = rcsTransport.currentRcsConversations()
+                .firstOrNull { it.id == conversationId }
+                ?: return@withContext emptyList()
+            conv.participants.map { p ->
+                Participant(
+                    address = p.number,
+                    displayName = p.fullName.ifBlank { p.firstName }.ifBlank { p.number },
+                    photoUri = contactLookup.photoUri(p.number),
+                    isSelf = p.isMe,
+                )
+            }
+        }
+
+    /** Outcome of an RCS send: the tmpId for echo correlation, or the verbatim reason. */
+    sealed interface RcsSendOutcome {
+        data class Sent(val tmpId: String) : RcsSendOutcome
+        data class Failed(val reason: String) : RcsSendOutcome
+    }
+
+    suspend fun sendRcs(conversationId: String, body: String, tmpId: String): RcsSendOutcome {
+        return try {
+            rcsTransport.sendRcsText(conversationId, body, tmpId)
+            // Refresh the conversation list so the snippet/date update, then
+            // the inbox. The echo arrives on the long-poll and reconciles the
+            // optimistic bubble via tmpId.
+            rcsTransport.refreshConversations()
+            refresh()
+            RcsSendOutcome.Sent(tmpId)
+        } catch (e: Exception) {
+            RcsSendOutcome.Failed(e.message ?: "RCS send failed")
+        }
+    }
+
+    /** Marks the latest incoming RCS message read (mirrors markThreadRead). */
+    suspend fun markRcsRead(conversationId: String) = withContext(Dispatchers.IO) {
+        val latest = synchronized(rcsServerMessages) {
+            rcsServerMessages[conversationId]
+                ?.filter { !it.fromMe }
+                ?.maxByOrNull { it.timestampMs }
+        } ?: return@withContext
+        rcsTransport.markRcsRead(conversationId, latest.id)
     }
 
     /**
@@ -537,15 +672,52 @@ class UnifiedInboxRepository(
 
     /**
      * The device's own address (normalized digits), or null when it cannot be
-     * determined. Derived from the FROM address of a sent MMS (msg_box=2) —
-     * no READ_PHONE_STATE permission needed. Used to exclude self from
-     * participant counts so him+1 threads are not misdetected as groups.
+     * determined. Two strategies, first hit wins (the winner is logged):
+     *  1. FROM of a sent MMS (msg_box=2) — always self, no permission needed.
+     *  2. Thread-presence: the address appearing in the most threads. His
+     *     own number shows up in nearly every thread's recipient set; any
+     *     other number shows up in few. (Strategy 1 fails when he hasn't sent
+     *     an MMS recently — that left "Grace, Garrett" misdetected.)
+     * Used to exclude self from participant counts so him+1 threads are not
+     * misdetected as groups.
      */
     suspend fun ownAddress(): String? = withContext(Dispatchers.IO) {
         if (ownAddressResolved) return@withContext ownAddressCache
         ownAddressResolved = true
-        ownAddressCache = selfAddressFromSentMms()
-        ownAddressCache
+        val s1 = selfAddressFromSentMms()
+        if (s1 != null) {
+            Log.d(TAG, "ownAddress: strategy=sent-mms-from value=$s1")
+            ownAddressCache = s1
+            return@withContext s1
+        }
+        val s2 = selfAddressByThreadPresence()
+        Log.d(TAG, "ownAddress: strategy=thread-presence value=$s2")
+        ownAddressCache = s2
+        s2
+    }
+
+    private fun selfAddressByThreadPresence(): String? {
+        return try {
+            val counts = mutableMapOf<String, Int>()
+            var threads = 0
+            context.contentResolver.query(
+                Uri.parse("content://mms-sms/conversations?simple=true"),
+                arrayOf("_id"), null, null, null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    threads++
+                    for (a in threadRecipients(c.getLong(0))) {
+                        counts[a] = (counts[a] ?: 0) + 1
+                    }
+                }
+            }
+            if (threads < 3) return null
+            counts.maxByOrNull { it.value }
+                ?.takeIf { it.value > threads / 2 }
+                ?.key
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun selfAddressFromSentMms(): String? {

@@ -25,8 +25,9 @@ class ChatViewModel(
     /**
      * Server conversation id for RCS rows (paired mode). When set, message
      * loads/sends go through the RCS session, never the Telephony provider.
+     * Mutable: a brand-new conversation resolves it on init.
      */
-    private val rcsConversationId: String? = null,
+    private var rcsConversationId: String? = null,
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
@@ -93,12 +94,91 @@ class ChatViewModel(
 
     private var participantIndex: Map<String, Participant> = emptyMap()
 
+    /** Pending optimistic RCS bubbles, keyed by tmpId (echo reconciliation). */
+    private val pendingOptimistic = mutableMapOf<String, Message>()
+
     init {
-        reload()
-        loadParticipants()
-        viewModelScope.launch {
-            repository.inboxChanges().collect { reload() }
+        if (rcsConversationId != null) {
+            initRcs(rcsConversationId)
+        } else if (address.isNotBlank() && repository.isRcsPaired()) {
+            // Paired + brand-new conversation (e.g. the self-chat test):
+            // resolve the server conversation first, then run the RCS path.
+            viewModelScope.launch {
+                try {
+                    rcsConversationId = repository.rcsConversationFor(address)
+                    initRcs(rcsConversationId!!)
+                } catch (e: Exception) {
+                    _sendError.value = "Couldn't open chat: ${e.message ?: e.javaClass.simpleName}"
+                }
+            }
+        } else {
+            reload()
+            loadParticipants()
+            viewModelScope.launch {
+                repository.inboxChanges().collect { reload() }
+            }
         }
+    }
+
+    /**
+     * RCS thread init: history from the server, participants from the server
+     * (self flagged by the server — no heuristics), and a live subscription
+     * for echoes + new arrivals.
+     */
+    private fun initRcs(conversationId: String) {
+        viewModelScope.launch {
+            _messages.value = repository.rcsMessages(conversationId)
+            repository.markRcsRead(conversationId)
+        }
+        viewModelScope.launch {
+            val parts = repository.getRcsParticipants(conversationId)
+            _participants.value = parts
+            _others.value = parts.filterNot { it.isSelf }
+            participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
+            val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
+            for (p in parts) {
+                val key = repository.normalizedAddress(p.address)
+                seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
+            }
+            _senderSeeds.value = seeds
+        }
+        viewModelScope.launch {
+            repository.observeRcsMessages().collect { msg ->
+                if (msg.conversationId == conversationId) onRcsIncoming(msg)
+            }
+        }
+        if (address.isNotBlank()) loadContactTheme(address)
+    }
+
+    /**
+     * Live RCS arrival. A server echo carries the optimistic bubble's tmpId
+     * and replaces it; anything else is genuinely new — reload to stay
+     * consistent rather than risking a duplicate.
+     */
+    private fun onRcsIncoming(msg: com.garrietta.relay.rcs.proto.RcsMessage) {
+        val tmpId = msg.tmpId.ifBlank { null }
+        val optimistic = tmpId?.let { pendingOptimistic.remove(it) }
+        if (optimistic == null) {
+            viewModelScope.launch {
+                _messages.value = repository.rcsMessages(rcsConversationId ?: return@launch)
+            }
+            return
+        }
+        val mapped = Message(
+            id = msg.id.hashCode().toLong(),
+            threadId = threadId,
+            address = optimistic.address,
+            body = msg.body.ifBlank { optimistic.body },
+            date = msg.timestampMs,
+            isOutgoing = true,
+            isMms = false,
+            read = true,
+            tmpId = tmpId,
+        )
+        _messages.value = _messages.value
+            .map { if (it.tmpId == tmpId) mapped else it }
+            .sortedBy { it.date }
+        viewModelScope.launch { repository.markRcsRead(rcsConversationId ?: return@launch) }
     }
 
     /** Resolves the participant who sent [address], or null when unknown. */
@@ -168,36 +248,77 @@ class ChatViewModel(
         if (body.isBlank() || _sending.value) return
         _sending.value = true
         _sendError.value = null
+        val convId = rcsConversationId
         viewModelScope.launch {
-            when (val result = repository.smsTransport.sendMessage(recipient, body)) {
-                is SendResult.Sent -> {
-                    // Optimistic insert so the bubble appears instantly.
-                    val optimistic = Message(
-                        id = System.currentTimeMillis(),
-                        threadId = activeThreadId,
-                        address = recipient,
-                        body = body,
-                        date = System.currentTimeMillis(),
-                        isOutgoing = true,
-                        isMms = false,
-                        read = true,
-                    )
-                    _messages.value = _messages.value + optimistic
-                    repository.refresh()
-                    // A brand-new conversation has no thread yet; bind to the
-                    // real one once the provider knows about it.
-                    if (activeThreadId < 0) {
-                        val found = repository.findThreadId(recipient)
-                        if (found >= 0) {
-                            activeThreadId = found
-                            reload()
-                        }
-                    }
-                }
-                is SendResult.Failed -> _sendError.value = result.reason
-                is SendResult.Unavailable -> _sendError.value = result.reason
+            if (convId != null) {
+                sendRcs(convId, body)
+            } else {
+                sendSms(recipient, body)
             }
             _sending.value = false
+        }
+    }
+
+    /**
+     * RCS send: optimistic bubble (keyed by tmpId) → server → the long-poll
+     * echo replaces it via [onRcsIncoming]. Failures remove the optimistic
+     * bubble and surface the VERBATIM reason (no logcat on his device).
+     */
+    private suspend fun sendRcs(conversationId: String, body: String) {
+        val tmpId = java.util.UUID.randomUUID().toString()
+        val optimistic = Message(
+            id = -System.currentTimeMillis(),
+            threadId = threadId,
+            address = "",
+            body = body,
+            date = System.currentTimeMillis(),
+            isOutgoing = true,
+            isMms = false,
+            read = true,
+            tmpId = tmpId,
+        )
+        pendingOptimistic[tmpId] = optimistic
+        _messages.value = (_messages.value + optimistic).sortedBy { it.date }
+        when (val outcome = repository.sendRcs(conversationId, body, tmpId)) {
+            is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
+                // The server echo (same tmpId) replaces the optimistic bubble.
+            }
+            is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
+                pendingOptimistic.remove(tmpId)
+                _messages.value = _messages.value.filterNot { it.tmpId == tmpId }
+                _sendError.value = outcome.reason
+            }
+        }
+    }
+
+    private suspend fun sendSms(recipient: String, body: String) {
+        when (val result = repository.smsTransport.sendMessage(recipient, body)) {
+            is SendResult.Sent -> {
+                // Optimistic insert so the bubble appears instantly.
+                val optimistic = Message(
+                    id = System.currentTimeMillis(),
+                    threadId = activeThreadId,
+                    address = recipient,
+                    body = body,
+                    date = System.currentTimeMillis(),
+                    isOutgoing = true,
+                    isMms = false,
+                    read = true,
+                )
+                _messages.value = _messages.value + optimistic
+                repository.refresh()
+                // A brand-new conversation has no thread yet; bind to the
+                // real one once the provider knows about it.
+                if (activeThreadId < 0) {
+                    val found = repository.findThreadId(recipient)
+                    if (found >= 0) {
+                        activeThreadId = found
+                        reload()
+                    }
+                }
+            }
+            is SendResult.Failed -> _sendError.value = result.reason
+            is SendResult.Unavailable -> _sendError.value = result.reason
         }
     }
 

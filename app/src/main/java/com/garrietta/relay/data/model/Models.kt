@@ -39,6 +39,12 @@ data class Message(
     val isOutgoing: Boolean,
     val isMms: Boolean,
     val read: Boolean,
+    /**
+     * RCS echo-correlation id (the tmpID sent with the message). The server
+     * echo carries it back; the optimistic bubble is replaced on match.
+     * Null for Telephony messages.
+     */
+    val tmpId: String? = null,
 )
 
 /** Theme preference persisted in SharedPreferences. */
@@ -49,4 +55,6 @@ data class Participant(
     val address: String,
     val displayName: String,
     val photoUri: String?,
+    /** True for the device owner (RCS server says so; Telephony infers it). */
+    val isSelf: Boolean = false,
 )

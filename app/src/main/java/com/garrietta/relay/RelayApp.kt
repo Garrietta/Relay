@@ -26,6 +26,10 @@ class RelayApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Crash capture FIRST — before anything else can throw — so a crash
+        // anywhere in startup still lands in the report Garrett can see in
+        // Settings (no logcat access from his device).
+        CrashReporter.install(this)
         MessageNotifications.ensureChannel(this)
         // Fresh avatar-shape variety on every cold start (Garrett: shapes
         // "maybe even changing shape on each startup").

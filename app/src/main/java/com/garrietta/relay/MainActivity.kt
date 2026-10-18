@@ -38,6 +38,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -127,6 +129,28 @@ class MainActivity : ComponentActivity() {
             val appSeed by app.appSeedStore.seed.collectAsState()
 
             RelayTheme(themeMode = themeMode, seedColor = appSeed) {
+                // One-time crash notice: if the last run died with an
+                // uncaught exception (see CrashReporter — no logcat access
+                // from Garrett's device), say so once on next launch.
+                var crashNotice by remember {
+                    mutableStateOf(CrashReporter.lastCrashSummary(this@MainActivity))
+                }
+                if (crashNotice != null) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            CrashReporter.clear(this@MainActivity)
+                            crashNotice = null
+                        },
+                        title = { Text("Relay crashed last time") },
+                        text = { Text(crashNotice!!) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                CrashReporter.clear(this@MainActivity)
+                                crashNotice = null
+                            }) { Text("Dismiss") }
+                        },
+                    )
+                }
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     // Foldable adaptive layout: conversation list beside the
                     // chat when wide (unfolded Fold / tablet), single-pane

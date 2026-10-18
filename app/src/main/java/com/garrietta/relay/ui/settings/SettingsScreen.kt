@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,13 +34,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.garrietta.relay.CrashReporter
 import com.garrietta.relay.data.model.ThemeMode
 import com.garrietta.relay.data.transport.RcsPairingState
 
@@ -53,6 +58,7 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsState()
     val rcsState by viewModel.rcsPairingState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
@@ -118,6 +124,27 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+            }
+
+            // Crash diagnosability: Garrett's device has no logcat access
+            // from here, so the app captures its own uncaught exceptions
+            // (see CrashReporter) and surfaces the last one here.
+            val lastCrash = remember { CrashReporter.lastCrashSummary(context) }
+            if (lastCrash != null) {
+                var dismissed by remember { mutableStateOf(false) }
+                if (!dismissed) {
+                    SettingsCard(title = "Diagnostics", icon = Icons.Filled.Warning) {
+                        SettingsRow(
+                            title = "Last crash",
+                            subtitle = lastCrash,
+                            actionLabel = "Clear",
+                            onAction = {
+                                CrashReporter.clear(context)
+                                dismissed = true
+                            },
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(8.dp))

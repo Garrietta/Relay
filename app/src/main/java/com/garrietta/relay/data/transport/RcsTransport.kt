@@ -444,10 +444,12 @@ class RcsTransport(context: Context) : Transport {
     }
 
     /**
-     * Completes Gaia pairing AFTER the user taps the matching emoji on the
-     * phone. Authorization happens IN GOOGLE MESSAGES (the phone tap) —
-     * Relay never authorizes; the UI only proceeds after the user confirms
-     * on the phone.
+     * Completes Gaia pairing: CLIENT_FINISHED goes out IMMEDIATELY (sending
+     * it is what notifies Google Messages / triggers the phone's emoji
+     * prompt) and this blocks on the correlated FINISHED response. Relay
+     * shows the emoji and does NOTHING else — no verification action in
+     * Relay; authorization happens ON THE PHONE (the emoji tap in Google
+     * Messages).
      *
      * Sends CLIENT_FINISHED as an unencrypted BUGLE_MESSAGE (with the
      * private-API confirmation string). There is no separate
@@ -455,9 +457,9 @@ class RcsTransport(context: Context) : Transport {
      * response IS the signal (per the reference sendGaiaPairingMessage, which
      * blocks on it): the server answers once the phone's tap reaches it. If
      * the tap hasn't landed yet the server holds or rejects, so this sends
-     * up to [FINISH_MAX_ATTEMPTS] attempts with backoff under a
-     * [FINISH_TIMEOUT_MS] total cap, reporting [GaiaFinishProgress] — it
-     * never hangs forever.
+     * up to [FINISH_MAX_ATTEMPTS] sequential attempts (one in flight at a
+     * time — never spammed) under a [FINISH_TIMEOUT_MS] total cap, reporting
+     * [GaiaFinishProgress] — it never hangs forever.
      *
      * On success runs the Ditto v1 key derivation, persists the final
      * AuthData + cookies, and keeps the Gaia-mode session running. If our
@@ -496,7 +498,12 @@ class RcsTransport(context: Context) : Transport {
                         messageType = Rpc.MSG_TYPE_BUGLE,
                         destRegIds = listOf(begun.chosenDevice.deviceId),
                         cookies = begun.cookies,
-                        timeoutMs = FINISH_ATTEMPT_TIMEOUT_MS,
+                        // Never overshoot the total budget: clamp the
+                        // per-attempt wait to the remaining time.
+                        timeoutMs = minOf(
+                            FINISH_ATTEMPT_TIMEOUT_MS,
+                            (deadlineMs - System.currentTimeMillis()).coerceAtLeast(1L),
+                        ),
                     )
                     Log.d(TAG, "GaiaPairing CLIENT_FINISHED response=${responseBytes.size}B " +
                             "attempt=$attempt")
@@ -619,10 +626,14 @@ class RcsTransport(context: Context) : Transport {
         private const val TAG = "RcsTransport"
         /** Whole pairing attempt bound: 5 minutes, then back to idle. */
         private const val PAIRING_TIMEOUT_MS = 5 * 60 * 1000L
-        /** CLIENT_FINISHED: up to 3 attempts, 20s per-attempt response wait, 60s total cap. */
+        /**
+         * CLIENT_FINISHED: up to 3 sequential attempts (one in flight at a
+         * time), 45s per-attempt response wait, 120s total cap — Garrett
+         * needs time to see the emoji, switch apps, and tap on the phone.
+         */
         private const val FINISH_MAX_ATTEMPTS = 3
-        private const val FINISH_ATTEMPT_TIMEOUT_MS = 20_000L
-        private const val FINISH_TIMEOUT_MS = 60_000L
+        private const val FINISH_ATTEMPT_TIMEOUT_MS = 45_000L
+        private const val FINISH_TIMEOUT_MS = 120_000L
     }
 }
 

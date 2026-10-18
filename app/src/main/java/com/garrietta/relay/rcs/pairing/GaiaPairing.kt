@@ -1,7 +1,9 @@
 package com.garrietta.relay.rcs.pairing
 
+import android.util.Log
 import com.garrietta.relay.rcs.crypto.RcsCrypto
 import com.garrietta.relay.rcs.net.RelayApi
+import com.garrietta.relay.rcs.net.RpcResult
 import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
@@ -15,6 +17,7 @@ import com.garrietta.relay.rcs.proto.FieldVal
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.security.MessageDigest
@@ -98,12 +101,15 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 chain.proceed(req)
             }
             .build()
-        // Note: Gaia mode uses clients6.google.com per the spec.
-        val url = RelayApi.PA_HOST.replace(
-            "instantmessaging-pa.googleapis.com", "clients6.google.com"
-        ) + "/\$rpc/google.internal.communications.instantmessaging.v1.Registration/SignInGaia"
-        val res = postRpcCancellable(gaiaClient, url, RelayApi.CT_PBLITE, request.toByteArray())
-        if (!res.isOk()) throw PairingException("SignInGaia HTTP ${res.code}: ${res.text.take(200)}")
+        // Gaia mode host per mautrix (pkg/libgm/util/paths.go):
+        // instantmessaging-pa.clients6.google.com — NOT bare
+        // clients6.google.com, which 404s on the Registration path
+        // (diagnosed 2026-10-18 from a device 404; the live web client
+        // config at messages.google.com/web/config publishes the same host).
+        val url = RelayApi.PATH_SIGN_IN_GAIA
+        val body = request.toByteArray()
+        Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId cookies=[${cookieNames(cookies)}]")
+        val res = postSignInGaiaWithRetry(gaiaClient, url, body)
 
         val (tokenData, devices) = decodeSignInGaiaResponse(res.text)
         val chosen = devices.filter { it.isPrimary }.maxByOrNull { it.lastSeenMs }
@@ -119,6 +125,47 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
             chosenDevice = chosen,
         )
     }
+
+    /**
+     * SignInGaia with bounded retries: up to 3 attempts, exponential
+     * backoff (1s, 2s). A 4xx is deterministic (wrong endpoint, bad
+     * session) — fail fast, never retry. 5xx / network failures retry.
+     * The raw HTML error page goes to logcat only; the exception carries a
+     * one-line message for the UI (never raw HTML).
+     */
+    private suspend fun postSignInGaiaWithRetry(
+        gaiaClient: OkHttpClient,
+        url: String,
+        body: ByteArray,
+    ): RpcResult {
+        var last: RpcResult? = null
+        var backoffMs = 1000L
+        repeat(3) { attempt ->
+            val res = postRpcCancellable(gaiaClient, url, RelayApi.CT_PBLITE, body)
+            if (res.isOk()) return res
+            if (res.code in 400..499) {
+                Log.w(TAG, "SignInGaia HTTP ${res.code} (deterministic, not retrying): ${res.text.take(500)}")
+                throw PairingException(cleanHttpError("SignInGaia", res.code))
+            }
+            Log.w(TAG, "SignInGaia HTTP ${res.code} (attempt ${attempt + 1}/3), backing off ${backoffMs}ms: ${res.text.take(200)}")
+            last = res
+            if (attempt < 2) delay(backoffMs)
+            backoffMs *= 2
+        }
+        val code = last!!.code
+        Log.w(TAG, "SignInGaia HTTP $code after 3 attempts: ${last!!.text.take(500)}")
+        throw PairingException(cleanHttpError("SignInGaia", code))
+    }
+
+    private fun cleanHttpError(op: String, code: Int): String = when (code) {
+        404 -> "$op: Google didn't recognize the pairing request (404)"
+        401, 403 -> "$op: Google rejected the session (HTTP $code) — sign in again"
+        else -> "$op failed (HTTP $code)"
+    }
+
+    /** Cookie NAMES only — values are secrets and are never logged. */
+    private fun cookieNames(cookies: String): List<String> =
+        cookies.split(";").mapNotNull { it.substringBefore("=").trim().takeIf { it.isNotEmpty() } }
 
     /**
      * Step 2: prepare the UKEY2 CLIENT_INIT payload.
@@ -295,6 +342,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
     }
 
     companion object {
+        private const val TAG = "GaiaPairing"
         /** Terms-of-Service string sent with CLIENT_FINISHED (from spec). */
         const val TOS_STRING = "I agree to the Google Terms of Service"
     }

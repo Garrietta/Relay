@@ -55,9 +55,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * RCS pairing screen — the phone's own Google account (microG, no browser
- * sign-in) is the primary flow; the WebView Google sign-in and QR remain as
- * fallbacks, in that order.
+ * RCS pairing screen — WebView Google sign-in is the primary flow (it beat
+ * Google's "browser or app may not be secure" block on-device 2026-10-18),
+ * QR second. The microG no-browser path sits last: device-tested, Google
+ * refuses to mint its OAuthLogin scope for third-party signatures
+ * (UnregisteredOnApiConsole) — parked, see MicrogPairing.kt.
  *
  * Cancellation: backing out disposes this screen; the DisposableEffect
  * aborts the in-flight pairing and resets the state machine so Settings can
@@ -87,25 +89,24 @@ fun RcsPairingScreen(
                 Text("Pair RCS", style = MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Use the Google account already on this phone — no browser sign-in, just match the emoji.",
+                    "Sign in with your Google account, then match the emoji on your phone.",
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(24.dp))
                 Button(
-                    onClick = { phase = Phase.MICROG },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Pair with this phone's Google account") }
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(
                     onClick = { phase = Phase.GAIA_SIGNIN },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Sign in with Google in a browser") }
+                ) { Text("Pair with your Google account") }
                 Spacer(Modifier.height(12.dp))
                 OutlinedButton(
                     onClick = { phase = Phase.QR },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Pair with QR instead") }
+                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    onClick = { phase = Phase.MICROG },
+                ) { Text("Pair via microG account") }
                 Spacer(Modifier.height(16.dp))
                 TextButton(onClick = onBack) { Text("Cancel") }
             }
@@ -119,6 +120,12 @@ fun RcsPairingScreen(
             Phase.GAIA_SIGNIN -> {
                 var cookies by remember { mutableStateOf<String?>(null) }
                 var error by remember { mutableStateOf<String?>(null) }
+                // Cookie capture fires on EVERY WebView page load while
+                // SAPISID is present — attempt SignInGaia exactly once per
+                // visit. The retry policy inside GaiaPairing.begin handles
+                // transient failures (3 tries, backoff); re-captures must
+                // never re-trigger the attempt (that was the 404 loop).
+                var signInAttempted by remember { mutableStateOf(false) }
 
                 if (cookies == null) {
                     Text("Sign in with Google", style = MaterialTheme.typography.headlineSmall)
@@ -143,6 +150,8 @@ fun RcsPairingScreen(
                     Spacer(Modifier.height(16.dp))
                     Text("Contacting Google…", style = MaterialTheme.typography.bodyMedium)
                     LaunchedEffect(cookies) {
+                        if (signInAttempted) return@LaunchedEffect
+                        signInAttempted = true
                         transport.trackPairingJob(coroutineContext[Job])
                         try {
                             withContext(Dispatchers.IO) {
@@ -156,7 +165,13 @@ fun RcsPairingScreen(
                     }
                     error?.let {
                         Spacer(Modifier.height(8.dp))
-                        Text(it, color = MaterialTheme.colorScheme.error)
+                        Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = {
+                            cookies = null
+                            error = null
+                            signInAttempted = false
+                        }) { Text("Try again") }
                     }
                 }
             }

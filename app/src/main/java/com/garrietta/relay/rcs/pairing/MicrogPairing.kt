@@ -47,6 +47,15 @@ import okhttp3.Request
  * third-party signature. If Google refuses, the error surfaces verbatim
  * (INVALID_TOKENS / userinfo HTTP 4xx) and the verdict flips to NOT VIABLE.
  *
+ * VERDICT 2026-10-18 (device-tested, Build #81): NOT VIABLE — parked.
+ * Relay enumerates the phone's Google accounts fine, but Google refuses to
+ * mint the "oauth2:https://www.google.com/accounts/OAuthLogin" scope for a
+ * third-party package/signature (AccountManager fails with
+ * UnregisteredOnApiConsole — the scope is restricted to first-party
+ * clients). The token→cookie chain above is technically sound, but the
+ * privileged scope is the blocker. Kept for reference; do not spend more
+ * effort here unless Google's policy changes.
+ *
  * Nothing here touches credentials beyond Google's own endpoints: the token
  * never leaves the device except to accounts.google.com / googleapis.com.
  */

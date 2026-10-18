@@ -27,6 +27,17 @@ object RelayApi {
     const val PATH_SEND_MESSAGE = "$RPC.Messaging/SendMessage"
     const val PATH_ACK_MESSAGES = "$RPC.Messaging/AckMessages"
 
+    /**
+     * Gaia-mode host. mautrix (pkg/libgm/util/paths.go) uses
+     * instantmessaging-pa.clients6.google.com — NOT bare clients6.google.com
+     * (the bare host 404s on the Registration path; diagnosed 2026-10-18
+     * from a device 404). The live web client config at
+     * messages.google.com/web/config publishes the same host.
+     */
+    const val PA_HOST_GAIA = "https://instantmessaging-pa.clients6.google.com"
+    const val RPC_GAIA = "$PA_HOST_GAIA/\$rpc/google.internal.communications.instantmessaging.v1"
+    const val PATH_SIGN_IN_GAIA = "$RPC_GAIA.Registration/SignInGaia"
+
     /** Google's public web-client API key (hardcoded in the official web client too). */
     const val API_KEY = "AIzaSyCA4RsOZUFrm9whhtGosPlJLmVPnfSHKz8"
 

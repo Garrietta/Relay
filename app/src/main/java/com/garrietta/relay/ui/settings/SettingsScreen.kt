@@ -18,7 +18,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -75,7 +74,7 @@ fun SettingsScreen(
         ) {
             Spacer(Modifier.height(4.dp))
 
-            SettingsCard(title = "Appearance", icon = Icons.Filled.Palette) {
+            SettingsCard(title = "Appearance", icon = null) {
                 ThemeModeRow(
                     selected = themeMode,
                     onSelect = viewModel::setThemeMode,
@@ -133,7 +132,7 @@ fun SettingsScreen(
 @Composable
 private fun SettingsCard(
     title: String,
-    icon: ImageVector,
+    icon: ImageVector?,
     content: @Composable () -> Unit,
 ) {
     Column(
@@ -144,12 +143,14 @@ private fun SettingsCard(
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.width(8.dp))
+            if (icon != null) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             Text(
                 title,
                 style = MaterialTheme.typography.titleLarge,

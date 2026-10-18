@@ -6,9 +6,7 @@ plugins {
 
 android {
     namespace = "com.garrietta.relay"
-    // compileSdk 37: material3 1.5.0-beta01 and SegmentedShape were built
-    // against API 37. targetSdk stays 36 (no behavior changes).
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.garrietta.relay"
@@ -31,9 +29,8 @@ android {
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-            // Expressive APIs are @ExperimentalMaterial3ExpressiveApi; opt in
-            // once here instead of annotating every call site.
-            freeCompilerArgs.add("-Xopt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
+            // Shared-transition APIs are @ExperimentalSharedTransitionApi;
+            // opt in once here instead of annotating every call site.
             freeCompilerArgs.add("-Xopt-in=androidx.compose.animation.ExperimentalSharedTransitionApi")
         }
     }
@@ -43,23 +40,18 @@ android {
 }
 
 dependencies {
-    // Note: compose-bom 2026.09.00 pulls compose 1.12.x which requires
-    // compileSdk 37; 2026.06.01 (compose 1.11.x, minCompileSdk 35) is the
-    // newest BOM compatible with compileSdk 36 + AGP 8.13.x.
+    // compose-bom 2026.06.01 (compose 1.11.x) — newest BOM compatible with
+    // compileSdk 36 + AGP 8.13.x. (material3 1.5.0-beta01 was evaluated but
+    // requires SDK 37 / AGP 9.1.0+, neither publicly available as of 2026-10;
+    // expressive is hand-rolled on stable APIs instead.)
     val composeBom = platform("androidx.compose:compose-bom:2026.06.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    // Material 3 1.5.0-beta01: first release with public expressive APIs
-    // (MaterialShapes + toShape(), LoadingIndicator, FloatingActionButtonMenu,
-    // MaterialExpressiveTheme, MotionScheme). Verified against the published
-    // artifact sources — every API name used here was checked. Overridden
-    // above the compose BOM pin.
-    implementation("androidx.compose.material3:material3:1.5.0-beta01")
-
-    // SegmentedShape (Apache-2.0): FIRST/MIDDLE/LAST/SINGLE corner radii for
-    // bubbly grouped message bubbles.
-    implementation("com.github.NhuHuy-79:SegmentedShape:1.1.0")
+    // Material 3 stable — expressive components (MaterialShapes, LoadingIndicator,
+    // FloatingActionButtonMenu) are 1.5.0-beta01+ only; not usable until the
+    // SDK 37 / AGP 9.x toolchain is public. Bubbly shapes are hand-rolled below.
+    implementation("androidx.compose.material3:material3:1.4.0")
 
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")

@@ -13,14 +13,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -46,10 +43,9 @@ import androidx.compose.ui.window.DialogWindowProvider
  * the Compose content draws. We set the window background to transparent and
  * drive the scrim + surface entirely from the M3 theme — zero white frame.
  *
- * Issue 3: bubbly Cookie9Sided surface via MaterialShapes.toShape(), with a
+ * Issue 3: bubbly softly-rounded surface (large radii), with a
  * springy scale+fade entrance.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun NewConversationDialog(
     onDismiss: () -> Unit,
@@ -90,7 +86,7 @@ fun NewConversationDialog(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .graphicsLayer(scaleX = scale, scaleY = scale, alpha = alpha)
-                .clip(MaterialShapes.Cookie9Sided.toShape()),
+                .clip(RoundedCornerShape(28.dp)),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 6.dp,
         ) {
@@ -109,7 +105,7 @@ fun NewConversationDialog(
                     placeholder = { Text("Phone number") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     singleLine = true,
-                    shape = MaterialShapes.Puffy.toShape(),
+                    shape = RoundedCornerShape(24.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(20.dp))

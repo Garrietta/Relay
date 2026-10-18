@@ -4,8 +4,6 @@ import android.os.Build
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -23,13 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.garrietta.relay.data.model.ThemeMode
 
 /**
- * Relay design system — Material 3 Expressive on material3 1.5.0-beta01.
+ * Relay design system — Material 3 Expressive feel on stable material3 1.4.0.
  *
- * Uses [MaterialExpressiveTheme] (not plain MaterialTheme) so
- * [MaterialTheme.motionScheme] resolves to the expressive motion scheme.
- * Bubbly shape vocabulary comes from [androidx.compose.material3.MaterialShapes]
- * via `.toShape()`; message grouping uses SegmentedShape; motion uses the
- * centralized policy in ui.motion (adapted from m3x-motion-recipes).
+ * Expressive via dynamic color, large bubbly shapes, and spring physics.
+ * (material3 1.5.0-beta01's MaterialShapes/LoadingIndicator/FABMenu need
+ * SDK 37 + AGP 9.1.0, not publicly available as of 2026-10; shapes are
+ * hand-rolled large radii, motion uses the centralized ui.motion policy
+ * adapted from m3x-motion-recipes, Apache-2.0.)
  */
 
 // Expressive type scale: oversized editorial headlines, tight tracking,
@@ -110,7 +108,6 @@ fun <T> relaySpring() = spring<T>(
     stiffness = Spring.StiffnessMedium,
 )
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun RelayTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
@@ -129,11 +126,10 @@ fun RelayTheme(
         darkTheme -> darkColorScheme()
         else -> lightColorScheme()
     }
-    MaterialExpressiveTheme(
+    MaterialTheme(
         colorScheme = colorScheme,
         typography = RelayTypography,
         shapes = RelayShapes,
-        // motionScheme defaults to MotionScheme.expressive()
         content = content,
     )
 }

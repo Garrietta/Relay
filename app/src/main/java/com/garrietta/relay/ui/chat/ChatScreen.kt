@@ -27,12 +27,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LoadingIndicator
-import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -58,16 +56,14 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
-import androidx.compose.material3.toShape
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.relaySpring
-import com.nhuhuy.segmented_shape.ItemPosition
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
@@ -280,7 +276,7 @@ private fun Composer(
                 imeAction = ImeAction.Send,
             ),
             keyboardActions = KeyboardActions(onSend = { submit() }),
-            shape = MaterialShapes.Cookie9Sided.toShape(),
+            shape = RoundedCornerShape(24.dp),
             colors = TextFieldDefaults.colors(
                 focusedIndicatorColor = Color.Transparent,
                 unfocusedIndicatorColor = Color.Transparent,
@@ -305,9 +301,10 @@ private fun Composer(
                 .clip(RoundedCornerShape(26.dp)),
         ) {
             if (sending) {
-                LoadingIndicator(
+                CircularProgressIndicator(
                     modifier = Modifier.size(24.dp),
                     color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 3.dp,
                 )
             } else {
                 Icon(Icons.Filled.Send, contentDescription = "Send")
@@ -316,10 +313,12 @@ private fun Composer(
     }
 }
 
+/** Position of a bubble within a sender group (replaces SegmentedShape library). */
+private enum class ItemPosition { SINGLE, FIRST, MIDDLE, LAST }
+
 private fun formatDay(millis: Long): String =
     SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(millis))
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ChatAvatar(name: String, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
@@ -334,7 +333,7 @@ private fun ChatAvatar(name: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(40.dp)
-            .clip(MaterialShapes.Cookie9Sided.toShape())
+            .clip(RoundedCornerShape(24.dp))
             .background(bg),
         contentAlignment = Alignment.Center,
     ) {

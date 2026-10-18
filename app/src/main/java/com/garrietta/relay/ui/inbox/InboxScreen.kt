@@ -1,7 +1,14 @@
 package com.garrietta.relay.ui.inbox
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -28,27 +35,22 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FloatingActionButtonMenu
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
-import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.ToggleFloatingActionButton
-import androidx.compose.material3.ToggleFloatingActionButtonDefaults.animateIcon
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
-import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,7 +60,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -110,36 +111,51 @@ fun InboxScreen(
         floatingActionButton = {
             var fabMenuExpanded by remember { mutableStateOf(false) }
             BackHandler(fabMenuExpanded) { fabMenuExpanded = false }
-            FloatingActionButtonMenu(
-                expanded = fabMenuExpanded,
-                button = {
-                    ToggleFloatingActionButton(
-                        checked = fabMenuExpanded,
-                        onCheckedChange = { fabMenuExpanded = !fabMenuExpanded },
-                        containerColor = { MaterialTheme.colorScheme.tertiaryContainer },
-                    ) {
-                        val imageVector by remember {
-                            derivedStateOf {
-                                if (checkedProgress > 0.5f) Icons.Filled.Close else Icons.Filled.Edit
-                            }
-                        }
-                        Icon(
-                            painter = rememberVectorPainter(imageVector),
-                            contentDescription = if (fabMenuExpanded) "Close" else "New conversation",
-                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                            modifier = Modifier.animateIcon({ checkedProgress }),
-                        )
-                    }
-                },
+            // Custom expandable compose FAB (stable APIs): pill button morphs
+            // Edit <-> Close, menu item springs in above.
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                FloatingActionButtonMenuItem(
-                    onClick = {
-                        fabMenuExpanded = false
-                        onNewConversation()
-                    },
-                    icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-                    text = { Text("New message") },
-                )
+                AnimatedVisibility(
+                    visible = fabMenuExpanded,
+                    enter = scaleIn(
+                        spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
+                        initialScale = 0.6f,
+                    ) + fadeIn(tween(150)),
+                    exit = scaleOut(tween(120), targetScale = 0.6f) + fadeOut(tween(120)),
+                ) {
+                    Surface(
+                        onClick = {
+                            fabMenuExpanded = false
+                            onNewConversation()
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        tonalElevation = 6.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Edit, contentDescription = null)
+                            Spacer(Modifier.width(12.dp))
+                            Text("New message", style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
+                FloatingActionButton(
+                    onClick = { fabMenuExpanded = !fabMenuExpanded },
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    shape = RoundedCornerShape(28.dp),
+                ) {
+                    Icon(
+                        if (fabMenuExpanded) Icons.Filled.Close else Icons.Filled.Edit,
+                        contentDescription = if (fabMenuExpanded) "Close" else "New conversation",
+                    )
+                }
             }
         },
     ) { padding ->
@@ -379,7 +395,7 @@ private fun ConversationRow(
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun Avatar(name: String, threadId: Long) {
     val scheme = MaterialTheme.colorScheme
@@ -395,7 +411,7 @@ private fun Avatar(name: String, threadId: Long) {
         modifier = Modifier
             .motionSharedBounds(SharedElementKeys.avatar(threadId))
             .size(56.dp)
-            .clip(MaterialShapes.Cookie9Sided.toShape())
+            .clip(RoundedCornerShape(22.dp))
             .background(bg),
         contentAlignment = Alignment.Center,
     ) {

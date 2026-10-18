@@ -6,7 +6,7 @@ package com.garrietta.relay.ui.motion
  * Changes: package renamed; the Navigation3 contact point
  * (LocalNavAnimatedContentScope) replaced with a local
  * LocalAnimatedVisibilityScope so it works with Relay's manual backstack.
- * Everything else — easing curves, duration tokens, MotionScheme resolution,
+ * Everything else — easing curves, duration tokens,
  * container transform, predictive back, reduced-motion fallback — kept whole.
  */
 
@@ -27,8 +27,6 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
@@ -78,11 +76,9 @@ object M3Duration {
 const val SHARED_AXIS_TRAVEL_DIVISOR = 4
 
 /**
- * Resolves the theme's [androidx.compose.material3.MotionScheme] into concrete specs.
- * Requires [androidx.compose.material3.MaterialExpressiveTheme] — a plain
- * MaterialTheme has no motionScheme.
+ * Concrete motion specs. On material3 1.4.0 (stable) there is no MotionScheme,
+ * so these use the official M3 expressive token values directly.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Immutable
 class MotionTokens internal constructor(
     /** defaultSpatial — used for FORWARD/BACKWARD travel. */
@@ -93,11 +89,16 @@ class MotionTokens internal constructor(
     companion object {
         @Composable
         fun resolve(): MotionTokens {
-            val scheme = MaterialTheme.motionScheme
-            return remember(scheme) {
+            return remember {
                 MotionTokens(
-                    move = scheme.defaultSpatialSpec(),
-                    fade = scheme.defaultEffectsSpec<Float>(),
+                    move = tween(
+                        durationMillis = M3Duration.Long2,
+                        easing = M3Easing.EmphasizedDecelerate,
+                    ),
+                    fade = tween(
+                        durationMillis = M3Duration.Short4,
+                        easing = M3Easing.EmphasizedDecelerate,
+                    ),
                 )
             }
         }

@@ -1,13 +1,17 @@
 package com.garrietta.relay.ui
 
-import android.graphics.drawable.ColorDrawable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,7 +24,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,30 +32,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
 
 /**
  * New-conversation dialog.
  *
- * Flash fix (round 2): the root cause was the dialog *window*, not the scrim.
- * Theme.Relay inherits android:Theme.Material (light-only), so the platform
- * dialog theme painted a light panel background for the first frame even in
- * dark mode. Fixed at two levels:
- *  1. Theme level: Theme.Relay.Dialog (android:dialogTheme) has a transparent
- *     windowBackground — no unthemed frame, ever. The platform dim behind the
- *     window is the scrim (plain black-translucent, correct in both modes).
- *     Note: this Compose version's DialogProperties has no scrimColor
- *     parameter, so the platform dim is the only scrim mechanism — which is
- *     why the theme-level transparent background matters so much.
- *  2. Compose level: plain Dialog (not AlertDialog) plus a SideEffect that
- *     forces the window background transparent, as belt-and-suspenders for
- *     any Compose version that doesn't resolve android:dialogTheme.
- * Surface is surfaceContainerHigh — theme-correct in both modes.
+ * Flash fix (round 3): platform-level transparency never took effect —
+ * `LocalView.current`'s parent inside dialog content is a container ViewGroup,
+ * not the DialogWrapper, so the `(view.parent as? DialogWindowProvider)` cast
+ * silently yielded null, and Compose's DialogWrapper doesn't resolve
+ * `android:dialogTheme` on this version. The light `Theme.Material.Dialog`
+ * panel background therefore survived (the full-screen gray in dark mode).
+ *
+ * The bulletproof fix: draw the scrim INSIDE the Compose dialog content. The
+ * Dialog's content is a full-screen Box painted with the theme-aware
+ * `colorScheme.scrim` (black in both M3 light and dark schemes — never a
+ * hardcoded gray), with the dialog Surface centered inside it. Whatever the
+ * platform window does underneath is now irrelevant.
  */
 @Composable
 fun NewConversationDialog(
@@ -63,15 +62,12 @@ fun NewConversationDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            // We handle outside-taps ourselves via the scrim Box below.
+            dismissOnClickOutside = false,
+        ),
     ) {
-        val view = LocalView.current
-        SideEffect {
-            (view.parent as? DialogWindowProvider)?.window?.setBackgroundDrawable(
-                ColorDrawable(android.graphics.Color.TRANSPARENT)
-            )
-        }
-
         var visible by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { visible = true }
         val scale by animateFloatAsState(
@@ -88,42 +84,63 @@ fun NewConversationDialog(
             label = "dialogAlpha",
         )
 
-        Surface(
+        // In-Compose scrim: theme-aware, covers the whole window, dismisses
+        // on tap. The platform window background is irrelevant behind this.
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .graphicsLayer(scaleX = scale, scaleY = scale, alpha = alpha)
-                .clip(RoundedCornerShape(28.dp)),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            tonalElevation = 6.dp,
+                .fillMaxSize()
+                .graphicsLayer(alpha = alpha)
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.55f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .graphicsLayer(scaleX = scale, scaleY = scale)
+                    .clip(RoundedCornerShape(28.dp))
+                    // Swallow taps so they don't fall through to the scrim.
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    ),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 6.dp,
             ) {
-                Text(
-                    "New message",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = number,
-                    onValueChange = { number = it },
-                    placeholder = { Text("Phone number") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    singleLine = true,
-                    shape = RoundedCornerShape(24.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(20.dp))
-                Row(
-                    modifier = Modifier.align(Alignment.End),
+                Column(
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
                 ) {
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
-                    TextButton(
-                        onClick = { onStart(number.trim()) },
-                        enabled = number.trim().length >= 3,
-                    ) { Text("Start") }
+                    Text(
+                        "New message",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    OutlinedTextField(
+                        value = number,
+                        onValueChange = { number = it },
+                        placeholder = { Text("Phone number") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        singleLine = true,
+                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Row(
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        TextButton(onClick = onDismiss) { Text("Cancel") }
+                        TextButton(
+                            onClick = { onStart(number.trim()) },
+                            enabled = number.trim().length >= 3,
+                        ) { Text("Start") }
+                    }
                 }
             }
         }

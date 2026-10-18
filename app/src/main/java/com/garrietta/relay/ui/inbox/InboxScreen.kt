@@ -26,7 +26,6 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FabPosition
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
@@ -53,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -107,32 +107,35 @@ fun InboxScreen(
                 ),
             )
         },
-        // Google Messages M3E pattern: a prominent "New conversation" pill
-        // centered at the bottom, replacing the FAB menu.
-        floatingActionButton = {
+        // Google Messages M3E pattern: a WIDE "New conversation" pill —
+        // full-width with screen margins, large corner radius, primary color.
+        bottomBar = {
             Surface(
                 onClick = onNewConversation,
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(32.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 tonalElevation = 6.dp,
                 shadowElevation = 6.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    modifier = Modifier.padding(vertical = 18.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
                 ) {
                     Icon(Icons.Filled.Edit, contentDescription = null)
                     Spacer(Modifier.width(12.dp))
                     Text(
                         "New conversation",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
             }
         },
-        floatingActionButtonPosition = FabPosition.Center,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(
@@ -218,6 +221,15 @@ private fun DefaultSmsBanner(onRequest: () -> Unit) {
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
+            // Belt-and-suspenders: the whole banner Row is clickable, and the
+            // label itself is an explicit button-role target too.
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(
+                    role = Role.Button,
+                    onClick = onRequest,
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
         )
     }
 }

@@ -63,4 +63,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.foundation:foundation")
+
+    // Palette: extract vibrant colors from contact profile photos to seed
+    // per-conversation chat theming (same pattern as Koda's artwork theming).
+    implementation("androidx.palette:palette:1.0.0")
 }

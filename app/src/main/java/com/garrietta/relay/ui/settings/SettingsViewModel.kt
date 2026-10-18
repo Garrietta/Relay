@@ -91,18 +91,22 @@ class SettingsViewModel(
      * manually. State refreshes via onResume().
      */
     fun requestDefaultSmsRole(activity: Activity) {
+        Log.d(TAG, "requestDefaultSmsRole: tap received")
         val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
             putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, activity.packageName)
         }
         val pm: PackageManager = activity.packageManager
         val primaryResolves = intent.resolveActivity(pm) != null
+        Log.d(TAG, "requestDefaultSmsRole: ACTION_CHANGE_DEFAULT resolves=$primaryResolves")
         if (!primaryResolves) {
             Log.w(TAG, "ACTION_CHANGE_DEFAULT did not resolve; falling back to system settings")
+            notify("Couldn't open the SMS picker; opening system settings instead.")
             openDefaultAppsSettings(activity)
             return
         }
         try {
             activity.startActivity(intent)
+            Log.d(TAG, "requestDefaultSmsRole: system picker launched")
         } catch (e: Exception) {
             Log.e(TAG, "requestDefaultSmsRole: ACTION_CHANGE_DEFAULT failed", e)
             notify("Couldn't open the SMS picker (${e.javaClass.simpleName}); opening system settings instead.")

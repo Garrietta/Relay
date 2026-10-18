@@ -230,6 +230,36 @@ class UnifiedInboxRepository(
     suspend fun resolveDisplayName(address: String): String =
         withContext(Dispatchers.IO) { contactLookup.displayName(address) }
 
+    /** Contact profile photo URI for [address], or null when there is none. */
+    suspend fun resolvePhotoUri(address: String): String? =
+        withContext(Dispatchers.IO) { contactLookup.photoUri(address) }
+
+    /**
+     * Extracts a Material-3 seed color from the contact's profile photo via
+     * the Palette API (vibrant → dominant → muted). Result is cached per
+     * photo URI. Null when there is no photo or extraction fails — callers
+     * fall back to the wallpaper dynamic scheme.
+     */
+    suspend fun extractContactSeed(photoUri: String): androidx.compose.ui.graphics.Color? =
+        withContext(Dispatchers.IO) {
+            if (ContactSeedCache.contains(photoUri)) return@withContext ContactSeedCache.get(photoUri)
+            val color = try {
+                context.contentResolver.openInputStream(android.net.Uri.parse(photoUri))?.use { stream ->
+                    val bmp = android.graphics.BitmapFactory.decodeStream(stream)
+                        ?: return@use null
+                    val palette = androidx.palette.graphics.Palette.from(bmp).generate()
+                    val swatch = palette.vibrantSwatch
+                        ?: palette.dominantSwatch
+                        ?: palette.mutedSwatch
+                    swatch?.let { androidx.compose.ui.graphics.Color(it.rgb) }
+                }
+            } catch (_: Exception) {
+                null
+            }
+            ContactSeedCache.put(photoUri, color)
+            color
+        }
+
     /** Finds the thread id for an address (used after starting a new conversation). */
     suspend fun findThreadId(address: String): Long = withContext(Dispatchers.IO) {
         try {
@@ -367,6 +397,7 @@ class UnifiedInboxRepository(
 /** In-memory cache over PhoneLookup. */
 private class ContactLookup(private val context: Context) {
     private val cache = mutableMapOf<String, String>()
+    private val photoCache = mutableMapOf<String, String?>()
 
     fun displayName(address: String): String {
         cache[address]?.let { return it }
@@ -388,5 +419,44 @@ private class ContactLookup(private val context: Context) {
         }
         cache[address] = name
         return name
+    }
+
+    /** Profile photo URI for [address], or null when the contact has none. */
+    fun photoUri(address: String): String? {
+        if (photoCache.containsKey(address)) return photoCache[address]
+        val uri = try {
+            var result: String? = null
+            context.contentResolver.query(
+                Uri.withAppendedPath(
+                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                    Uri.encode(address),
+                ),
+                arrayOf(ContactsContract.PhoneLookup.PHOTO_URI),
+                null, null, null,
+            )?.use { c ->
+                if (c.moveToFirst()) result = c.getString(0)
+            }
+            result
+        } catch (_: Exception) {
+            null
+        }
+        photoCache[address] = uri
+        return uri
+    }
+}
+
+/** Photo-URI → seed-color cache for per-contact chat theming. */
+internal object ContactSeedCache {
+    private val map = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
+
+    @Synchronized
+    fun contains(photoUri: String): Boolean = map.containsKey(photoUri)
+
+    @Synchronized
+    fun get(photoUri: String): androidx.compose.ui.graphics.Color? = map[photoUri]
+
+    @Synchronized
+    fun put(photoUri: String, color: androidx.compose.ui.graphics.Color?) {
+        map[photoUri] = color
     }
 }

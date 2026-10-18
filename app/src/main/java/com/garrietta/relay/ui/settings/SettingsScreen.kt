@@ -25,12 +25,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,6 +55,13 @@ fun SettingsScreen(
     val rcsState by viewModel.rcsPairingState.collectAsState()
     val isDefault by viewModel.isDefaultSmsAppFlow.collectAsState()
     val activity = LocalContext.current as? Activity
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Surface set-default failures here too — previously userMessages was only
+    // collected in the inbox, so Settings-path failures were invisible.
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
+    }
 
     Scaffold(
         topBar = {
@@ -65,7 +76,8 @@ fun SettingsScreen(
                     containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(
             modifier = Modifier

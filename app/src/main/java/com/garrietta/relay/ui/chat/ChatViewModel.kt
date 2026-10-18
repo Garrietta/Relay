@@ -25,10 +25,25 @@ class ChatViewModel(
     private val _sendError = MutableStateFlow<String?>(null)
     val sendError: StateFlow<String?> = _sendError
 
+    /**
+     * Palette-extracted seed color from the contact's profile photo; drives
+     * per-contact chat theming. Null = no photo (or extraction failed) → the
+     * wallpaper dynamic scheme is used instead.
+     */
+    private val _seedColor = MutableStateFlow<androidx.compose.ui.graphics.Color?>(null)
+    val seedColor: StateFlow<androidx.compose.ui.graphics.Color?> = _seedColor
+
     init {
         reload()
         viewModelScope.launch {
             repository.inboxChanges().collect { reload() }
+        }
+    }
+
+    fun loadContactTheme(recipient: String) {
+        viewModelScope.launch {
+            val photoUri = repository.resolvePhotoUri(recipient) ?: return@launch
+            _seedColor.value = repository.extractContactSeed(photoUri)
         }
     }
 

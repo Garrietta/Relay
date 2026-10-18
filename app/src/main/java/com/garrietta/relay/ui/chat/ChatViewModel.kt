@@ -3,6 +3,7 @@ package com.garrietta.relay.ui.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,6 +12,7 @@ import kotlinx.coroutines.launch
 
 class ChatViewModel(
     private val repository: UnifiedInboxRepository,
+    private val appSeedStore: AppSeedStore,
     private val threadId: Long,
     /** All provider threads merged into this conversation (see Screen.Chat). */
     private val threadIds: List<Long> = listOf(threadId),
@@ -67,7 +69,11 @@ class ChatViewModel(
         viewModelScope.launch {
             val uri = repository.resolvePhotoUri(recipient) ?: return@launch
             _photoUri.value = uri
-            _seedColor.value = repository.extractContactSeed(uri)
+            val seed = repository.extractContactSeed(uri)
+            _seedColor.value = seed
+            // App-wide persistent seed (Item 5): only a chat WITH a contact
+            // photo replaces it. Chats without photos keep the current seed.
+            if (seed != null) appSeedStore.setSeed(seed)
         }
     }
 

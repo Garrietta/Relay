@@ -125,6 +125,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             val themeMode by settingsVm.themeMode.collectAsState()
             val isDefaultSmsApp by settingsVm.isDefaultSmsAppFlow.collectAsState()
+            // App-wide persistent contact color (Item 5): the last-viewed
+            // contact's seed tints the whole app until a new photo replaces it.
+            val appSeed by app.appSeedStore.seed.collectAsState()
 
             // SMS role request via the Activity Result API. The ViewModel builds
             // the RoleManager intent; the result callback refreshes state
@@ -151,7 +154,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            RelayTheme(themeMode = themeMode) {
+            RelayTheme(themeMode = themeMode, seedColor = appSeed) {
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     // Foldable adaptive layout: conversation list beside the
                     // chat when wide (unfolded Fold / tablet), single-pane
@@ -250,7 +253,7 @@ class MainActivity : ComponentActivity() {
                         is Screen.Chat -> {
                             val chatVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, screen.threadId, screen.threadIds),
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds),
                             )
                             ChatScreen(
                                 viewModel = chatVm,
@@ -369,7 +372,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val chatVm: ChatViewModel = viewModel(
                                         key = "chat_${convo.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, convo.threadId, convo.threadIds),
+                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
@@ -572,12 +575,13 @@ private class InboxViewModelFactory(
 
 private class ChatViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
+    private val appSeedStore: com.garrietta.relay.data.repo.AppSeedStore,
     private val threadId: Long,
     private val threadIds: List<Long> = listOf(threadId),
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(repo, threadId, threadIds) as T
+        ChatViewModel(repo, appSeedStore, threadId, threadIds) as T
 }
 
 private class SettingsViewModelFactory(

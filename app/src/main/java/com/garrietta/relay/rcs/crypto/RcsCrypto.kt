@@ -99,4 +99,70 @@ object RcsCrypto {
 
     fun publicKeyFromX509(bytes: ByteArray): java.security.PublicKey =
         KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(bytes))
+
+    // ---- ECDH P-256 + HKDF-SHA256 (Gaia/UKEY2 handshake) ----
+
+    /**
+     * ECDH P-256 shared secret: SHA-256(DH) per the Gaia pairing spec
+     * (ProcessServerInit). Returns the 32-byte hashed secret.
+     */
+    fun ecdhSha256(
+        privateKey: java.security.PrivateKey,
+        peerPublicKey: java.security.PublicKey,
+    ): ByteArray {
+        val ka = javax.crypto.KeyAgreement.getInstance("ECDH")
+        ka.init(privateKey)
+        ka.doPhase(peerPublicKey, true)
+        val dh = ka.generateSecret()
+        val sha256 = java.security.MessageDigest.getInstance("SHA-256")
+        return sha256.digest(dh)
+    }
+
+    /**
+     * HKDF-SHA256 (RFC 5869). Used for UKEY2 auth derivation and the
+     * "Ditto" key derivation in FinishGaiaPairing.
+     */
+    fun hkdfSha256(
+        ikm: ByteArray,
+        salt: ByteArray,
+        info: ByteArray,
+        length: Int,
+    ): ByteArray {
+        // Extract
+        val mac = Mac.getInstance("HmacSHA256")
+        val effectiveSalt = if (salt.isEmpty()) ByteArray(32) else salt
+        mac.init(SecretKeySpec(effectiveSalt, "HmacSHA256"))
+        val prk = mac.doFinal(ikm)
+        // Expand
+        val out = ByteArray(length)
+        var t = byteArrayOf()
+        var pos = 0
+        var counter = 1
+        while (pos < length) {
+            mac.init(SecretKeySpec(prk, "HmacSHA256"))
+            mac.update(t)
+            mac.update(info)
+            mac.update(counter.toByte())
+            t = mac.doFinal()
+            val copyLen = minOf(t.size, length - pos)
+            t.copyInto(out, pos, 0, copyLen)
+            pos += copyLen
+            counter++
+        }
+        return out
+    }
+
+    /** Uncompressed P-256 public key bytes (0x04 || X || Y), 65 bytes. */
+    fun uncompressedPublicKey(publicKey: java.security.PublicKey): ByteArray {
+        val ecPub = publicKey as java.security.interfaces.ECPublicKey
+        val x = ecPub.w.affineX.toByteArray().trimLeadingZeros(32)
+        val y = ecPub.w.affineY.toByteArray().trimLeadingZeros(32)
+        return byteArrayOf(0x04) + x + y
+    }
+
+    private fun ByteArray.trimLeadingZeros(size: Int): ByteArray {
+        val stripped = this.dropWhile { it == 0.toByte() }.toByteArray()
+        return if (stripped.size >= size) stripped.takeLast(size).toByteArray()
+        else ByteArray(size - stripped.size) + stripped
+    }
 }

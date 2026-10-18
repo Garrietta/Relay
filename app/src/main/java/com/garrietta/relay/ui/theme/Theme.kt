@@ -4,6 +4,8 @@ import android.os.Build
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -21,13 +23,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.garrietta.relay.data.model.ThemeMode
 
 /**
- * Relay design system — Material 3 Expressive done with stable APIs.
+ * Relay design system — Material 3 Expressive on material3 1.5.0-beta01.
  *
- * material3 1.4.0 (latest stable) does not yet publish the expressive
- * component set (LoadingIndicator, FloatingToolbar, ToggleButton live only in
- * 1.5.0 betas), so the Expressive language here is built from its real
- * pillars: dynamic color, editorial typography, an expressive shape scale,
- * and spring physics on press/scroll — no invented component names.
+ * Uses [MaterialExpressiveTheme] (not plain MaterialTheme) so
+ * [MaterialTheme.motionScheme] resolves to the expressive motion scheme.
+ * Bubbly shape vocabulary comes from [androidx.compose.material3.MaterialShapes]
+ * via `.toShape()`; message grouping uses SegmentedShape; motion uses the
+ * centralized policy in ui.motion (adapted from m3x-motion-recipes).
  */
 
 // Expressive type scale: oversized editorial headlines, tight tracking,
@@ -108,6 +110,7 @@ fun <T> relaySpring() = spring<T>(
     stiffness = Spring.StiffnessMedium,
 )
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun RelayTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
@@ -126,10 +129,11 @@ fun RelayTheme(
         darkTheme -> darkColorScheme()
         else -> lightColorScheme()
     }
-    MaterialTheme(
+    MaterialExpressiveTheme(
         colorScheme = colorScheme,
         typography = RelayTypography,
         shapes = RelayShapes,
+        // motionScheme defaults to MotionScheme.expressive()
         content = content,
     )
 }

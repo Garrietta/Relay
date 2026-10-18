@@ -1,5 +1,7 @@
 package com.garrietta.relay.ui.inbox
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -19,16 +21,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FloatingActionButtonMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -36,22 +41,31 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.ToggleFloatingActionButton
+import androidx.compose.material3.ToggleFloatingActionButtonDefaults.animateIcon
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.ui.motion.SharedElementKeys
+import com.garrietta.relay.ui.motion.motionSharedBounds
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -94,13 +108,38 @@ fun InboxScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onNewConversation,
-                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                shape = RoundedCornerShape(20.dp),
+            var fabMenuExpanded by remember { mutableStateOf(false) }
+            BackHandler(fabMenuExpanded) { fabMenuExpanded = false }
+            FloatingActionButtonMenu(
+                expanded = fabMenuExpanded,
+                button = {
+                    ToggleFloatingActionButton(
+                        checked = fabMenuExpanded,
+                        onCheckedChange = { fabMenuExpanded = !fabMenuExpanded },
+                        containerColor = { MaterialTheme.colorScheme.tertiaryContainer },
+                    ) {
+                        val imageVector by remember {
+                            derivedStateOf {
+                                if (checkedProgress > 0.5f) Icons.Filled.Close else Icons.Filled.Edit
+                            }
+                        }
+                        Icon(
+                            painter = rememberVectorPainter(imageVector),
+                            contentDescription = if (fabMenuExpanded) "Close" else "New conversation",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.animateIcon({ checkedProgress }),
+                        )
+                    }
+                },
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "New conversation")
+                FloatingActionButtonMenuItem(
+                    onClick = {
+                        fabMenuExpanded = false
+                        onNewConversation()
+                    },
+                    icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+                    text = { Text("New message") },
+                )
             }
         },
     ) { padding ->
@@ -119,7 +158,7 @@ fun InboxScreen(
                 placeholder = { Text("Search conversations") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 singleLine = true,
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(32.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color.Transparent,
                     unfocusedBorderColor = Color.Transparent,
@@ -161,7 +200,7 @@ private fun DefaultSmsBanner(onRequest: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(28.dp))
             .background(MaterialTheme.colorScheme.secondaryContainer)
             .clickable(onClick = onRequest)
             .padding(16.dp),
@@ -291,7 +330,7 @@ private fun ConversationRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(name = conversation.displayName)
+            Avatar(name = conversation.displayName, threadId = conversation.threadId)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -317,8 +356,8 @@ private fun ConversationRow(
                     if (conversation.unread) {
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
+                                .size(width = 12.dp, height = 8.dp)
+                                .clip(RoundedCornerShape(4.dp))
                                 .background(MaterialTheme.colorScheme.primary)
                         )
                         Spacer(Modifier.width(6.dp))
@@ -340,8 +379,9 @@ private fun ConversationRow(
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Avatar(name: String) {
+private fun Avatar(name: String, threadId: Long) {
     val scheme = MaterialTheme.colorScheme
     val palette = remember(scheme) {
         listOf(
@@ -353,8 +393,9 @@ private fun Avatar(name: String) {
     val (bg, fg) = palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
     Box(
         modifier = Modifier
-            .size(52.dp)
-            .clip(CircleShape)
+            .motionSharedBounds(SharedElementKeys.avatar(threadId))
+            .size(56.dp)
+            .clip(MaterialShapes.Cookie9Sided.toShape())
             .background(bg),
         contentAlignment = Alignment.Center,
     ) {
@@ -371,11 +412,11 @@ private fun TransportChip(label: String) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
     )
 }
 

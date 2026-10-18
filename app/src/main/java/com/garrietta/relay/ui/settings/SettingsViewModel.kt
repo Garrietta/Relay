@@ -1,6 +1,11 @@
 package com.garrietta.relay.ui.settings
 
+import android.app.Activity
+import android.app.RoleManager
 import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Telephony
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.ThemeMode
@@ -9,6 +14,7 @@ import com.garrietta.relay.data.transport.RcsPairingState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -37,22 +43,48 @@ class SettingsViewModel(
         prefs.edit().putString(KEY_THEME, mode.name).apply()
     }
 
-    fun isDefaultSmsApp(): Boolean {
-        val def = android.provider.Telephony.Sms.getDefaultSmsPackage(context)
+    fun isDefaultSmsApp(): Boolean = _isDefaultSmsApp.value
+
+    /**
+     * Root cause of the "Set default does nothing" report: this used to be a
+     * snapshot Boolean computed once at composition. After the user confirmed
+     * the system dialog and returned, the banner never disappeared, so tapping
+     * again looked broken. Now it's a StateFlow refreshed in onResume.
+     */
+    private val _isDefaultSmsApp = MutableStateFlow(checkDefaultSmsApp())
+    val isDefaultSmsAppFlow: StateFlow<Boolean> = _isDefaultSmsApp.asStateFlow()
+
+    fun refreshDefaultSmsState() {
+        _isDefaultSmsApp.value = checkDefaultSmsApp()
+    }
+
+    private fun checkDefaultSmsApp(): Boolean {
+        val def = Telephony.Sms.getDefaultSmsPackage(context)
         return def == context.packageName
     }
 
-    fun requestDefaultSmsRole() {
-        val intent = android.content.Intent(
-            android.provider.Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT
-        ).apply {
-            putExtra(
-                android.provider.Telephony.Sms.Intents.EXTRA_PACKAGE_NAME,
-                context.packageName,
-            )
+    /**
+     * Request the default-SMS role. Uses RoleManager on API 29+ (official API,
+     * gives a result callback) with the legacy ACTION_CHANGE_DEFAULT intent as
+     * fallback. Must be called with an Activity — RoleManager.requestRole
+     * requires one, and the fallback intent is cleaner from an Activity too.
+     */
+    fun requestDefaultSmsRole(activity: Activity) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = activity.getSystemService(RoleManager::class.java)
+            if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_SMS) &&
+                !rm.isRoleHeld(RoleManager.ROLE_SMS)
+            ) {
+                rm.requestRole(RoleManager.ROLE_SMS, activity, activity.mainExecutor) {
+                    refreshDefaultSmsState()
+                }
+                return
+            }
         }
-        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
+        val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+            putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, activity.packageName)
+        }
+        runCatching { activity.startActivity(intent) }
     }
 
     fun openNotificationSettings() {

@@ -1,6 +1,7 @@
 package com.garrietta.relay.ui.chat
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,7 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -26,9 +27,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -54,19 +58,22 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
-import com.garrietta.relay.ui.theme.incomingBubbleShape
-import com.garrietta.relay.ui.theme.outgoingBubbleShape
+import androidx.compose.material3.toShape
+import com.garrietta.relay.ui.motion.SharedElementKeys
+import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.relaySpring
+import com.nhuhuy.segmented_shape.ItemPosition
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
     displayName: String,
     recipient: String,
+    threadId: Long,
     onBack: () -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()
@@ -89,17 +96,27 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(
-                            displayName,
-                            style = MaterialTheme.typography.titleLarge,
-                            maxLines = 1,
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Shared-element target: the inbox avatar morphs here.
+                        ChatAvatar(
+                            name = displayName,
+                            modifier = Modifier.motionSharedBounds(
+                                SharedElementKeys.avatar(threadId),
+                            ),
                         )
-                        Text(
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                displayName,
+                                style = MaterialTheme.typography.titleLarge,
+                                maxLines = 1,
+                            )
+                            Text(
                             "SMS",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        }
                     }
                 },
                 navigationIcon = {
@@ -124,17 +141,26 @@ fun ChatScreen(
                 state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                items(
+                itemsIndexed(
                     items = messages,
-                    key = { it.id },
-                    contentType = { "message" },
-                ) { message ->
-                    MessageBubble(message)
+                    key = { _, it -> it.id },
+                    contentType = { _, _ -> "message" },
+                ) { index, message ->
+                    // reverseLayout: index+1 is visually above, index-1 below.
+                    val aboveDiff = messages.getOrNull(index + 1)?.isOutgoing != message.isOutgoing
+                    val belowDiff = messages.getOrNull(index - 1)?.isOutgoing != message.isOutgoing
+                    val position = when {
+                        aboveDiff && belowDiff -> ItemPosition.SINGLE
+                        aboveDiff -> ItemPosition.FIRST
+                        belowDiff -> ItemPosition.LAST
+                        else -> ItemPosition.MIDDLE
+                    }
+                    MessageBubble(message, position)
                 }
             }
             Composer(
@@ -146,14 +172,14 @@ fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(message: Message) {
+private fun MessageBubble(message: Message, position: ItemPosition) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
     ) {
         Box(
             modifier = Modifier
-                .clip(if (message.isOutgoing) outgoingBubbleShape else incomingBubbleShape)
+                .clip(bubbleShape(message.isOutgoing, position))
                 .background(
                     if (message.isOutgoing) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surfaceContainerHigh
@@ -175,6 +201,34 @@ private fun MessageBubble(message: Message) {
                 modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp),
             )
         }
+    }
+}
+
+/**
+ * Bubbly grouped bubbles: consecutive messages from one sender merge with
+ * segmented corners (SegmentedShape's ItemPosition), keeping the tail corner
+ * tight on the sender's side for the last/single bubble.
+ */
+private fun bubbleShape(isOutgoing: Boolean, position: ItemPosition): RoundedCornerShape {
+    val large = 28.dp
+    val small = 10.dp
+    val tail = 4.dp
+    return when (position) {
+        ItemPosition.SINGLE -> RoundedCornerShape(
+            topStart = large, topEnd = large,
+            bottomStart = if (isOutgoing) large else tail,
+            bottomEnd = if (isOutgoing) tail else large,
+        )
+        ItemPosition.FIRST -> RoundedCornerShape(
+            topStart = large, topEnd = large,
+            bottomStart = small, bottomEnd = small,
+        )
+        ItemPosition.MIDDLE -> RoundedCornerShape(small)
+        ItemPosition.LAST -> RoundedCornerShape(
+            topStart = small, topEnd = small,
+            bottomStart = if (isOutgoing) large else tail,
+            bottomEnd = if (isOutgoing) tail else large,
+        )
     }
 }
 
@@ -226,7 +280,7 @@ private fun Composer(
                 imeAction = ImeAction.Send,
             ),
             keyboardActions = KeyboardActions(onSend = { submit() }),
-            shape = RoundedCornerShape(28.dp),
+            shape = MaterialShapes.Cookie9Sided.toShape(),
             colors = TextFieldDefaults.colors(
                 focusedIndicatorColor = Color.Transparent,
                 unfocusedIndicatorColor = Color.Transparent,
@@ -250,10 +304,44 @@ private fun Composer(
                 .size(sendSize)
                 .clip(RoundedCornerShape(26.dp)),
         ) {
-            Icon(Icons.Filled.Send, contentDescription = "Send")
+            if (sending) {
+                LoadingIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            } else {
+                Icon(Icons.Filled.Send, contentDescription = "Send")
+            }
         }
     }
 }
 
 private fun formatDay(millis: Long): String =
     SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(millis))
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ChatAvatar(name: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val palette = remember(scheme) {
+        listOf(
+            scheme.primaryContainer to scheme.onPrimaryContainer,
+            scheme.secondaryContainer to scheme.onSecondaryContainer,
+            scheme.tertiaryContainer to scheme.onTertiaryContainer,
+        )
+    }
+    val (bg, fg) = palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(MaterialShapes.Cookie9Sided.toShape())
+            .background(bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+            style = MaterialTheme.typography.titleMedium,
+            color = fg,
+        )
+    }
+}

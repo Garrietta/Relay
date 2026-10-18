@@ -9,6 +9,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -17,12 +22,17 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.activity.viewModels
 import com.garrietta.relay.ui.NewConversationDialog
 import com.garrietta.relay.ui.Screen
 import com.garrietta.relay.ui.chat.ChatScreen
 import com.garrietta.relay.ui.chat.ChatViewModel
 import com.garrietta.relay.ui.inbox.InboxScreen
 import com.garrietta.relay.ui.inbox.InboxViewModel
+import com.garrietta.relay.ui.motion.LocalAnimatedVisibilityScope
+import com.garrietta.relay.ui.motion.LocalSharedTransitionScope
+import com.garrietta.relay.ui.motion.MotionKind
+import com.garrietta.relay.ui.motion.rememberMotionTransforms
 import com.garrietta.relay.ui.settings.SettingsScreen
 import com.garrietta.relay.ui.settings.SettingsViewModel
 import com.garrietta.relay.ui.theme.RelayTheme
@@ -30,6 +40,12 @@ import com.garrietta.relay.ui.theme.RelayTheme
 class MainActivity : ComponentActivity() {
 
     private val app: RelayApp get() = application as RelayApp
+
+    // Hoisted to activity level so onResume can refresh the default-SMS state
+    // (the banner must disappear the moment the role is granted).
+    private val settingsVm: SettingsViewModel by viewModels {
+        SettingsViewModelFactory(applicationContext, (application as RelayApp).repository)
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -41,10 +57,8 @@ class MainActivity : ComponentActivity() {
         requestMessagingPermissions()
 
         setContent {
-            val settingsVm: SettingsViewModel = viewModel(
-                factory = SettingsViewModelFactory(this, app.repository)
-            )
             val themeMode by settingsVm.themeMode.collectAsState()
+            val isDefaultSmsApp by settingsVm.isDefaultSmsAppFlow.collectAsState()
 
             RelayTheme(themeMode = themeMode) {
                 val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
@@ -54,46 +68,63 @@ class MainActivity : ComponentActivity() {
                 }
                 BackHandler(enabled = backStack.size > 1) { pop() }
 
-                when (val screen = backStack.last()) {
-                    is Screen.Inbox -> {
-                        val inboxVm: InboxViewModel = viewModel(
-                            factory = InboxViewModelFactory(app.repository)
-                        )
-                        InboxScreen(
-                            viewModel = inboxVm,
-                            isDefaultSmsApp = settingsVm.isDefaultSmsApp(),
-                            onRequestDefaultSms = settingsVm::requestDefaultSmsRole,
-                            onOpenChat = {
-                                push(Screen.Chat(it.threadId, it.address, it.displayName))
-                            },
-                            onOpenSettings = { push(Screen.Settings) },
-                            onNewConversation = { push(Screen.NewConversation) },
-                        )
-                    }
-                    is Screen.Chat -> {
-                        val chatVm: ChatViewModel = viewModel(
-                            key = "chat_${screen.threadId}",
-                            factory = ChatViewModelFactory(app.repository, screen.threadId),
-                        )
-                        ChatScreen(
-                            viewModel = chatVm,
-                            displayName = screen.displayName,
-                            recipient = screen.address,
-                            onBack = ::pop,
-                        )
-                    }
-                    is Screen.Settings -> {
-                        SettingsScreen(viewModel = settingsVm, onBack = ::pop)
-                    }
-                    is Screen.NewConversation -> {
-                        NewConversationDialog(
-                            onDismiss = ::pop,
-                            onStart = { number ->
-                                pop()
-                                // threadId unknown until first message; use -1 placeholder.
-                                push(Screen.Chat(-1L, number, number))
-                            },
-                        )
+                // Container-transform navigation: conversation avatar morphs
+                // into the chat header via shared bounds (see ui.motion).
+                SharedTransitionLayout {
+                    val motionTransforms = rememberMotionTransforms()
+                    AnimatedContent(
+                        targetState = backStack.last(),
+                        transitionSpec = { motionTransforms[MotionKind.TOP_LEVEL] },
+                        label = "relay-nav",
+                    ) { screen ->
+                        CompositionLocalProvider(
+                            LocalSharedTransitionScope provides this@SharedTransitionLayout,
+                            LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                        ) {
+                            when (screen) {
+                                is Screen.Inbox -> {
+                                    val inboxVm: InboxViewModel = viewModel(
+                                        factory = InboxViewModelFactory(app.repository)
+                                    )
+                                    InboxScreen(
+                                        viewModel = inboxVm,
+                                        isDefaultSmsApp = isDefaultSmsApp,
+                                        onRequestDefaultSms = { settingsVm.requestDefaultSmsRole(this@MainActivity) },
+                                        onOpenChat = {
+                                            push(Screen.Chat(it.threadId, it.address, it.displayName))
+                                        },
+                                        onOpenSettings = { push(Screen.Settings) },
+                                        onNewConversation = { push(Screen.NewConversation) },
+                                    )
+                                }
+                                is Screen.Chat -> {
+                                    val chatVm: ChatViewModel = viewModel(
+                                        key = "chat_${screen.threadId}",
+                                        factory = ChatViewModelFactory(app.repository, screen.threadId),
+                                    )
+                                    ChatScreen(
+                                        viewModel = chatVm,
+                                        displayName = screen.displayName,
+                                        recipient = screen.address,
+                                        threadId = screen.threadId,
+                                        onBack = ::pop,
+                                    )
+                                }
+                                is Screen.Settings -> {
+                                    SettingsScreen(viewModel = settingsVm, onBack = ::pop)
+                                }
+                                is Screen.NewConversation -> {
+                                    NewConversationDialog(
+                                        onDismiss = ::pop,
+                                        onStart = { number ->
+                                            pop()
+                                            // threadId unknown until first message; use -1 placeholder.
+                                            push(Screen.Chat(-1L, number, number))
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -103,6 +134,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         app.repository.refresh()
+        // Refresh so the "Set default" banner disappears right after the grant.
+        settingsVm.refreshDefaultSmsState()
     }
 
     private fun requestMessagingPermissions() {

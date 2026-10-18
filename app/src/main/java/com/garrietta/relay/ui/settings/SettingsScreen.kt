@@ -1,5 +1,6 @@
 package com.garrietta.relay.ui.settings
 
+import android.app.Activity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.ThemeMode
@@ -47,7 +49,8 @@ fun SettingsScreen(
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val rcsState by viewModel.rcsPairingState.collectAsState()
-    val isDefault = viewModel.isDefaultSmsApp()
+    val isDefault by viewModel.isDefaultSmsAppFlow.collectAsState()
+    val activity = LocalContext.current as? Activity
 
     Scaffold(
         topBar = {
@@ -87,7 +90,8 @@ fun SettingsScreen(
                     subtitle = if (isDefault) "Relay handles your texts"
                     else "Relay needs this to send & receive",
                     actionLabel = if (isDefault) null else "Set default",
-                    onAction = if (isDefault) null else viewModel::requestDefaultSmsRole,
+                    onAction = if (isDefault || activity == null) null
+                    else ({ viewModel.requestDefaultSmsRole(activity) }),
                 )
                 SettingsRow(
                     title = "Notifications",

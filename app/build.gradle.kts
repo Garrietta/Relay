@@ -29,6 +29,10 @@ android {
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            // Expressive APIs are @ExperimentalMaterial3ExpressiveApi; opt in
+            // once here instead of annotating every call site.
+            freeCompilerArgs.add("-Xopt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
+            freeCompilerArgs.add("-Xopt-in=androidx.compose.animation.ExperimentalSharedTransitionApi")
         }
     }
     buildFeatures {
@@ -44,11 +48,16 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    // Material 3 1.4.0 (latest stable): Expressive design language is achieved
-    // via dynamic color, expressive typography/shapes, and spring physics using
-    // stable APIs. (material3 1.5.0-beta01 is the first with public expressive
-    // components like ToggleButton; deliberately not used here.)
-    implementation("androidx.compose.material3:material3:1.4.0")
+    // Material 3 1.5.0-beta01: first release with public expressive APIs
+    // (MaterialShapes + toShape(), LoadingIndicator, FloatingActionButtonMenu,
+    // MaterialExpressiveTheme, MotionScheme). Verified against the published
+    // artifact sources — every API name used here was checked. Overridden
+    // above the compose BOM pin.
+    implementation("androidx.compose.material3:material3:1.5.0-beta01")
+
+    // SegmentedShape (Apache-2.0): FIRST/MIDDLE/LAST/SINGLE corner radii for
+    // bubbly grouped message bubbles.
+    implementation("com.github.NhuHuy-79:SegmentedShape:1.1.0")
 
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.2")

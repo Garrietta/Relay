@@ -48,10 +48,22 @@ object RelayApi {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    fun headers(contentType: String): Headers = Headers.Builder()
+    /**
+     * The UA the sign-in WebView uses (single source of truth — GaiaWebView
+     * reads this). Google binds cookie sessions to the UA that established
+     * them, so Gaia RPCs MUST carry this UA, not the generic one above.
+     * Diagnosed 2026-10-18 from a device 401: the session was captured by
+     * the WebView but the RPC went out under a different UA.
+     */
+    const val WEBVIEW_UA =
+        "Mozilla/5.0 (Linux; Android 15; Pixel 9) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/131.0.0.0 Mobile Safari/537.36"
+
+    fun headers(contentType: String, userAgent: String = UA): Headers = Headers.Builder()
         .add("x-goog-api-key", API_KEY)
         .add("x-user-agent", "grpc-web-javascript/0.1")
-        .add("User-Agent", UA)
+        .add("User-Agent", userAgent)
         .add("sec-ch-ua", "\"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\", \"Not-A.Brand\";v=\"99\"")
         .add("sec-ch-ua-mobile", "?1")
         .add("sec-ch-ua-platform", "\"Android\"")
@@ -78,10 +90,13 @@ suspend fun postRpc(
     url: String,
     contentType: String,
     body: ByteArray,
+    userAgent: String? = null,
 ): RpcResult = withContext(Dispatchers.IO) {
+    val headers = if (userAgent != null) RelayApi.headers(contentType, userAgent)
+    else RelayApi.headers(contentType)
     val req = Request.Builder()
         .url(url)
-        .headers(RelayApi.headers(contentType))
+        .headers(headers)
         .post(body.toRequestBody(contentType.toMediaType()))
         .build()
     client.newCall(req).execute().use { resp ->
@@ -100,14 +115,17 @@ suspend fun postRpcCancellable(
     url: String,
     contentType: String,
     body: ByteArray,
+    userAgent: String? = null,
 ): RpcResult {
     // Simple cancellable wrapper: run the blocking call on IO, and rely on
     // coroutine cancellation (the caller's Job) to interrupt. For prompt
     // abort, callers should also track and cancel the Call directly.
     return withContext(Dispatchers.IO) {
+        val headers = if (userAgent != null) RelayApi.headers(contentType, userAgent)
+        else RelayApi.headers(contentType)
         val req = Request.Builder()
             .url(url)
-            .headers(RelayApi.headers(contentType))
+            .headers(headers)
             .post(body.toRequestBody(contentType.toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->

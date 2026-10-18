@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.webkit.CookieManager
+import android.webkit.WebStorage
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -168,9 +170,17 @@ fun RcsPairingScreen(
                         Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(onClick = {
-                            cookies = null
-                            error = null
-                            signInAttempted = false
+                            // A 401 means Google rejected the SESSION — retrying
+                            // the same cookies is pointless. Wipe the WebView's
+                            // cookie jar (and DOM storage) so the next attempt
+                            // is a completely fresh sign-in, then reset state
+                            // inside the clear callback.
+                            CookieManager.getInstance().removeAllCookies {
+                                WebStorage.getInstance().deleteAllData()
+                                cookies = null
+                                error = null
+                                signInAttempted = false
+                            }
                         }) { Text("Try again") }
                     }
                 }

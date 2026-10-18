@@ -2,6 +2,7 @@ package com.garrietta.relay.rcs.ui
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -14,8 +15,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.garrietta.relay.rcs.net.RelayApi
 import java.net.HttpURLConnection
 import java.net.URL
+
+private const val TAG = "GaiaPairing"
 
 /**
  * Google sign-in WebView for Gaia pairing.
@@ -48,11 +52,10 @@ fun GaiaSignInWebView(
         WebView(context).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            // Current mobile-Chrome UA, no `; wv` WebView token.
-            settings.userAgentString =
-                "Mozilla/5.0 (Linux; Android 15; Pixel 9) " +
-                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                    "Chrome/131.0.0.0 Mobile Safari/537.36"
+            // Current mobile-Chrome UA, no `; wv` WebView token. Single
+            // source of truth lives in RelayApi.WEBVIEW_UA — the Gaia RPC
+            // must send the SAME UA (Google binds the session to it).
+            settings.userAgentString = RelayApi.WEBVIEW_UA
             webViewClient = object : WebViewClient() {
                 /**
                  * Strip the WebView fingerprint Google uses to block embedded
@@ -119,7 +122,14 @@ fun GaiaSignInWebView(
 /** SAPISID* cookies signal a signed-in Google session — report them once seen. */
 private fun captureCookies(url: String, onCookiesCaptured: (String) -> Unit) {
     val cookies = CookieManager.getInstance().getCookie(url)
-    if (!cookies.isNullOrBlank() && cookies.contains("SAPISID")) {
+    if (cookies.isNullOrBlank()) return
+    // Cookie VALUES are secrets — log names only.
+    val names = cookies.split(";").mapNotNull {
+        it.substringBefore("=").trim().takeIf { name -> name.isNotEmpty() }
+    }
+    Log.d(TAG, "cookie check url=$url names=$names")
+    if ("SAPISID" in names) {
+        Log.d(TAG, "captured Google session cookies (trigger url=$url, names=$names)")
         onCookiesCaptured(cookies)
     }
 }

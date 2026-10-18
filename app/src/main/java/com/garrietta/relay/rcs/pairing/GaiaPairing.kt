@@ -4,6 +4,7 @@ import android.util.Log
 import com.garrietta.relay.rcs.crypto.RcsCrypto
 import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.net.RpcResult
+import com.garrietta.relay.rcs.net.SapisidHash
 import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
@@ -93,12 +94,21 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 2 to PValue.Str(Base64.getEncoder().encodeToString(ecKeys.public.encoded)),
             )
         )
+        // Google's cookie-authenticated endpoints require the SAPISIDHASH
+        // Authorization header IN ADDITION to the Cookie header — cookies
+        // alone are rejected with HTTP 401 (diagnosed 2026-10-18 from a
+        // device 401 on the correct endpoint with captured cookies).
+        val sapisid = SapisidHash.extractSapisid(cookies)
         val gaiaClient = client.newBuilder()
             .addInterceptor { chain ->
-                val req = chain.request().newBuilder()
+                val reqBuilder = chain.request().newBuilder()
                     .addHeader("Cookie", cookies)
-                    .build()
-                chain.proceed(req)
+                if (sapisid != null) {
+                    reqBuilder.addHeader("Authorization", SapisidHash.authorizationValue(sapisid))
+                } else {
+                    Log.w(TAG, "SignInGaia: no SAPISID cookie — Cookie header goes without SAPISIDHASH")
+                }
+                chain.proceed(reqBuilder.build())
             }
             .build()
         // Gaia mode host per mautrix (pkg/libgm/util/paths.go):
@@ -108,7 +118,11 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         // config at messages.google.com/web/config publishes the same host).
         val url = RelayApi.PATH_SIGN_IN_GAIA
         val body = request.toByteArray()
-        Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId cookies=[${cookieNames(cookies)}]")
+        // Cookie VALUES are secrets — names/count only. The SAPISIDHASH
+        // value is derived from the secret SAPISID, so log its presence only.
+        Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId " +
+                "ua=WebViewUA cookies=[${cookieNames(cookies)}] " +
+                "authHeader=${if (sapisid != null) "SAPISIDHASH" else "none"}")
         val res = postSignInGaiaWithRetry(gaiaClient, url, body)
 
         val (tokenData, devices) = decodeSignInGaiaResponse(res.text)
@@ -141,7 +155,10 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         var last: RpcResult? = null
         var backoffMs = 1000L
         repeat(3) { attempt ->
-            val res = postRpcCancellable(gaiaClient, url, RelayApi.CT_PBLITE, body)
+            // The session was established by the sign-in WebView — the RPC
+            // must carry the WebView's UA or Google may reject the session.
+            val res = postRpcCancellable(gaiaClient, url, RelayApi.CT_PBLITE, body,
+                userAgent = RelayApi.WEBVIEW_UA)
             if (res.isOk()) return res
             if (res.code in 400..499) {
                 Log.w(TAG, "SignInGaia HTTP ${res.code} (deterministic, not retrying): ${res.text.take(500)}")

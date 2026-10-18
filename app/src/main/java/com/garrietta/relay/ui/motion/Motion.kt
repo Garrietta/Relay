@@ -142,8 +142,8 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
     put(MotionKind.TOP_LEVEL, crossfade())
 
     if (reducedMotion) {
-        put(MotionKind.FORWARD, fadeThrough())
-        put(MotionKind.BACKWARD, fadeThrough())
+        put(MotionKind.FORWARD, crossfade())
+        put(MotionKind.BACKWARD, crossfade())
     } else {
         put(
             MotionKind.FORWARD,

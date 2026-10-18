@@ -34,7 +34,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
@@ -42,14 +41,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.tickerFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.time.Duration.Companion.seconds
 
 /**
  * Live RCS session — clean-room implementation.
@@ -262,10 +259,15 @@ class RcsSession(context: Context) {
 
     // ---------- ack loop (decoupled; 5s ticker + threshold flush) ----------
 
-    @OptIn(ExperimentalCoroutinesApi::class)
+    /**
+     * Decoupled ack loop on a strict 5s ticker. (Behaviorally identical to
+     * tickerFlow(5000); implemented with delay() to avoid the experimental
+     * tickerFlow API.)
+     */
     private suspend fun ackLoop() {
         val pending = mutableListOf<Pair<String, DeviceInfo>>()
-        tickerFlow(5.seconds).collect {
+        while (true) {
+            delay(5000)
             // Drain whatever arrived since the last tick.
             while (true) {
                 pending.add(ackQueue.tryReceive().getOrNull() ?: break)

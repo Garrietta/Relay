@@ -22,6 +22,9 @@ sealed interface FieldVal {
 
     data class Str(val v: String) : FieldVal
     data class Msg(val fields: Map<Int, FieldVal>) : FieldVal
+
+    /** Repeated-field wrapper for [encode] (also a FieldVal so maps stay uniform). */
+    data class Rep(val items: List<FieldVal>) : FieldVal
 }
 
 object ProtoCodec {
@@ -66,8 +69,7 @@ object ProtoCodec {
     }
 
     /** Decodes to field-number → occurrence list (repeated fields naturally repeat). */
-    fun decode(bytes: ByteArray): Map<Int, List<FieldVal>> {
-        val cis = CodedInputStream.newInstance(bytes)
+    fun decode(bytes: ByteArray): Map<Int, List<FieldVal>> {        val cis = CodedInputStream.newInstance(bytes)
         val out = mutableMapOf<Int, MutableList<FieldVal>>()
         while (!cis.isAtEnd) {
             val tag = cis.readTag()

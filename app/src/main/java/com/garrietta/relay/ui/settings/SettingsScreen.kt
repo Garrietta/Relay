@@ -1,5 +1,6 @@
 package com.garrietta.relay.ui.settings
 
+import android.app.Activity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.ThemeMode
@@ -48,12 +50,12 @@ import com.garrietta.relay.data.transport.RcsPairingState
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
-    onRequestDefaultSms: () -> Unit,
     onOpenRcsPairing: () -> Unit = {},
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val rcsState by viewModel.rcsPairingState.collectAsState()
     val isDefault by viewModel.isDefaultSmsAppFlow.collectAsState()
+    val activity = LocalContext.current as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Surface set-default failures here too — previously userMessages was only
@@ -101,7 +103,8 @@ fun SettingsScreen(
                     subtitle = if (isDefault) "Relay handles your texts"
                     else "Relay needs this to send & receive",
                     actionLabel = if (isDefault) null else "Set default",
-                    onAction = if (isDefault) null else onRequestDefaultSms,
+                    onAction = if (isDefault || activity == null) null
+                    else ({ viewModel.requestDefaultSmsRole(activity) }),
                 )
                 SettingsRow(
                     title = "Notifications",

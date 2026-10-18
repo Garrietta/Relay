@@ -10,14 +10,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
@@ -35,9 +38,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,10 +59,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * New-conversation dialog with LIVE contact search: as Garrett types a name
+ * New-conversation sheet with LIVE contact search: as Garrett types a name
  * or a number, device contacts (READ_CONTACTS) filter in real time; tapping
  * a match starts the chat. A raw typed number still works — the "Text …"
  * row starts a chat on the digits directly.
+ *
+ * Layout: a near-full-screen bottom sheet (~92% height) with the search
+ * field pinned near the top and the results list filling everything below
+ * it, so matches are visible while typing. The keyboard is raised on open
+ * (focus request) and the sheet rides above it via imePadding — the list
+ * compresses, the search field never hides.
+ *
+ * Keyboard bug fix: the field is KeyboardType.Text (a TEXT keyboard), not
+ * Phone — the dial-pad was wrong for name search.
  *
  * Flash fix (round 3): platform-level transparency never took effect —
  * `LocalView.current`'s parent inside dialog content is a container ViewGroup,
@@ -79,6 +95,8 @@ fun NewConversationDialog(
     var query by remember { mutableStateOf("") }
     var matches by remember { mutableStateOf<List<ContactMatch>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     // Live search, debounced ~200ms; the query coroutine is cancelled on
     // every keystroke so only the latest search lands.
@@ -110,7 +128,11 @@ fun NewConversationDialog(
         ),
     ) {
         var visible by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { visible = true }
+        LaunchedEffect(Unit) {
+            visible = true
+            // Raise the keyboard on open so Garrett can type immediately.
+            focusRequester.requestFocus()
+        }
         // Bouncy dialog entrance — the unified spring language.
         val scale by animateFloatAsState(
             targetValue = if (visible) 1f else 0.92f,
@@ -135,12 +157,17 @@ fun NewConversationDialog(
                     indication = null,
                     onClick = onDismiss,
                 ),
-            contentAlignment = Alignment.Center,
+            contentAlignment = Alignment.BottomCenter,
         ) {
             Surface(
+                // imePadding FIRST (outermost): the keyboard insets are
+                // consumed before the 92% height is measured, so the sheet
+                // rides above the keyboard and the list compresses instead
+                // of hiding behind it.
                 modifier = Modifier
+                    .imePadding()
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
+                    .fillMaxHeight(0.92f)
                     .graphicsLayer(scaleX = scale, scaleY = scale)
                     // Swallow taps so they don't fall through to the scrim.
                     .clickable(
@@ -148,36 +175,47 @@ fun NewConversationDialog(
                         indication = null,
                         onClick = {},
                     ),
-                shape = RoundedCornerShape(32.dp),
+                shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 6.dp,
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
                 ) {
+                    // Compact header — the search field sits near the top so
+                    // results are visible while typing.
                     Text(
                         "New message",
-                        style = MaterialTheme.typography.headlineMedium,
+                        style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = query,
                         onValueChange = { query = it },
                         placeholder = { Text("Name or number") },
                         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Search,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onSearch = { keyboardController?.hide() },
+                        ),
                         singleLine = true,
                         shape = RoundedCornerShape(24.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    // Results list: fixed max height, scrolls when long.
-                    LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(320.dp),
+                            .focusRequester(focusRequester),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // Results list: fills everything below the search field,
+                    // compresses when the keyboard is up.
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
                     ) {
                         if (showRawNumberRow) {
                             item(key = "raw:$queryDigits") {

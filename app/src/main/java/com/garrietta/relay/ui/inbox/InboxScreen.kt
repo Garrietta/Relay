@@ -70,11 +70,11 @@ import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.CloverShape
 import com.garrietta.relay.ui.theme.ContactAvatar
+import com.garrietta.relay.ui.theme.RibbonBarShape
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
 import com.garrietta.relay.ui.theme.expressiveShape
-import com.garrietta.relay.ui.theme.stretchedExpressiveShape
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -97,22 +97,20 @@ fun InboxScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
 
-    // Aggressive collapsing header: the big "Messages" title shrinks all the
-    // way down to a compact bar title as the list scrolls. The collapse
-    // fraction is spring-smoothed so the header feels fluid and bouncy,
-    // never rigid.
-    val rawCollapse by remember {
+    // Scroll-linked collapsing header: the big "Messages" title shrinks all
+    // the way down to a compact bar title as the list scrolls. The collapse
+    // is driven DIRECTLY by the scroll offset — deliberately no spring.
+    // A spring retargeted on every scroll frame can never settle: it
+    // oscillates, recomposes the header continuously, and visibly lags the
+    // scroll (diagnosed 2026-10-18 as the 120Hz scroll-choppiness culprit).
+    // The scroll itself is the animation; 1:1 tracking is correct.
+    val collapse by remember {
         derivedStateOf {
             val offset = listState.firstVisibleItemScrollOffset.toFloat()
             val jump = if (listState.firstVisibleItemIndex > 0) 360f else 0f
             ((jump + offset) / 360f).coerceIn(0f, 1f)
         }
     }
-    val collapse by animateFloatAsState(
-        targetValue = rawCollapse,
-        animationSpec = RelaySprings.bouncy(),
-        label = "headerCollapse",
-    )
 
     LaunchedEffect(Unit) {
         userMessages.collect { snackbarHostState.showSnackbar(it) }
@@ -265,11 +263,12 @@ private fun CollapsingMessagesHeader(
 }
 
 /**
- * Floating "New conversation" pill — Google Messages M3E pattern, but in
- * Relay's voice: a WIDE clamshell from the expressive vocabulary instead of
- * a plain pill, real elevation + shadow so it reads as floating above the
- * conversation list. Bouncy press-scale in the unified spring language; the
- * densest color in the scheme, per the expressive contrast rule.
+ * Floating "New conversation" bar — mostly a rectangle with short pointed
+ * sides (RibbonBarShape): straight top/bottom edges, small pointed flourishes
+ * on the left and right that never sweep toward the middle. Full width, real
+ * elevation + shadow so it reads as floating above the conversation list.
+ * Bouncy press-scale in the unified spring language; the densest color in
+ * the scheme, per the expressive contrast rule.
  */
 @Composable
 private fun NewConversationPill(
@@ -286,11 +285,9 @@ private fun NewConversationPill(
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        // Full-width stretched Clamshell: the vocabulary shape's reference
-        // path is mapped onto the whole bar (non-uniform stretch), so its
-        // points and curves span the full width with the shape's character
-        // intact — the expressive bar, not a small centered pill.
-        shape = stretchedExpressiveShape("Clamshell"),
+        // Mostly-rectangle bar with short pointed sides — expressive
+        // character without the dramatic full-bleed eye shape.
+        shape = RibbonBarShape,
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,
@@ -595,14 +592,27 @@ private fun TransportChip(label: String) {
     )
 }
 
+// Hoisted date formatters: formatTime runs per row per composition, and
+// allocating two SimpleDateFormats each time is per-frame churn during a
+// fling. ThreadLocal keeps them safe wherever the row composes.
+private val dayFormatHolder = ThreadLocal.withInitial {
+    SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+}
+private val timeFormatHolder = ThreadLocal.withInitial {
+    SimpleDateFormat("h:mm a", Locale.getDefault())
+}
+private val dateFormatHolder = ThreadLocal.withInitial {
+    SimpleDateFormat("MMM d", Locale.getDefault())
+}
+
 private fun formatTime(millis: Long): String {
     if (millis <= 0) return ""
     val now = System.currentTimeMillis()
-    val sameDay = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
-        .format(Date(millis)) == SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(now))
+    val dayFormat = dayFormatHolder.get() ?: return ""
+    val sameDay = dayFormat.format(Date(millis)) == dayFormat.format(Date(now))
     return if (sameDay) {
-        SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(millis))
+        (timeFormatHolder.get() ?: return "").format(Date(millis))
     } else {
-        SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(millis))
+        (dateFormatHolder.get() ?: return "").format(Date(millis))
     }
 }

@@ -199,6 +199,33 @@ fun expressiveShape(name: String): Shape =
     ExpressiveAvatarShapes.firstOrNull { it.name == name }?.shape ?: WavyBlobShape
 
 /**
+ * Mostly-rectangle bar with SHORT pointed sides — the toned-down
+ * New-conversation bar. Straight top and bottom edges; each end carries a
+ * small pointed flourish extending only ~5% of the width, never sweeping
+ * toward the middle. Expressive character, none of the drama.
+ */
+val RibbonBarShape = GenericShape { size, _ ->
+    val w = size.width
+    val h = size.height
+    if (w <= 0f || h <= 0f) return@GenericShape
+    val tipX = w * 0.055f   // short point extent on each side
+    val topY = h * 0.14f
+    val botY = h * 0.86f
+    val r = h * 0.10f       // small corner rounding into the straight edges
+    moveTo(0f, h / 2f)                       // left tip
+    lineTo(tipX, topY + r)
+    quadraticTo(tipX, topY, tipX + r, topY)  // round into the top edge
+    lineTo(w - tipX - r, topY)               // straight top edge
+    quadraticTo(w - tipX, topY, w - tipX, topY + r)
+    lineTo(w, h / 2f)                        // right tip
+    lineTo(w - tipX, botY - r)
+    quadraticTo(w - tipX, botY, w - tipX - r, botY)
+    lineTo(tipX + r, botY)                   // straight bottom edge
+    quadraticTo(tipX, botY, tipX, botY - r)
+    close()
+}
+
+/**
  * A horizontally-stretched version of a vocabulary shape: the reference path
  * is mapped onto the FULL layout rect (non-uniform scale), so the shape's
  * points, corners and curves span the whole width with its character intact.

@@ -5,6 +5,7 @@ import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
+import com.garrietta.relay.rcs.pblite.asList
 import com.garrietta.relay.rcs.pblite.asMsg
 import com.garrietta.relay.rcs.pblite.bytes
 import com.garrietta.relay.rcs.pblite.num
@@ -140,13 +141,13 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         val sha512 = MessageDigest.getInstance("SHA-512").digest(finishPayload)
         val commitment = ProtoCodec.encode(
             mapOf(
-                1 to FieldVal.Varint(1), // P256_SHA512
+                1 to FieldVal.Varint(1L), // P256_SHA512
                 2 to FieldVal.Bytes(sha512),
             )
         )
         val clientInit = ProtoCodec.encode(
             mapOf(
-                1 to FieldVal.Varint(1), // version
+                1 to FieldVal.Varint(1L), // version
                 2 to FieldVal.Bytes(random),
                 3 to FieldVal.Rep(listOf(FieldVal.Bytes(commitment))),
                 4 to FieldVal.Str("AES_256_CBC-HMAC_SHA256"),
@@ -154,7 +155,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         )
         val initPayload = ProtoCodec.encode(
             mapOf(
-                1 to FieldVal.Varint(1), // CLIENT_INIT
+                1 to FieldVal.Varint(1L), // CLIENT_INIT
                 2 to FieldVal.Bytes(clientInit),
             )
         )
@@ -270,7 +271,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
             val tokenBytes = decoded.bytes(1) ?: byteArrayOf()
             val tokenData = com.garrietta.relay.rcs.proto.TokenData(tokenBytes, 24 * 3600)
             // Devices: repeated field of [deviceId, isPrimary, lastSeenMs].
-            val devices = (decoded[2] as? PValue.Arr)?.asMsg()?.values?.mapNotNull { d ->
+            val devices = (decoded[2] as? PValue.Arr)?.asList()?.mapNotNull { d ->
                 val m = (d as? PValue.Arr)?.asMsg() ?: return@mapNotNull null
                 GaiaDevice(
                     deviceId = m.str(1) ?: return@mapNotNull null,

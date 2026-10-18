@@ -3,8 +3,8 @@
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
-    android:viewportHeight="24"
-    android:tint="?attr/colorOnPrimary">
+    android:viewportHeight="24">
+    <!-- System tints notification icons automatically; no tint needed. -->
     <path
         android:fillColor="@android:color/white"
         android:pathData="M20,2H4C2.9,2 2,2.9 2,4v18l4,-4h14c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2zM8,11H6V9h2v2zM12,11h-2V9h2v2zM16,11h-2V9h2v2z" />

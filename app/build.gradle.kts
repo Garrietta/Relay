@@ -62,6 +62,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material:material-icons-core")
+    // Extended set: gallery/camera/draw composer icons (core lacks them).
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
 
     // Palette: extract vibrant colors from contact profile photos to seed

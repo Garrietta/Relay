@@ -532,6 +532,47 @@ class UnifiedInboxRepository(
     /** Public address normalizer for matching message senders to participants. */
     fun normalizedAddress(address: String): String = normalizeAddress(address)
 
+    private var ownAddressCache: String? = null
+    private var ownAddressResolved = false
+
+    /**
+     * The device's own address (normalized digits), or null when it cannot be
+     * determined. Derived from the FROM address of a sent MMS (msg_box=2) —
+     * no READ_PHONE_STATE permission needed. Used to exclude self from
+     * participant counts so him+1 threads are not misdetected as groups.
+     */
+    suspend fun ownAddress(): String? = withContext(Dispatchers.IO) {
+        if (ownAddressResolved) return@withContext ownAddressCache
+        ownAddressResolved = true
+        ownAddressCache = selfAddressFromSentMms()
+        ownAddressCache
+    }
+
+    private fun selfAddressFromSentMms(): String? {
+        try {
+            var mmsId = -1L
+            context.contentResolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id"), "msg_box=2", null, "date DESC LIMIT 1",
+            )?.use { c -> if (c.moveToFirst()) mmsId = c.getLong(0) }
+            if (mmsId < 0) return null
+            // 137 (0x89) = FROM — on a sent message, FROM is always self.
+            context.contentResolver.query(
+                Uri.parse("content://mms/$mmsId/addr"),
+                arrayOf("address"), "type=137", null, null,
+            )?.use { c ->
+                val i = c.getColumnIndex("address")
+                if (i >= 0 && c.moveToFirst()) {
+                    val a = c.getString(i)
+                    if (!a.isNullOrBlank() && a != "insert-address-token") {
+                        return normalizeAddress(a)
+                    }
+                }
+            }
+        } catch (_: Exception) { }
+        return null
+    }
+
     fun observeIncoming(): Flow<IncomingMessage> = callbackFlow {
         val jobs = transports.map { t ->
             scope.launch { t.observeIncoming().collect { trySend(it) } }

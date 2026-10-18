@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -51,11 +53,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +76,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
@@ -112,13 +114,29 @@ fun ChatScreen(
     val photoUri by viewModel.photoUri.collectAsState()
     val selectedIds by viewModel.selectedIds.collectAsState()
     val participants by viewModel.participants.collectAsState()
+    val others by viewModel.others.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    // Group threads (>1 distinct participant) get the clustered header and
-    // per-sender bubble theming; 1:1 chats are untouched.
-    val isGroup = participants.size > 1
+    // Header mode from the OTHER-participant count (self excluded — the
+    // provider's MMS addr table lists self, which used to misdetect him+1
+    // threads as groups). Per-sender bubble theming applies to pair + hex.
+    val headerMode = when {
+        others.size <= 1 -> HeaderMode.OneToOne
+        others.size == 2 -> HeaderMode.Pair
+        else -> HeaderMode.Hex
+    }
+    val isGroup = headerMode != HeaderMode.OneToOne
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    // Hex header minimizes 1:1 with scroll — direct tracking, NO spring (a
+    // spring retargeted every scroll frame never settles; the #102 lesson).
+    val rawCollapse by remember {
+        derivedStateOf {
+            val offset = listState.firstVisibleItemScrollOffset.toFloat()
+            val jump = if (listState.firstVisibleItemIndex > 0) 240f else 0f
+            ((jump + offset) / 240f).coerceIn(0f, 1f)
+        }
+    }
 
     // Per-contact theming: seed the chat color scheme from the contact's
     // profile photo (Palette). Falls back to the wallpaper dynamic scheme.
@@ -141,57 +159,22 @@ fun ChatScreen(
         val threadBackground = MaterialTheme.colorScheme.surfaceContainerLow
         Scaffold(
             topBar = {
-                if (isGroup) {
-                    GroupChatHeader(
-                        participants = participants,
-                        transportLabel = transportLabel,
-                        onBack = onBack,
-                    )
-                } else {
-                TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Shared-element target: the inbox avatar morphs here on
-                            // push — and morphs BACK down on pop via
-                            // motionSharedAvatar (message content is exempt,
-                            // so the #45 ghosting fix holds).
-                            ChatAvatar(
-                                name = displayName,
-                                photoUri = photoUri,
-                                shapeKey = recipient,
-                                modifier = Modifier.motionSharedAvatar(
-                                    SharedElementKeys.avatar(threadId),
-                                    shape = WavyBlobShape,
-                                ),
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(
-                                    displayName,
-                                    // Emphasized type for the eye-stop moment.
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                )
-                                Text(
-                                    transportLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
+                ChatHeader(
+                    mode = headerMode,
+                    others = others,
+                    participants = participants,
+                    displayName = displayName,
+                    photoUri = photoUri,
+                    recipient = recipient,
+                    threadId = threadId,
+                    transportLabel = transportLabel,
+                    collapse = rawCollapse,
+                    onBack = onBack,
                 )
-                }
             },
+            // Seamless with the thread container below — the header
+            // background and the list background are one continuous tone.
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { padding ->
             // Thread container: the chat reads as one large rounded container
@@ -210,15 +193,21 @@ fun ChatScreen(
                     .imePadding(),
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    LazyColumn(
-                        state = listState,
-                        reverseLayout = true,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    // Bubbles never span the full width: received keep an
+                    // empty right margin, sent an empty left one.
+                    BoxWithConstraints(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
                     ) {
+                        val maxBubbleWidth = maxWidth * 0.8f
+                        LazyColumn(
+                            state = listState,
+                            reverseLayout = true,
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
                         itemsIndexed(
                             items = messages,
                             key = { _, it -> it.id },
@@ -249,7 +238,9 @@ fun ChatScreen(
                                 isGroup = isGroup,
                                 threadBackground = threadBackground,
                                 darkTheme = darkTheme,
+                                maxBubbleWidth = maxBubbleWidth,
                             )
+                        }
                         }
                     }
                     Composer(
@@ -267,99 +258,276 @@ fun ChatScreen(
     }
 }
 
+/** Which header layout a thread gets — from the OTHER-participant count. */
+private enum class HeaderMode { OneToOne, Pair, Hex }
+
 /**
- * Group chat header: a centered cluster of overlapping avatars in UNEVEN
- * sizes — contact photos and initial-shapes scattered with playful offsets,
- * like a collage rather than a grid — with the group name below. Each mini
- * avatar takes its own shape from the per-session rotation, so the cluster
- * itself is a sampler of the shape vocabulary.
+ * Chat header dispatch. 1:1 = their face centered at the top with their name
+ * directly under. 2 others = the two avatars side by side (second offset to
+ * the right of the first, small gap, never overlapping) with comma-separated
+ * names below — or the chat name when the chat has one. 3+ = avatars filling
+ * a hexagonal space, minimizing on scroll. Back arrow always top-left.
+ * Background matches the thread container — no seam.
  */
 @Composable
-private fun GroupChatHeader(
+private fun ChatHeader(
+    mode: HeaderMode,
+    others: List<Participant>,
     participants: List<Participant>,
+    displayName: String,
+    photoUri: String?,
+    recipient: String,
+    threadId: Long,
     transportLabel: String,
+    collapse: Float,
     onBack: () -> Unit,
 ) {
-    val groupName = remember(participants) {
-        val names = participants.map {
-            it.displayName.substringBefore(" ").ifBlank { it.address }
-        }
-        if (names.size <= 3) names.joinToString(", ")
-        else names.take(3).joinToString(", ") + " +${names.size - 3}"
-    }
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .padding(bottom = 12.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .windowInsetsPadding(WindowInsets.statusBars),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                }
-                Spacer(Modifier.weight(1f))
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
             }
-            GroupAvatarCluster(
-                participants = participants,
-                modifier = Modifier.fillMaxWidth(),
+        }
+        when (mode) {
+            HeaderMode.OneToOne -> {
+                // Self-chat (no others): show self.
+                val peer = others.firstOrNull() ?: participants.firstOrNull()
+                val name = peer?.displayName?.ifBlank { peer.address }
+                    ?.ifBlank { displayName } ?: displayName
+                OneToOneHeader(
+                    name = name,
+                    photoUri = peer?.photoUri ?: photoUri,
+                    shapeKey = peer?.address ?: recipient,
+                    threadId = threadId,
+                    transportLabel = transportLabel,
+                )
+            }
+            HeaderMode.Pair -> PairHeader(
+                others = others,
+                transportLabel = transportLabel,
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = groupName,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
-            )
-            Text(
-                text = "${participants.size} people · $transportLabel",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
+            HeaderMode.Hex -> HexHeader(
+                others = others,
+                transportLabel = transportLabel,
+                collapse = collapse,
             )
         }
     }
 }
 
 /**
- * Scattered avatar collage: up to seven participants at deliberately uneven
- * sizes, offset from center on both axes (deterministic scatter, not a grid),
- * later avatars drawing over earlier ones.
+ * 1:1 header: their face centered at the top with their name directly under.
+ * Compact. The avatar keeps the inbox shared-element morph target (message
+ * content is exempt, so the #45 ghosting fix holds).
  */
 @Composable
-private fun GroupAvatarCluster(
-    participants: List<Participant>,
-    modifier: Modifier = Modifier,
+private fun OneToOneHeader(
+    name: String,
+    photoUri: String?,
+    shapeKey: String,
+    threadId: Long,
+    transportLabel: String,
 ) {
-    val shown = participants.take(7)
-    // Uneven sizes — the collage feel.
-    val sizes = listOf(46, 32, 50, 30, 42, 34, 48)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        ContactAvatar(
+            photoUri = photoUri,
+            name = name,
+            size = 60.dp,
+            shapeKey = shapeKey,
+            textStyle = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.motionSharedAvatar(
+                SharedElementKeys.avatar(threadId),
+                shape = WavyBlobShape,
+            ),
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
+        Text(
+            text = transportLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * 2-other-people header: the two avatars side by side — the second
+ * horizontally offset to the right of the first with a small gap, never
+ * overlapping — names comma-separated below (or the chat name when the chat
+ * has a custom name; hook: replace [names] with the custom name).
+ */
+@Composable
+private fun PairHeader(
+    others: List<Participant>,
+    transportLabel: String,
+) {
+    val names = remember(others) {
+        others.take(2).map {
+            it.displayName.substringBefore(" ").ifBlank { it.address }
+        }.joinToString(", ")
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            others.take(2).forEach { p ->
+                ContactAvatar(
+                    photoUri = p.photoUri,
+                    name = p.displayName.ifBlank { p.address },
+                    size = 48.dp,
+                    shapeKey = p.address,
+                    textStyle = MaterialTheme.typography.titleMedium,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = names,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
+        Text(
+            text = transportLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * 3+-other-people header: avatars arranged to fill a hexagonal space —
+ * one centered with up to six around it (or all evenly around the ring when
+ * six or fewer), small gaps, never overlapping. Minimizes 1:1 with scroll.
+ */
+@Composable
+private fun HexHeader(
+    others: List<Participant>,
+    transportLabel: String,
+    collapse: Float,
+) {
+    val shown = others.take(7)
+    val avatarSize = (40 - 14 * collapse).dp
+    val nameSize = (20 - 5 * collapse).sp
+    val verticalPad = (10 - 6 * collapse).dp
+    val groupName = remember(others) {
+        val names = others.map {
+            it.displayName.substringBefore(" ").ifBlank { it.address }
+        }
+        if (names.size <= 3) names.joinToString(", ")
+        else names.take(3).joinToString(", ") + " +${names.size - 3}"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = verticalPad),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        HexAvatarField(
+            participants = shown,
+            avatarSize = avatarSize,
+        )
+        Spacer(Modifier.height((8 - 4 * collapse).dp))
+        Text(
+            text = groupName,
+            fontSize = nameSize,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
+        Text(
+            text = "${others.size} people \u00b7 $transportLabel",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * Hexagonal avatar arrangement: with 7, one centered and six around it;
+ * with 6 or fewer, all evenly spaced around the ring starting at the top.
+ * The ring radius derives from avatar size + gap so neighbors never overlap.
+ */
+@Composable
+private fun HexAvatarField(
+    participants: List<Participant>,
+    avatarSize: Dp,
+) {
+    val k = participants.size
+    if (k == 0) return
+    val gap = 8.dp
+    val ring = if (k == 7) participants.drop(1) else participants
+    val center = if (k == 7) participants.first() else null
+    val ringCount = ring.size
+    // Chord between adjacent ring avatars must clear avatarSize + gap:
+    // R = chord / (2 * sin(pi / ringCount)).
+    val radius: Dp = if (ringCount < 3) {
+        (avatarSize + gap) / 2
+    } else {
+        (avatarSize + gap) / (2 * kotlin.math.sin(kotlin.math.PI / ringCount).toFloat())
+    }
     Box(
-        modifier = modifier.height(68.dp),
+        modifier = Modifier.size(radius * 2 + avatarSize),
         contentAlignment = Alignment.Center,
     ) {
-        shown.forEachIndexed { index, p ->
-            val sizeDp = sizes[index % sizes.size].dp
-            val xOff = ((index - (shown.size - 1) / 2f) * 26f).dp
-            val yOff = (((index * 37) % 3) - 1) * 7f
+        center?.let { p ->
             ContactAvatar(
                 photoUri = p.photoUri,
                 name = p.displayName.ifBlank { p.address },
-                size = sizeDp,
+                size = avatarSize,
+                shapeKey = p.address,
+                textStyle = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        ring.forEachIndexed { index, p ->
+            val angle = -kotlin.math.PI / 2 + index * 2 * kotlin.math.PI / ringCount
+            val xOff = radius * kotlin.math.cos(angle).toFloat()
+            val yOff = radius * kotlin.math.sin(angle).toFloat()
+            ContactAvatar(
+                photoUri = p.photoUri,
+                name = p.displayName.ifBlank { p.address },
+                size = avatarSize,
                 shapeKey = p.address,
                 textStyle = MaterialTheme.typography.titleSmall,
                 modifier = Modifier
-                    .offset(x = xOff, y = yOff.dp)
-                    .zIndex((shown.size - index).toFloat()),
+                    .align(Alignment.Center)
+                    .offset(x = xOff, y = yOff),
             )
         }
     }
@@ -386,6 +554,8 @@ private fun MessageBubble(
     isGroup: Boolean = false,
     threadBackground: Color = Color.Transparent,
     darkTheme: Boolean = false,
+    /** Received bubbles keep an empty right margin; sent an empty left one. */
+    maxBubbleWidth: Dp = Dp.Unspecified,
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
@@ -430,7 +600,9 @@ private fun MessageBubble(
                 )
                 Spacer(Modifier.width(8.dp))
                 Column(
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .widthIn(max = maxBubbleWidth),
                     horizontalAlignment = Alignment.Start,
                 ) {
                     Text(
@@ -448,6 +620,7 @@ private fun MessageBubble(
                         selectionActive = selectionActive,
                         onToggleSelect = onToggleSelect,
                         body = message.body,
+                        maxBubbleWidth = maxBubbleWidth,
                     )
                 }
             }
@@ -459,6 +632,7 @@ private fun MessageBubble(
                 selectionActive = selectionActive,
                 onToggleSelect = onToggleSelect,
                 body = message.body,
+                maxBubbleWidth = maxBubbleWidth,
             )
         }
         if (message.isMms) {
@@ -481,15 +655,18 @@ private fun BubbleBox(
     selectionActive: Boolean,
     onToggleSelect: () -> Unit,
     body: String,
+    maxBubbleWidth: Dp = Dp.Unspecified,
 ) {
     Box(
         modifier = Modifier
+            .widthIn(max = maxBubbleWidth)
             .clip(shape)
             .background(containerColor)
             .combinedClickable(
                 onClick = { if (selectionActive) onToggleSelect() },
                 onLongClick = onToggleSelect,
             )
+            // Uniform interior padding on every bubble.
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(
@@ -753,20 +930,3 @@ private enum class ItemPosition { SINGLE, FIRST, MIDDLE, LAST }
 
 private fun formatDay(millis: Long): String =
     SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(millis))
-
-@Composable
-private fun ChatAvatar(
-    name: String,
-    photoUri: String?,
-    shapeKey: String,
-    modifier: Modifier = Modifier,
-) {
-    ContactAvatar(
-        photoUri = photoUri,
-        name = name,
-        modifier = modifier,
-        size = 44.dp,
-        shapeKey = shapeKey,
-        textStyle = MaterialTheme.typography.titleLarge,
-    )
-}

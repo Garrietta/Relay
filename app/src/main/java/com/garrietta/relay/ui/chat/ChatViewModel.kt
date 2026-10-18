@@ -73,6 +73,15 @@ class ChatViewModel(
     private val _participants = MutableStateFlow<List<Participant>>(emptyList())
     val participants: StateFlow<List<Participant>> = _participants
 
+    /**
+     * Participants OTHER than the device owner. Drives the header mode:
+     * 1 other = 1:1 header, 2 others = pair header, 3+ = hexagonal group
+     * header. The provider's MMS addr table lists self (FROM on sent, TO on
+     * received), which used to misdetect him+1 threads as groups.
+     */
+    private val _others = MutableStateFlow<List<Participant>>(emptyList())
+    val others: StateFlow<List<Participant>> = _others
+
     /** Palette seed per participant (null = no photo) for per-sender bubbles. */
     private val _senderSeeds = MutableStateFlow<Map<String, androidx.compose.ui.graphics.Color?>>(emptyMap())
     val senderSeeds: StateFlow<Map<String, androidx.compose.ui.graphics.Color?>> = _senderSeeds
@@ -103,6 +112,9 @@ class ChatViewModel(
         viewModelScope.launch {
             val parts = repository.getGroupParticipants(threadIds)
             _participants.value = parts
+            val self = repository.ownAddress()
+            _others.value = if (self == null) parts
+                else parts.filterNot { repository.normalizedAddress(it.address) == self }
             participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {

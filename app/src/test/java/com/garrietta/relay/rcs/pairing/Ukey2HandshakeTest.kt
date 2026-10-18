@@ -168,18 +168,26 @@ class Ukey2HandshakeTest {
         assertTrue(!aes1.contentEquals(aes3))
     }
 
-    @Test fun `byte hash matches java signed semantics`() {
-        assertEquals("test".hashCode(), GaiaPairing.byteHash("test".toByteArray()))
+    @Test fun `byte hash matches reference signed semantics`() {
+        // Reference: out=1; out=31*out+int8(b). NOT Java's String.hashCode
+        // (which starts at 0) — the implementation follows the reference.
+        var expected = 1
+        for (b in "test".toByteArray()) expected = 31 * expected + b.toInt()
+        assertEquals(expected, GaiaPairing.byteHash("test".toByteArray()))
         // Signed bytes: 0xFF is -1, not 255.
-        var out = 1
-        for (b in byteArrayOf(-1, -128, 127)) out = 31 * out + b.toInt()
-        assertEquals(out, GaiaPairing.byteHash(byteArrayOf(-1, -128, 127)))
+        var expected2 = 1
+        for (b in byteArrayOf(-1, -128, 127)) expected2 = 31 * expected2 + b.toInt()
+        assertEquals(expected2, GaiaPairing.byteHash(byteArrayOf(-1, -128, 127)))
     }
 
-    @Test fun `emoji tables match the reference sizes and diff`() {
+    @Test fun `emoji tables match the reference`() {
+        // V0 is the reference list verbatim: 305 entries including the
+        // reference's own 🍞 duplicate (304 unique).
         assertEquals(305, PairingEmojis.V0.size)
+        assertEquals(304, PairingEmojis.V0.toSet().size)
+        assertEquals(2, PairingEmojis.V0.count { it == "🍞" })
+        // V1 = dedup(V0) + 14 added - 10 removed = 308, all unique.
         assertEquals(308, PairingEmojis.V1.size)
-        assertEquals(305, PairingEmojis.V0.toSet().size)
         assertEquals(308, PairingEmojis.V1.toSet().size)
         val v0Set = PairingEmojis.V0.toSet()
         val v1Set = PairingEmojis.V1.toSet()

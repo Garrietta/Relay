@@ -387,7 +387,7 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 ((ukeyV1Auth[2].toInt() and 0xFF) shl 8) or
                 (ukeyV1Auth[3].toInt() and 0xFF)
         val emoji = table[Math.floorMod(index, table.size)]
-        Log.d(TAG, "SERVER_INIT ok: emoji=$emoji v=$verificationCodeVersion")
+        // Note: no Log.d here — android.util.Log throws Stub! in JVM unit tests.
         return ServerInitResult(serverPublicKey, nextKey, verificationCodeVersion, emoji)
     }
 

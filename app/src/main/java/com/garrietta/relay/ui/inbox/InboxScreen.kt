@@ -13,12 +13,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -225,10 +228,18 @@ private fun CollapsingMessagesHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // The status-bar inset is applied ALWAYS, independent of the
+                // collapse offset — never 0. Without this, the title + gear
+                // render under the status bar in some states (cold start /
+                // after pop-back, when the collapse spring is mid-flight;
+                // diagnosed 2026-10-18 from a device screenshot). This is the
+                // same pattern TopAppBar uses; the Scaffold topBar slot does
+                // not inset custom headers for us.
+                .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(
                     start = 20.dp,
                     end = 8.dp,
-                    top = (20 - 12 * collapse).dp,
+                    top = (12 - 6 * collapse).dp,
                     bottom = (4 + 4 * collapse).dp,
                 ),
             verticalAlignment = Alignment.CenterVertically,

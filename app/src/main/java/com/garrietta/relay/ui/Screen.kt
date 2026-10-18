@@ -13,6 +13,8 @@ sealed interface Screen {
         val address: String,
         val displayName: String,
         val threadIds: List<Long> = listOf(threadId),
+        /** Transport of the conversation's latest message ("SMS"/"MMS"). */
+        val transportLabel: String = "SMS",
     ) : Screen
     data object Settings : Screen
     data object NewConversation : Screen

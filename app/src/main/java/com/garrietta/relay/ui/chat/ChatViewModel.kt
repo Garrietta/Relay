@@ -1,5 +1,6 @@
 package com.garrietta.relay.ui.chat
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Message
@@ -10,12 +11,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
+private const val TAG = "ChatViewModel"
+
 class ChatViewModel(
     private val repository: UnifiedInboxRepository,
     private val appSeedStore: AppSeedStore,
     private val threadId: Long,
     /** All provider threads merged into this conversation (see Screen.Chat). */
     private val threadIds: List<Long> = listOf(threadId),
+    /** Recipient address — used to re-resolve threads if the ID key goes stale. */
+    private val address: String = "",
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
@@ -80,7 +85,21 @@ class ChatViewModel(
     fun reload() {
         viewModelScope.launch {
             // Merged conversations load the full history across thread_ids.
-            _messages.value = repository.loadMessages(threadIds)
+            val loaded = repository.loadMessages(threadIds)
+            _messages.value = loaded.ifEmpty {
+                // Empty but the inbox showed a snippet: the thread_id key
+                // may have gone stale (provider re-split threads). Re-resolve
+                // by address so the thread shows the same unified set.
+                if (address.isBlank()) {
+                    emptyList()
+                } else {
+                    val fallback = repository.loadMessagesByAddress(address)
+                    if (fallback.isNotEmpty()) {
+                        Log.w(TAG, "reload: threadIds=$threadIds empty; address fallback found ${fallback.size}")
+                    }
+                    fallback
+                }
+            }
             if (activeThreadId >= 0) repository.markThreadRead(threadIds)
         }
     }

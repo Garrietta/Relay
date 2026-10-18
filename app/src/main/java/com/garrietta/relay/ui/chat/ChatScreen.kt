@@ -90,6 +90,7 @@ fun ChatScreen(
     recipient: String,
     threadId: Long,
     threadIds: List<Long>,
+    transportLabel: String = "SMS",
     onBack: () -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()
@@ -145,7 +146,7 @@ fun ChatScreen(
                                     maxLines = 1,
                                 )
                                 Text(
-                                    "SMS",
+                                    transportLabel,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

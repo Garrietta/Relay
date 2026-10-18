@@ -179,7 +179,12 @@ class UnifiedInboxRepository(
                             snippet = snippet,
                             unread = !(readI >= 0 && c.getInt(readI) == 1),
                             messageCount = if (countI >= 0) c.getInt(countI) else 0,
-                            transportLabel = if (looksLikeMmsThread(threadId)) "MMS" else "SMS",
+                            // The chip describes the LATEST message — the one the
+                            // snippet came from — not "any MMS ever in this
+                            // thread". (The old looksLikeMmsThread labeled
+                            // SMS threads "MMS" when an old MMS sat in them;
+                            // diagnosed 2026-10-18 from short-code rows.)
+                            transportLabel = latestTransportLabel(threadId),
                         )
                     )
                 }
@@ -349,14 +354,18 @@ class UnifiedInboxRepository(
                 val readI = c.getColumnIndex("read")
                 while (c.moveToNext()) {
                     val mmsId = if (idI >= 0) c.getLong(idI) else continue
-                    val text = mmsText(mmsId)
-                    if (text.isBlank()) continue
+                    // Text-less MMS (photo/video) is still a message: show it
+                    // as a labeled bubble instead of dropping it, so the
+                    // thread always shows the same set the inbox snippet and
+                    // transport chip were built from.
+                    val body = mmsText(mmsId).ifBlank { mmsAttachmentLabel(mmsId) }
+                    if (body.isNullOrBlank()) continue
                     out.add(
                         Message(
                             id = -mmsId, // negative to avoid colliding with SMS ids
                             threadId = if (threadI >= 0) c.getLong(threadI) else primaryThreadId,
                             address = mmsAddress(mmsId).orEmpty(),
-                            body = text,
+                            body = body,
                             date = if (dateI >= 0) c.getLong(dateI) * 1000L else 0L,
                             isOutgoing = boxI >= 0 && c.getInt(boxI) == 2,
                             isMms = true,
@@ -372,6 +381,37 @@ class UnifiedInboxRepository(
 
     /** Single-thread convenience; delegates to the merged loader. */
     suspend fun loadMessages(threadId: Long): List<Message> = loadMessages(listOf(threadId))
+
+    /**
+     * Fallback loader: re-resolves live provider thread IDs for [address]
+     * and loads those. Used when [loadMessages] by thread ID comes back
+     * empty — the thread_id key can go stale when the provider splits or
+     * re-keys threads, but the address still resolves. The thread screen
+     * must show the same unified message set the inbox snippet came from.
+     */
+    suspend fun loadMessagesByAddress(address: String): List<Message> = withContext(Dispatchers.IO) {
+        // mergeKey() is null for short codes / non-numbers — fall back to
+        // raw digits so those threads resolve too.
+        val want = mergeKey(address) ?: address.filter { it.isDigit() }.ifEmpty { address }
+        if (want.isEmpty()) return@withContext emptyList()
+        val ids = mutableListOf<Long>()
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://mms-sms/conversations?simple=true"),
+                arrayOf("_id"), null, null, null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val tid = c.getLong(0)
+                    val a = threadAddress(tid) ?: continue
+                    val key = mergeKey(a) ?: a.filter { it.isDigit() }.ifEmpty { a }
+                    if (key == want) ids.add(tid)
+                }
+            }
+        } catch (_: Exception) { }
+        if (ids.isEmpty()) return@withContext emptyList()
+        Log.d(TAG, "loadMessagesByAddress: resolved $ids for $address")
+        loadMessages(ids)
+    }
 
     suspend fun markThreadRead(threadIds: List<Long>) = withContext(Dispatchers.IO) {
         try {
@@ -483,7 +523,9 @@ class UnifiedInboxRepository(
      * Newest message text for [threadId], used when the conversations
      * provider's snippet column is blank (MMS threads with ?simple=true on
      * Samsung's provider). Newest of the latest SMS body and the latest MMS
-     * text part wins.
+     * text part wins. When the latest MMS carries no text (photo/video), an
+     * attachment label is returned instead of "" — a thread with a photo is
+     * never "No messages".
      */
     private fun fallbackSnippet(threadId: Long): String {
         var best: String? = null
@@ -503,6 +545,7 @@ class UnifiedInboxRepository(
                 }
             }
         } catch (_: Exception) { }
+        var mmsId = -1L
         try {
             context.contentResolver.query(
                 Uri.parse("content://mms"),
@@ -510,13 +553,17 @@ class UnifiedInboxRepository(
                 "date DESC LIMIT 1",
             )?.use { c ->
                 if (c.moveToFirst()) {
-                    val text = mmsText(c.getLong(0))
+                    mmsId = c.getLong(0)
+                    val text = mmsText(mmsId)
                     val date = c.getLong(1) * 1000L
                     if (text.isNotBlank() && date >= bestDate) best = text
                 }
             }
         } catch (_: Exception) { }
-        return best.orEmpty()
+        if (!best.isNullOrBlank()) return best!!
+        // No text anywhere: label the latest MMS's attachment (if any) so a
+        // photo/video thread doesn't read as empty.
+        return mmsAttachmentLabel(mmsId).orEmpty()
     }
 
     private fun threadAddress(threadId: Long): String? {
@@ -549,15 +596,68 @@ class UnifiedInboxRepository(
         return null
     }
 
-    private fun looksLikeMmsThread(threadId: Long): Boolean {
-        return try {
+    /**
+     * Transport of the thread's LATEST message (SMS vs MMS), by comparing
+     * the newest SMS date against the newest MMS date. The inbox chip and
+     * the snippet always describe the same message.
+     */
+    private fun latestTransportLabel(threadId: Long): String {
+        var smsDate = -1L
+        var mmsDate = -1L
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://sms"),
+                arrayOf("date"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) smsDate = c.getLong(0)
+            }
+        } catch (_: Exception) { }
+        try {
             context.contentResolver.query(
                 Uri.parse("content://mms"),
-                arrayOf("_id"), "thread_id=?", arrayOf(threadId.toString()),
+                arrayOf("date"), "thread_id=?", arrayOf(threadId.toString()),
                 "date DESC LIMIT 1",
-            )?.use { it.count > 0 } ?: false
+            )?.use { c ->
+                // MMS dates are in seconds; SMS dates are in millis.
+                if (c.moveToFirst()) mmsDate = c.getLong(0) * 1000L
+            }
+        } catch (_: Exception) { }
+        return if (mmsDate >= 0 && mmsDate >= smsDate) "MMS" else "SMS"
+    }
+
+    /**
+     * Human label for an MMS that carries no text (photo/video/audio) — so
+     * the inbox never claims "No messages" for a thread that has one, and
+     * the thread screen can show the message as a labeled bubble. Null when
+     * the MMS has no non-text, non-SMIL parts at all.
+     */
+    private fun mmsAttachmentLabel(mmsId: Long): String? {
+        if (mmsId < 0) return null
+        return try {
+            var label: String? = null
+            context.contentResolver.query(
+                Uri.parse("content://mms/part"),
+                arrayOf("ct"), "mid=?", arrayOf(mmsId.toString()), null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val ct = c.getString(0).orEmpty()
+                    val candidate = when {
+                        ct.startsWith("image/") -> "\uD83D\uDCF7 Photo"
+                        ct.startsWith("video/") -> "\uD83C\uDFA5 Video"
+                        ct.startsWith("audio/") -> "\uD83C\uDFB5 Audio"
+                        ct.startsWith("text/") || ct == "application/smil" || ct.isBlank() -> null
+                        else -> "Attachment"
+                    }
+                    if (candidate != null) {
+                        label = candidate
+                        break
+                    }
+                }
+            }
+            label
         } catch (_: Exception) {
-            false
+            null
         }
     }
 

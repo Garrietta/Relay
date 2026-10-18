@@ -8,13 +8,13 @@ import com.garrietta.relay.rcs.net.SapisidHash
 import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
-import com.garrietta.relay.rcs.pblite.asList
 import com.garrietta.relay.rcs.pblite.asMsg
 import com.garrietta.relay.rcs.pblite.bytes
 import com.garrietta.relay.rcs.pblite.num
 import com.garrietta.relay.rcs.pblite.str
 import com.garrietta.relay.rcs.proto.ProtoCodec
 import com.garrietta.relay.rcs.proto.FieldVal
+import com.garrietta.relay.rcs.proto.TokenData
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +23,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import java.security.MessageDigest
-import java.util.Base64
 import java.util.UUID
 
 /**
@@ -47,10 +46,11 @@ import java.util.UUID
  *  4. [finish]: send CLIENT_FINISHED with ToS; derive AES/HMAC ("Ditto"
  *     v1); persist PairingID + DestPhoneID.
  *
- * THEORETICAL (not yet validated against Google's servers): the protobuf
- * field numbers below are best-effort from the spec's behavioral
- * description. The WebView cookie acquisition and the emoji UI are solid;
- * the handshake bytes are the part the morning sign-in will validate.
+ * Step 1 (SignInGaia request/response shapes) verified against the
+ * reference implementation 2026-10-18 — the earlier HTTP 400 was the old
+ * best-effort `{1: deviceId, 2: base64key}` body. Steps 2–4 (UKEY2/emoji/
+ * finish) are still theoretical until a live pairing validates them; the
+ * WebView cookie acquisition and the emoji UI are solid.
  */
 class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
 
@@ -81,20 +81,22 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
     /**
      * Step 1: SignInGaia. Requires Google session cookies (from the WebView
      * sign-in). Returns the token + device list with the primary phone picked.
+     *
+     * Request body layout verified against the reference implementation
+     * 2026-10-18 (see [buildSignInGaiaBody]): the 400s were the old
+     * best-effort `{1: deviceId, 2: base64key}` shape — the real request is
+     * the full AuthMessage/Inner/GDitto structure.
      */
     suspend fun begin(cookies: String): BegunGaia = withContext(Dispatchers.IO) {
         if (cookies.isBlank()) throw PairingException("Gaia pairing needs Google session cookies")
-        val sessionUuid = UUID.randomUUID().toString()
-        val deviceId = "messages-web-$sessionUuid"
+        val requestId = UUID.randomUUID().toString()
+        // The session UUID in no-dash lowercase hex doubles as the deviceID
+        // suffix AND the session id (upstream uses AuthData.SessionID for both).
+        val sessionHex = requestId.replace("-", "").lowercase()
+        val deviceId = "messages-web-$sessionHex"
         val ecKeys = RcsCrypto.generateEcdsaKeyPair()
+        val keyDer = ecKeys.public.encoded // x509/PKIX DER (see encodeDataField3Binary)
 
-        // SignInGaia request (pblite). Field layout is best-effort per spec.
-        val request = Pblite.encode(
-            mapOf(
-                1 to PValue.Str(deviceId),
-                2 to PValue.Str(Base64.getEncoder().encodeToString(ecKeys.public.encoded)),
-            )
-        )
         // SignInGaia carries the complete browser-faithful header set
         // (RelayApi.signInGaiaHeaders): the relay headers (sec-ch-ua with
         // OUR WebView's Chrome version, x-goog-api-key, origin, referer,
@@ -112,22 +114,44 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         // (diagnosed 2026-10-18 from a device 404; the live web client
         // config at messages.google.com/web/config publishes the same host).
         val url = RelayApi.PATH_SIGN_IN_GAIA
-        val body = request.toByteArray()
-        // Header NAMES only — values (Cookie, SAPISIDHASH) are secrets and
-        // are never logged.
-        Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId " +
-                "headers=${headers.names()} cookies=[${cookieNames(cookies)}]")
-        val res = postSignInGaiaWithRetry(client, url, headers, body)
-
-        val (tokenData, devices) = decodeSignInGaiaResponse(res.text)
+        // Field-36 encoding: the binary form first; if the server 400s it,
+        // fall back to the nested-JSON form. The log records which form the
+        // server accepted, so the next round can drop the loser.
+        val forms = listOf(true to "pblite_binary", false to "nested-json")
+        var lastCode = -1
+        var parsed: ParsedGaiaResponse? = null
+        for ((asBinary, formName) in forms) {
+            val body = buildSignInGaiaBody(requestId, sessionHex, keyDer, asBinary)
+            // Header NAMES only — values (Cookie, SAPISIDHASH) are secrets and
+            // are never logged.
+            Log.d(TAG, "SignInGaia POST $url body=${body.size}B deviceId=$deviceId form=$formName " +
+                    "headers=${headers.names()} cookies=[${cookieNames(cookies)}]")
+            val res = postSignInGaiaOnce(client, url, headers, body)
+            if (res.isOk()) {
+                Log.d(TAG, "SignInGaia accepted field-36 form=$formName")
+                parsed = parseSignInGaiaResponse(res.text)
+                break
+            }
+            lastCode = res.code
+            if (res.code != 400) {
+                // Not a body-shape rejection — don't try the other form.
+                throw PairingException(cleanHttpError("SignInGaia", res.code))
+            }
+            Log.w(TAG, "SignInGaia HTTP 400 with field-36 form=$formName; trying next form: " +
+                    res.text.take(300))
+        }
+        val ok = parsed
+            ?: throw PairingException("SignInGaia failed (HTTP $lastCode) with both field-36 forms")
+        val tokenData = TokenData(ok.token, ok.ttlSeconds)
+        val devices = ok.devices
         val chosen = devices.filter { it.isPrimary }.maxByOrNull { it.lastSeenMs }
             ?: devices.maxByOrNull { it.lastSeenMs }
             ?: throw PairingException("SignInGaia: no devices on the account")
         BegunGaia(
-            sessionUuid = sessionUuid,
+            sessionUuid = sessionHex,
             deviceId = deviceId,
             cookies = cookies,
-            refreshPublicKey = ecKeys.public.encoded,
+            refreshPublicKey = keyDer,
             tokenData = tokenData,
             devices = devices,
             chosenDevice = chosen,
@@ -136,12 +160,13 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
 
     /**
      * SignInGaia with bounded retries: up to 3 attempts, exponential
-     * backoff (1s, 2s). A 4xx is deterministic (wrong endpoint, bad
-     * session) — fail fast, never retry. 5xx / network failures retry.
-     * The raw HTML error page goes to logcat only; the exception carries a
-     * one-line message for the UI (never raw HTML).
+     * backoff (1s, 2s). Returns the result for 2xx AND 4xx (the caller
+     * decides what a 4xx means — e.g. trying the other field-36 form on a
+     * 400). 5xx / network failures retry. The raw HTML error page goes to
+     * logcat only; the exception carries a one-line message for the UI
+     * (never raw HTML).
      */
-    private suspend fun postSignInGaiaWithRetry(
+    private suspend fun postSignInGaiaOnce(
         client: OkHttpClient,
         url: String,
         headers: Headers,
@@ -151,19 +176,13 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         var backoffMs = 1000L
         repeat(3) { attempt ->
             val res = postRpcCancellable(client, url, headers, body)
-            if (res.isOk()) return res
-            if (res.code in 400..499) {
-                Log.w(TAG, "SignInGaia HTTP ${res.code} (deterministic, not retrying): ${res.text.take(500)}")
-                throw PairingException(cleanHttpError("SignInGaia", res.code))
-            }
+            if (res.isOk() || res.code in 400..499) return res
             Log.w(TAG, "SignInGaia HTTP ${res.code} (attempt ${attempt + 1}/3), backing off ${backoffMs}ms: ${res.text.take(200)}")
             last = res
             if (attempt < 2) delay(backoffMs)
             backoffMs *= 2
         }
-        val code = last!!.code
-        Log.w(TAG, "SignInGaia HTTP $code after 3 attempts: ${last!!.text.take(500)}")
-        throw PairingException(cleanHttpError("SignInGaia", code))
+        return last!!
     }
 
     private fun cleanHttpError(op: String, code: Int): String = when (code) {
@@ -318,29 +337,6 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         store.saveCookies(cookies)
     }
 
-    private fun decodeSignInGaiaResponse(pblite: String): Pair<com.garrietta.relay.rcs.proto.TokenData, List<GaiaDevice>> {
-        // Theoretical: parse TokenData + device list from the pblite response.
-        // Real shapes will be corrected against the live response.
-        return try {
-            val decoded = Pblite.decode(pblite)
-            // Best-effort: token at field 1, devices at field 2.
-            val tokenBytes = decoded.bytes(1) ?: byteArrayOf()
-            val tokenData = com.garrietta.relay.rcs.proto.TokenData(tokenBytes, 24 * 3600)
-            // Devices: repeated field of [deviceId, isPrimary, lastSeenMs].
-            val devices = (decoded[2] as? PValue.Arr)?.asList()?.mapNotNull { d ->
-                val m = (d as? PValue.Arr)?.asMsg() ?: return@mapNotNull null
-                GaiaDevice(
-                    deviceId = m.str(1) ?: return@mapNotNull null,
-                    isPrimary = (m.num(2) ?: 0L) == 1L,
-                    lastSeenMs = m.num(3) ?: 0L,
-                )
-            } ?: emptyList()
-            tokenData to devices
-        } catch (e: Exception) {
-            throw PairingException("SignInGaia: bad response: ${e.message}")
-        }
-    }
-
     private fun ByteArray.lexicographicallyBefore(other: ByteArray): Boolean {
         for (i in 0 until minOf(size, other.size)) {
             val a = this[i].toInt() and 0xFF
@@ -354,5 +350,160 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         private const val TAG = "GaiaPairing"
         /** Terms-of-Service string sent with CLIENT_FINISHED (from spec). */
         const val TOS_STRING = "I agree to the Google Terms of Service"
+
+        /**
+         * Exact SignInGaiaRequest layout, verified against the reference
+         * implementation 2026-10-18 (protocol spec §1b):
+         * - field 1 (AuthMessage): `{1: requestID (dashed UUID), 3: "GDitto",
+         *   7: ConfigVersion{3: 2026, 4: 9, 5: 2, 7: 4, 9: 6}}` — field 6
+         *   (tachyonAuthToken) is ABSENT on a fresh sign-in; the
+         *   signInGaiaInitial variant is unused upstream, so UnknownInt3 is
+         *   never sent.
+         * - field 2 (Inner): `{1: {1: 3, 2: "messages-web-<32 lowercase hex,
+         *   no dashes>"}, 36: pblite_binary}`.
+         * - field 3: ABSENT. field 4: "GDitto".
+         *
+         * pblite_binary = base64(binary-protobuf(Data{3: keyBytes})); see
+         * [encodeDataField3Binary]. When [field36AsBinary] is false, field 36
+         * is sent as a nested JSON object `{3: base64(keyBytes)}` instead —
+         * the fallback form if the server 400s the binary one.
+         *
+         * ConfigVersion values drift with the web client; re-check against
+         * messages.google.com/web/config if pairing breaks in future.
+         */
+        internal fun buildSignInGaiaBody(
+            requestIdDashed: String,
+            deviceIdHex: String,
+            keyDer: ByteArray,
+            field36AsBinary: Boolean,
+        ): ByteArray {
+            val field36: PValue = if (field36AsBinary) {
+                PValue.Str(encodeDataField3Binary(keyDer))
+            } else {
+                nested(mapOf(3 to PValue.Str(Pblite.encodeBase64(keyDer))))
+            }
+            return Pblite.encode(
+                mapOf(
+                    1 to nested(
+                        mapOf(
+                            1 to PValue.Str(requestIdDashed),
+                            3 to PValue.Str("GDitto"),
+                            7 to nested(
+                                mapOf(
+                                    3 to PValue.Num(2026),
+                                    4 to PValue.Num(9),
+                                    5 to PValue.Num(2),
+                                    7 to PValue.Num(4),
+                                    9 to PValue.Num(6),
+                                ),
+                            ),
+                        ),
+                    ),
+                    2 to nested(
+                        mapOf(
+                            1 to nested(
+                                mapOf(
+                                    1 to PValue.Num(3),
+                                    2 to PValue.Str("messages-web-$deviceIdHex"),
+                                ),
+                            ),
+                            36 to field36,
+                        ),
+                    ),
+                    4 to PValue.Str("GDitto"),
+                ),
+            ).toByteArray(Charsets.UTF_8)
+        }
+
+        /** Builds a nested pblite message node, trimming trailing nulls. */
+        private fun nested(fields: Map<Int, PValue>): PValue.Arr {
+            if (fields.isEmpty()) return PValue.Arr(emptyList())
+            val size = fields.keys.max()
+            val elems = (1..size)
+                .map { fields[it] ?: PValue.PNull }
+                .dropLastWhile { it is PValue.PNull }
+            return PValue.Arr(elems)
+        }
+
+        /**
+         * Hand-encodes binary protobuf `Data{3: keyBytes}` for the
+         * pblite_binary option: tag byte 0x1A (field 3, wire type LEN),
+         * varint length, then the key bytes — base64'd. The key bytes are the
+         * ECDSA P-256 public key in x509/PKIX DER form, which is exactly what
+         * Java `PublicKey.encoded` already is (pinned by unit test on the DER
+         * prefix 0x30 0x59 0x30 0x13 …).
+         */
+        internal fun encodeDataField3Binary(keyBytes: ByteArray): String {
+            val out = java.io.ByteArrayOutputStream()
+            out.write(0x1A)
+            var v = keyBytes.size.toLong()
+            while (v > 0x7F) {
+                out.write(((v and 0x7F) or 0x80).toInt())
+                v = v ushr 7
+            }
+            out.write(v.toInt())
+            out.write(keyBytes)
+            return Pblite.encodeBase64(out.toByteArray())
+        }
+
+        internal data class ParsedGaiaResponse(
+            val token: ByteArray,
+            val ttlSeconds: Long,
+            val devices: List<GaiaDevice>,
+        )
+
+        /**
+         * Real SignInGaiaResponse layout, verified against the reference
+         * implementation 2026-10-18 (protocol spec §1b):
+         * - field 4 (TokenData): `{1: tachyon token bytes (base64 in pblite
+         *   JSON), 2: TTL int64}`.
+         * - field 3 (DeviceData): primary devices from sub-field 2
+         *   (unknownItems2) — an item with sub-field 4 == 1 is primary,
+         *   RegID = sub-field 1 (UUID string); lastSeen comes from sub-field 3
+         *   (unknownItems3), matched by UUID sub-field 1 → sub-field 7 =
+         *   timestamp in MICROSECONDS (converted to millis here).
+         * - field 1 (Header) and field 2 (maybeBrowserUUID, pblite_binary
+         *   string) are parsed leniently and ignored.
+         */
+        internal fun parseSignInGaiaResponse(pblite: String): ParsedGaiaResponse {
+            try {
+                val decoded = Pblite.decode(pblite)
+                // Field 1 (Header) and field 2 (maybeBrowserUUID) are parsed
+                // leniently — presence noted by callers via headers if needed.
+                val tokenMsg = decoded.msg(4)
+                    ?: throw PairingException("SignInGaia: response has no TokenData (field 4)")
+                val token = tokenMsg.bytes(1) ?: byteArrayOf()
+                val ttl = tokenMsg.num(2) ?: 0L
+                val deviceData = decoded.msg(3)
+                val lastSeenByRegId = mutableMapOf<String, Long>()
+                if (deviceData != null) {
+                    for (item in deviceData.rep(3)) {
+                        val m = (item as? PValue.Arr)?.asMsg() ?: continue
+                        val regId = m.str(1) ?: continue
+                        val micros = m.num(7) ?: continue
+                        lastSeenByRegId[regId] = micros
+                    }
+                }
+                val devices = if (deviceData != null) {
+                    deviceData.rep(2).mapNotNull { item ->
+                        val m = (item as? PValue.Arr)?.asMsg() ?: return@mapNotNull null
+                        val regId = m.str(1) ?: return@mapNotNull null
+                        val isPrimary = (m.num(4) ?: 0L) == 1L
+                        GaiaDevice(
+                            deviceId = regId,
+                            isPrimary = isPrimary,
+                            lastSeenMs = (lastSeenByRegId[regId] ?: 0L) / 1000L,
+                        )
+                    }
+                } else {
+                    emptyList()
+                }
+                return ParsedGaiaResponse(token, ttl, devices)
+            } catch (e: PairingException) {
+                throw e
+            } catch (e: Exception) {
+                throw PairingException("SignInGaia: bad response: ${e.message}")
+            }
+        }
     }
 }

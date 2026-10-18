@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -248,6 +249,14 @@ fun RcsPairingScreen(
                     Spacer(Modifier.height(16.dp))
                     Button(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
                 } else {
+                    // Log the emoji derivation inputs for diagnosing mismatches
+                    // (Build #104: our emoji 🍼 didn't match the phone's 🫠🧴🛴).
+                    LaunchedEffect(result) {
+                        result.debugHex?.let { dbg ->
+                            Log.d("PairingEmoji", "emoji=${result.emoji} version=${result.verificationCodeVersion}")
+                            for ((k, v) in dbg) Log.d("PairingEmoji", "$k=$v")
+                        }
+                    }
                     Text("Match the emoji", style = MaterialTheme.typography.headlineSmall)
                     Spacer(Modifier.height(8.dp))
                     Text(

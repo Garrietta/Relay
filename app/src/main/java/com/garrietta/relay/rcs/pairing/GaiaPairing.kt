@@ -105,6 +105,13 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         val nextKey: ByteArray,
         val verificationCodeVersion: Int,
         val emoji: String,
+        /**
+         * Hex-encoded derivation inputs for diagnosing emoji mismatches
+         * (initPayload, serverInit, sharedSecret, ukeyV1Auth, index, version).
+         * Populated in processServerInit; logged by the UI layer (android.util.Log
+         * throws Stub! in JVM unit tests, so logging lives outside this function).
+         */
+        val debugHex: Map<String, String>? = null,
     )
 
     /** Parsed GaiaPairingResponseContainer (finish/error path). */
@@ -388,7 +395,17 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
                 (ukeyV1Auth[3].toInt() and 0xFF)
         val emoji = table[Math.floorMod(index, table.size)]
         // Note: no Log.d here — android.util.Log throws Stub! in JVM unit tests.
-        return ServerInitResult(serverPublicKey, nextKey, verificationCodeVersion, emoji)
+        // The UI layer logs debugHex instead.
+        val debugHex = mapOf(
+            "initPayload" to handshake.initPayload.toHex(),
+            "serverInit" to ukeyMessageBytes.toHex(),
+            "sharedSecret" to sharedSecret.toHex(),
+            "ukeyV1Auth" to ukeyV1Auth.toHex(),
+            "index" to index.toString(),
+            "tableSize" to table.size.toString(),
+            "version" to verificationCodeVersion.toString(),
+        )
+        return ServerInitResult(serverPublicKey, nextKey, verificationCodeVersion, emoji, debugHex)
     }
 
     /** Persists Gaia auth data + cookies. */
@@ -717,3 +734,6 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         }
     }
 }
+
+/** Hex-encodes bytes for diagnostic logging (safe in unit tests, unlike android.util.Log). */
+internal fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

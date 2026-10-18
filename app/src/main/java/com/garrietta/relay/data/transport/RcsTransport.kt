@@ -252,6 +252,8 @@ class RcsTransport(context: Context) : Transport {
         val nextKey: ByteArray,
         val verificationCodeVersion: Int,
         val emoji: String,
+        /** Hex-encoded derivation inputs for diagnosing emoji mismatches. */
+        val debugHex: Map<String, String>? = null,
     )
 
     /**
@@ -310,6 +312,7 @@ class RcsTransport(context: Context) : Transport {
                 nextKey = result.nextKey,
                 verificationCodeVersion = result.verificationCodeVersion,
                 emoji = result.emoji,
+                debugHex = result.debugHex,
             )
         } catch (e: Exception) {
             session.injectAuth(null)

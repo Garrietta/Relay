@@ -21,12 +21,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.math.BigInteger
-import java.security.AlgorithmParameters
 import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.spec.ECGenParameterSpec
-import java.security.spec.ECParameterSpec
 import java.security.spec.ECPrivateKeySpec
 
 /**
@@ -226,9 +224,11 @@ class Ukey2HandshakeTest {
         // Fixed P-256 private scalar (deterministic).
         val privHex = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"
         val privBytes = privHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val algParams = AlgorithmParameters.getInstance("EC")
-        algParams.init(ECGenParameterSpec("secp256r1"))
-        val ecSpec = algParams.getParameterSpec(ECParameterSpec::class.java)
+        // Get P-256 params from a real generated key (AlgorithmParameters-derived
+        // specs are rejected by KeyFactory on some JVMs).
+        val kpg = java.security.KeyPairGenerator.getInstance("EC")
+        kpg.initialize(ECGenParameterSpec("secp256r1"))
+        val ecSpec = (kpg.generateKeyPair().public as java.security.interfaces.ECPublicKey).params
         val privateKey = KeyFactory.getInstance("EC").generatePrivate(
             ECPrivateKeySpec(BigInteger(1, privBytes), ecSpec),
         )

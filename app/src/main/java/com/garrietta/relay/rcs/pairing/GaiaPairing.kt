@@ -107,6 +107,9 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         val emoji: String,
     )
 
+    /** Parsed GaiaPairingResponseContainer (finish/error path). */
+    data class GaiaFinishResult(val finishErrorType: Long, val finishErrorCode: Long)
+
     /**
      * Step 1: SignInGaia. Requires Google session cookies (from the WebView
      * sign-in). Returns the token + device list with the primary phone picked.
@@ -468,8 +471,6 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         )
 
         /** Parses a GaiaPairingResponseContainer (finish/error path). */
-        data class GaiaFinishResult(val finishErrorType: Long, val finishErrorCode: Long)
-
         fun parseFinishResponse(containerBytes: ByteArray): GaiaFinishResult {
             val m = ProtoCodec.decode(containerBytes)
             return GaiaFinishResult(

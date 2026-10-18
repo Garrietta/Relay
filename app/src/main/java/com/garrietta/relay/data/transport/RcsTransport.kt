@@ -1,7 +1,9 @@
 package com.garrietta.relay.data.transport
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
+import com.garrietta.relay.rcs.pairing.MicrogPairing
 import com.garrietta.relay.rcs.pairing.PairingException
 import com.garrietta.relay.rcs.pairing.QrPairing
 import com.garrietta.relay.rcs.proto.RcsConversation
@@ -184,6 +186,35 @@ class RcsTransport(context: Context) : Transport {
         pairingJob = null
         _pairingState.value =
             if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+    }
+
+    // ---------- microG (no-browser Google-account) pairing ----------
+
+    /**
+     * Pairs via the Google account already on the phone (microG): mints an
+     * OAuthLogin token through microG's authenticator, exchanges it for web
+     * session cookies, then runs the standard Gaia begin with those cookies.
+     *
+     * [launchConsent] is invoked with microG's consent Intent when the
+     * authenticator demands it (first use); it must run on the main thread
+     * and returns true when the user consented.
+     *
+     * Like [beginGaiaPairing]: sets PAIRING, resets to the true session
+     * state on failure. No timeout here — the user drives the consent tap;
+     * the pairing screen's dispose still aborts via [cancelPairing].
+     */
+    suspend fun beginMicrogGaiaPairing(
+        accountName: String,
+        launchConsent: suspend (Intent) -> Boolean,
+    ): com.garrietta.relay.rcs.pairing.GaiaPairing.BegunGaia {
+        _pairingState.value = RcsPairingState.PAIRING
+        try {
+            val cookies = MicrogPairing.fetchCookies(appContext, accountName, launchConsent)
+            return beginGaiaPairing(cookies)
+        } catch (e: Exception) {
+            _pairingState.value = if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+            throw e
+        }
     }
 
     // ---------- Gaia (Google-account / emoji) pairing ----------

@@ -556,6 +556,7 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.RECEIVE_SMS,
             Manifest.permission.RECEIVE_MMS,
             Manifest.permission.READ_CONTACTS,
+            Manifest.permission.GET_ACCOUNTS,
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             needed.add(Manifest.permission.POST_NOTIFICATIONS)

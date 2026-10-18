@@ -1,21 +1,13 @@
 package com.garrietta.relay.ui.inbox
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,17 +18,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FabPosition
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
@@ -44,6 +34,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Surface
@@ -51,12 +43,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,6 +70,7 @@ import java.util.Locale
 fun InboxScreen(
     viewModel: InboxViewModel,
     isDefaultSmsApp: Boolean,
+    userMessages: SharedFlow<String>,
     onRequestDefaultSms: () -> Unit,
     onOpenChat: (Conversation) -> Unit,
     onOpenSettings: () -> Unit,
@@ -86,6 +79,11 @@ fun InboxScreen(
     val conversations by viewModel.conversations.collectAsState()
     val query by viewModel.query.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        userMessages.collect { snackbarHostState.showSnackbar(it) }
+    }
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -94,7 +92,7 @@ fun InboxScreen(
                 title = {
                     Text(
                         "Messages",
-                        style = MaterialTheme.typography.displayMedium,
+                        style = MaterialTheme.typography.displayLarge,
                     )
                 },
                 actions = {
@@ -109,56 +107,33 @@ fun InboxScreen(
                 ),
             )
         },
+        // Google Messages M3E pattern: a prominent "New conversation" pill
+        // centered at the bottom, replacing the FAB menu.
         floatingActionButton = {
-            var fabMenuExpanded by remember { mutableStateOf(false) }
-            BackHandler(fabMenuExpanded) { fabMenuExpanded = false }
-            // Custom expandable compose FAB (stable APIs): pill button morphs
-            // Edit <-> Close, menu item springs in above.
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+            Surface(
+                onClick = onNewConversation,
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                tonalElevation = 6.dp,
+                shadowElevation = 6.dp,
             ) {
-                AnimatedVisibility(
-                    visible = fabMenuExpanded,
-                    enter = scaleIn(
-                        spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
-                        initialScale = 0.6f,
-                    ) + fadeIn(tween(150)),
-                    exit = scaleOut(tween(120), targetScale = 0.6f) + fadeOut(tween(120)),
+                Row(
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Surface(
-                        onClick = {
-                            fabMenuExpanded = false
-                            onNewConversation()
-                        },
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        tonalElevation = 6.dp,
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Filled.Edit, contentDescription = null)
-                            Spacer(Modifier.width(12.dp))
-                            Text("New message", style = MaterialTheme.typography.labelLarge)
-                        }
-                    }
-                }
-                FloatingActionButton(
-                    onClick = { fabMenuExpanded = !fabMenuExpanded },
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                    shape = RoundedCornerShape(28.dp),
-                ) {
-                    Icon(
-                        if (fabMenuExpanded) Icons.Filled.Close else Icons.Filled.Edit,
-                        contentDescription = if (fabMenuExpanded) "Close" else "New conversation",
+                    Icon(Icons.Filled.Edit, contentDescription = null)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "New conversation",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
             }
         },
+        floatingActionButtonPosition = FabPosition.Center,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -189,7 +164,10 @@ fun InboxScreen(
             if (conversations.isEmpty()) {
                 EmptyInbox()
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 96.dp),
+                ) {
                     items(
                         items = conversations,
                         key = { it.threadId },

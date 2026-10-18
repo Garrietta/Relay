@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -34,21 +32,26 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 
 /**
- * New-conversation dialog — M3 Expressive edition.
+ * New-conversation dialog.
  *
- * Issue 2 fix: the dialog window's decor background defaults to the theme's
- * windowBackground (white in light theme), which flashes for a frame before
- * the Compose content draws. We set the window background to transparent and
- * drive the scrim + surface entirely from the M3 theme — zero white frame.
- *
- * Issue 3: bubbly softly-rounded surface (large radii), with a
- * springy scale+fade entrance.
+ * Flash fix (round 2): the root cause was the dialog *window*, not the scrim.
+ * Theme.Relay inherits android:Theme.Material (light-only), so the platform
+ * dialog theme painted a light panel background for the first frame even in
+ * dark mode. Fixed at two levels:
+ *  1. Theme level: Theme.Relay.Dialog (android:dialogTheme) has a transparent
+ *     windowBackground and no platform dim — no unthemed frame, ever.
+ *  2. Compose level: plain Dialog (not AlertDialog) with an explicit
+ *     theme-driven scrim — colorScheme.scrim at 32% alpha, dark in both
+ *     modes, nothing hardcoded. The SideEffect transparent-background is kept
+ *     as belt-and-suspenders for any Compose version that doesn't resolve
+ *     android:dialogTheme.
+ * Surface is surfaceContainerHigh — theme-correct in both modes.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewConversationDialog(
     onDismiss: () -> Unit,
@@ -56,11 +59,13 @@ fun NewConversationDialog(
 ) {
     var number by remember { mutableStateOf("") }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f),
+        ),
     ) {
-        // Kill the white flash: transparent decor, theme-driven scrim/surface.
         val view = LocalView.current
         SideEffect {
             (view.parent as? DialogWindowProvider)?.window?.setBackgroundDrawable(
@@ -74,7 +79,7 @@ fun NewConversationDialog(
             targetValue = if (visible) 1f else 0.9f,
             animationSpec = spring(
                 dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMediumLow,
+                stiffness = Spring.StiffnessMedium,
             ),
             label = "dialogScale",
         )

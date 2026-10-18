@@ -5,5 +5,20 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
+        <!-- Dialog windows must never show the platform dialog theme's
+             windowBackground (a light panel) for even one frame: Compose
+             dialogs resolve android:dialogTheme from the activity theme, and
+             the platform Theme.Material.Dialog background is light even when
+             the app is in dark mode. Transparent here kills the flash at the
+             theme level; Compose draws its own theme-driven scrim on top. -->
+        <item name="android:dialogTheme">@style/Theme.Relay.Dialog</item>
+    </style>
+
+    <style name="Theme.Relay.Dialog" parent="android:Theme.Material.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">true</item>
+        <!-- Compose draws its own scrim (DialogProperties.scrimColor from the
+             M3 theme); the platform dim would double-darken behind it. -->
+        <item name="android:backgroundDimEnabled">false</item>
     </style>
 </resources>

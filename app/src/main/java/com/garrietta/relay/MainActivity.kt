@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
                                     InboxScreen(
                                         viewModel = inboxVm,
                                         isDefaultSmsApp = isDefaultSmsApp,
+                                        userMessages = settingsVm.userMessages,
                                         onRequestDefaultSms = { settingsVm.requestDefaultSmsRole(this@MainActivity) },
                                         onOpenChat = {
                                             push(Screen.Chat(it.threadId, it.address, it.displayName))

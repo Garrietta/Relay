@@ -20,12 +20,9 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
-import java.security.spec.ECGenParameterSpec
-import java.security.spec.ECPrivateKeySpec
 
 /**
  * Verifies the UKEY2 handshake shapes against the ukey.proto field numbers
@@ -221,16 +218,12 @@ class Ukey2HandshakeTest {
      * via debugHex) differ — not the derivation itself.
      */
     @Test fun `emoji derivation matches known answer`() {
-        // Fixed P-256 private scalar (deterministic).
-        val privHex = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"
-        val privBytes = privHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        // Get P-256 params from a real generated key (AlgorithmParameters-derived
-        // specs are rejected by KeyFactory on some JVMs).
-        val kpg = java.security.KeyPairGenerator.getInstance("EC")
-        kpg.initialize(ECGenParameterSpec("secp256r1"))
-        val ecSpec = (kpg.generateKeyPair().public as java.security.interfaces.ECPublicKey).params
+        // Fixed P-256 private key (PKCS8 DER, deterministic). Generated from scalar
+        // 0x123456789ABCDEF0... (valid, < P-256 order).
+        val pkcs8Hex = "3059020100301306072a8648ce3d020106082a8648ce3d030107042f302d0201010420123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0a00a06082a8648ce3d030107"
+        val pkcs8 = pkcs8Hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val privateKey = KeyFactory.getInstance("EC").generatePrivate(
-            ECPrivateKeySpec(BigInteger(1, privBytes), ecSpec),
+            java.security.spec.PKCS8EncodedKeySpec(pkcs8),
         )
 
         // Fixed CLIENT_INIT (wrapped Ukey2Message) bytes from the Python generator.

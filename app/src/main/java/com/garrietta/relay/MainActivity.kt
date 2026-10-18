@@ -2,6 +2,8 @@ package com.garrietta.relay
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,17 +14,25 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.activity.viewModels
+import com.garrietta.relay.data.model.ThemeMode
+import kotlinx.coroutines.launch
 import com.garrietta.relay.ui.NewConversationDialog
 import com.garrietta.relay.ui.Screen
 import com.garrietta.relay.ui.chat.ChatScreen
@@ -53,6 +63,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Flash fix: the theme's windowBackground is white, so during ANY window
+        // transition (navigation crossfade, dialog open) the Compose layer briefly
+        // revealed white — even in dark mode. Set the window background to the
+        // effective theme background BEFORE first composition, and keep it in
+        // sync whenever the theme mode changes.
+        applyWindowBackgroundForTheme()
+        lifecycleScope.launch {
+            settingsVm.themeMode.collect { applyWindowBackgroundForTheme() }
+        }
         enableEdgeToEdge()
         requestMessagingPermissions()
 
@@ -137,6 +156,37 @@ class MainActivity : ComponentActivity() {
         app.repository.refresh()
         // Refresh so the "Set default" banner disappears right after the grant.
         settingsVm.refreshDefaultSmsState()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // The system default-SMS dialog is a floating system window: this
+        // activity may never go through onResume when it's dismissed, so the
+        // banner could linger after the role was granted. Refresh on focus too.
+        if (hasFocus) settingsVm.refreshDefaultSmsState()
+    }
+
+    /**
+     * Resolves the effective dark/light mode from the user's theme setting and
+     * paints the window background to match, so transitions never reveal a
+     * wrong-mode color (the old white windowBackground flashed in dark mode).
+     * Uses the real dynamic scheme background on S+ so it matches Compose.
+     */
+    private fun applyWindowBackgroundForTheme() {
+        val dark = when (settingsVm.themeMode.value) {
+            ThemeMode.SYSTEM ->
+                (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                    Configuration.UI_MODE_NIGHT_YES
+            ThemeMode.LIGHT -> false
+            ThemeMode.DARK -> true
+        }
+        val bg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (dark) dynamicDarkColorScheme(this).background
+            else dynamicLightColorScheme(this).background
+        } else {
+            if (dark) darkColorScheme().background else lightColorScheme().background
+        }
+        window.setBackgroundDrawable(ColorDrawable(bg.toArgb()))
     }
 
     private fun requestMessagingPermissions() {

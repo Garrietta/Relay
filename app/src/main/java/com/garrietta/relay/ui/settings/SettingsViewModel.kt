@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.provider.Telephony
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -114,19 +116,49 @@ class SettingsViewModel(
         }
     }
 
+    /**
+     * Cascading fallbacks — three rounds of "nothing happens" are over. Every
+     * tap must produce something visible:
+     *  1. ACTION_CHANGE_DEFAULT system picker (primary path).
+     *  2. System default-apps settings screen (manual switch).
+     *  3. This app's own App info page (tap "SMS app" there).
+     * Every step is user-visible (snackbar) or logged (RelaySettings tag).
+     */
     private fun openDefaultAppsSettings(activity: Activity) {
-        val fallback = Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+        val fallback = Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
         if (fallback.resolveActivity(activity.packageManager) == null) {
-            Log.e(TAG, "No default-apps settings activity found")
-            notify("Couldn't open system settings on this device.")
+            Log.e(TAG, "No default-apps settings activity found; falling to app details")
+            notify("Couldn't open system settings; opening app info instead.")
+            openAppDetails(activity)
             return
         }
         try {
             activity.startActivity(fallback)
+            Log.d(TAG, "openDefaultAppsSettings: system default-apps screen launched")
             notify("Pick Relay as the SMS app in system settings.")
         } catch (e: Exception) {
-            Log.e(TAG, "openDefaultAppsSettings failed", e)
-            notify("Couldn't open system settings: ${e.message}")
+            Log.e(TAG, "openDefaultAppsSettings failed; falling to app details", e)
+            notify("Couldn't open system settings; opening app info instead.")
+            openAppDetails(activity)
+        }
+    }
+
+    private fun openAppDetails(activity: Activity) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", activity.packageName, null)
+        }
+        if (intent.resolveActivity(activity.packageManager) == null) {
+            Log.e(TAG, "No app-details settings activity found; out of fallbacks")
+            notify("Couldn't open settings. Please set Relay as the SMS app manually in system Settings.")
+            return
+        }
+        try {
+            activity.startActivity(intent)
+            Log.d(TAG, "openAppDetails: app info screen launched")
+            notify("In App info, tap \"SMS app\" and choose Relay.")
+        } catch (e: Exception) {
+            Log.e(TAG, "openAppDetails failed; out of fallbacks", e)
+            notify("Couldn't open settings. Please set Relay as the SMS app manually in system Settings.")
         }
     }
 

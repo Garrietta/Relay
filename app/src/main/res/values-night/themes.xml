@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Night variant of Theme.Relay: the window background must never be
+         white in dark mode. This covers the launch frame (before MainActivity
+         paints the drawable programmatically) when following the system theme.
+         MainActivity.applyWindowBackgroundForTheme() keeps it in sync with the
+         in-app theme setting afterwards. -->
+    <style name="Theme.Relay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#121212</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:dialogTheme">@style/Theme.Relay.Dialog</item>
+    </style>
+
+    <style name="Theme.Relay.Dialog" parent="android:Theme.Material.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>

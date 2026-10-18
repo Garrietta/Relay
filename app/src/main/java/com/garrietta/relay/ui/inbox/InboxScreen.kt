@@ -107,42 +107,14 @@ fun InboxScreen(
                 ),
             )
         },
-        // Google Messages M3E pattern: a WIDE "New conversation" pill —
-        // full-width with screen margins, large corner radius, primary color.
-        bottomBar = {
-            Surface(
-                onClick = onNewConversation,
-                shape = RoundedCornerShape(32.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                tonalElevation = 6.dp,
-                shadowElevation = 6.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                Row(
-                    modifier = Modifier.padding(vertical = 18.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Icon(Icons.Filled.Edit, contentDescription = null)
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        "New conversation",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-        },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            Column(modifier = Modifier.fillMaxSize()) {
             if (!isDefaultSmsApp) {
                 DefaultSmsBanner(onRequestDefaultSms)
             }
@@ -169,7 +141,9 @@ fun InboxScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    // Bottom inset clears the floating pill so the last card
+                    // is never hidden underneath it.
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 128.dp),
                 ) {
                     items(
                         items = conversations,
@@ -188,6 +162,51 @@ fun InboxScreen(
                     }
                 }
             }
+        }
+        // True floating pill: elevated above the list with margins on all
+        // sides — the list scrolls beneath it. Not a docked bar.
+        NewConversationPill(
+            onClick = onNewConversation,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 24.dp),
+        )
+    }
+}
+}
+
+/**
+ * Floating "New conversation" pill — Google Messages M3E pattern. Wide pill,
+ * large corner radius, primary container color, real elevation + shadow so it
+ * reads as floating above the conversation list.
+ */
+@Composable
+private fun NewConversationPill(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Icon(Icons.Filled.Edit, contentDescription = null)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "New conversation",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }
@@ -269,6 +288,12 @@ private fun ConversationRow(
 
     SwipeToDismissBox(
         state = dismissState,
+        // Soft M3 card treatment (Google Messages M3E reference): each row is
+        // a rounded card with breathing room — not a flat full-bleed row. The
+        // clip also rounds the swipe-reveal background to match.
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(28.dp)),
         enableDismissFromStartToEnd = true,
         enableDismissFromEndToStart = true,
         onDismiss = { value ->
@@ -328,13 +353,13 @@ private fun ConversationRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.background)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = onClick,
                 )
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Avatar(name = conversation.displayName, threadId = conversation.threadId)

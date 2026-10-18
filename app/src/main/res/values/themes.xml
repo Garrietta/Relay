@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Relay" parent="android:Theme.Material.NoActionBar">
+        <!-- White here is correct for light mode, but it flashed through during
+             transitions in dark mode. MainActivity paints the window background
+             programmatically to the effective theme color before first
+             composition (see applyWindowBackgroundForTheme); values-night covers
+             the launch frame when following the system theme. -->
         <item name="android:windowBackground">@android:color/white</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <!-- No hardcoded windowLightStatusBar: enableEdgeToEdge() applies an
+             auto SystemBarStyle that picks icon colors per mode. -->
         <!-- Dialog windows must never show the platform dialog theme's
              windowBackground (a light panel) for even one frame: Compose
              dialogs resolve android:dialogTheme from the activity theme, and

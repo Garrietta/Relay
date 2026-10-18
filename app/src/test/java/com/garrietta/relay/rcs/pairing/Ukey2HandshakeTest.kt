@@ -220,7 +220,7 @@ class Ukey2HandshakeTest {
     @Test fun `emoji derivation matches known answer`() {
         // Fixed P-256 private key (PKCS8 DER, deterministic). Generated from scalar
         // 0x123456789ABCDEF0... (valid, < P-256 order).
-        val pkcs8Hex = "3059020100301306072a8648ce3d020106082a8648ce3d030107042f302d0201010420123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0a00a06082a8648ce3d030107"
+        val pkcs8Hex = "3041020100301306072a8648ce3d020106082a8648ce3d030107042730250201010420123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"
         val pkcs8 = pkcs8Hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val privateKey = KeyFactory.getInstance("EC").generatePrivate(
             java.security.spec.PKCS8EncodedKeySpec(pkcs8),

@@ -1,13 +1,18 @@
 package com.garrietta.relay.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,13 +37,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Gif
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -68,6 +71,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
@@ -340,10 +344,9 @@ private fun lerpBubbleShape(
 }
 
 /**
- * M3 Expressive composer: a LARGE tall text-box bubble with a PERSISTENT
- * attached attachment bar beneath it (Garrett's call: no toggles, no
- * pop-ups) — rounded-square attachment buttons in a row, and the LARGE
- * circular send button at the row's right end with a spring pop on send.
+ * M3 Expressive composer: a LARGE tall text-box bubble, a + button that
+ * toggles a Koda-style segmented attachment pill, and a LARGE circular send
+ * button with a spring pop on send.
  */
 @Composable
 private fun Composer(
@@ -352,6 +355,7 @@ private fun Composer(
     onAttachmentSoon: () -> Unit,
 ) {
     var text by remember { mutableStateOf("") }
+    var menuExpanded by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
@@ -360,6 +364,7 @@ private fun Composer(
         if (!canSend) return
         onSend(text.trim())
         text = ""
+        menuExpanded = false
         // Spring pop on send — one of the few sanctioned expressive springs.
         scope.launch {
             sendPop.snapTo(0.82f)
@@ -402,34 +407,56 @@ private fun Composer(
             minLines = 3,
             maxLines = 6,
         )
+        // Koda-style segmented attachment pill: expands below the text box
+        // when + is tapped. Full row width so every segment breathes.
+        AnimatedVisibility(
+            visible = menuExpanded,
+            enter = expandVertically(
+                animationSpec = tween(300, easing = M3Easing.EmphasizedDecelerate),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(tween(200)),
+            exit = shrinkVertically(
+                animationSpec = tween(200, easing = M3Easing.Standard),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(tween(150)),
+            label = "attachPill",
+        ) {
+            AttachmentSplitPill(
+                onPick = {
+                    menuExpanded = false
+                    onAttachmentSoon()
+                },
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
         Spacer(Modifier.height(8.dp))
-        // Attached attachment bar: persistent row of rounded-square buttons
-        // beneath the text box; send sits at the row's right end.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Bottom,
         ) {
-            AttachmentBarButton(
-                icon = Icons.Filled.Image,
-                label = "Gallery",
-                onClick = onAttachmentSoon,
+            // The + morphs toward × as the pill opens — shape-as-state.
+            val rotation by animateFloatAsState(
+                targetValue = if (menuExpanded) 45f else 0f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+                label = "attachToggleRotation",
             )
-            AttachmentBarButton(
-                icon = Icons.Filled.PhotoCamera,
-                label = "Camera",
-                onClick = onAttachmentSoon,
-            )
-            AttachmentBarButton(
-                icon = Icons.Filled.Gif,
-                label = "GIF",
-                onClick = onAttachmentSoon,
-            )
-            AttachmentBarButton(
-                icon = Icons.Filled.AttachFile,
-                label = "Files",
-                onClick = onAttachmentSoon,
-            )
+            FloatingActionButton(
+                onClick = { menuExpanded = !menuExpanded },
+                shape = CircleShape,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier
+                    .size(56.dp)
+                    .graphicsLayer { rotationZ = rotation },
+            ) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = if (menuExpanded) "Close attachments" else "Add attachment",
+                )
+            }
             Spacer(Modifier.weight(1f))
             // Large circular send button — the densest color in the scheme.
             IconButton(
@@ -468,29 +495,73 @@ private fun Composer(
 }
 
 /**
- * One persistent attachment button: rounded-square (expressive radii),
- * tonal container, no toggle behavior. Picks are stubbed ("coming soon").
+ * Koda-style segmented attachment pill: a horizontal pill container whose
+ * segments (Gallery | Camera | GIF | Files) stagger in; the picked segment
+ * gets the filled treatment. Picks are stubbed ("coming soon") — no faked
+ * functionality.
  */
 @Composable
-private fun AttachmentBarButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit,
+private fun AttachmentSplitPill(
+    onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val segments = remember { listOf("Gallery", "Camera", "GIF", "Files") }
+    var picked by remember { mutableStateOf<Int?>(null) }
+
     Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(18.dp),
+        shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        tonalElevation = 1.dp,
-        modifier = Modifier.size(52.dp),
+        tonalElevation = 2.dp,
+        shadowElevation = 4.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp),
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                icon,
-                contentDescription = label,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(24.dp),
-            )
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            segments.forEachIndexed { index, label ->
+                // Staggered entrance per segment — expressive, not noisy.
+                AnimatedVisibility(
+                    visible = true,
+                    enter = fadeIn(
+                        tween(180, delayMillis = index * 55, easing = M3Easing.Standard),
+                    ) + slideInHorizontally(
+                        tween(220, delayMillis = index * 55, easing = M3Easing.EmphasizedDecelerate),
+                    ) { it / 3 },
+                    label = "attachSegment$label",
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val selected = picked == index
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                else Color.Transparent,
+                            )
+                            .clickable {
+                                picked = index
+                                onPick(label)
+                            }
+                            .padding(horizontal = 4.dp),
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (selected)
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
         }
     }
 }

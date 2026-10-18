@@ -216,17 +216,9 @@ class UnifiedInboxRepository(
         val buckets = mutableMapOf<String, MutableList<RawThread>>()
         val unmerged = mutableListOf<RawThread>()
         for (t in singles) {
-            // Primary key: contact ID (same person, possibly different
-            // numbers — e.g. the two "Alec Siurek" threads). Fallback:
-            // normalized address. Either one buckets the thread.
-            val key = contactLookup.contactId(t.address)?.let { "contact:$it" }
-                ?: mergeKey(t.address)?.let { "addr:$it" }
-            if (key == null) {
-                Log.d(TAG, "mergeThreads: no merge key for thread ${t.threadId} (${t.address})")
-                unmerged.add(t)
-            } else {
-                buckets.getOrPut(key) { mutableListOf() }.add(t)
-            }
+            val key = mergeKey(t.address)
+            if (key == null) unmerged.add(t)
+            else buckets.getOrPut(key) { mutableListOf() }.add(t)
         }
         val out = mutableListOf<Conversation>()
         for (bucket in buckets.values) out.add(mergeBucket(bucket))
@@ -706,31 +698,6 @@ private class ContactLookup(private val context: Context) {
         }
         cache[address] = name
         return name
-    }
-
-    /**
-     * Raw contact ID for [address], or null when not in contacts. Used as a
-     * merge key so two different numbers for the SAME person (e.g. mobile +
-     * work) land in one conversation.
-     */
-    @Synchronized
-    fun contactId(address: String): Long? {
-        return try {
-            var result: Long? = null
-            context.contentResolver.query(
-                Uri.withAppendedPath(
-                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
-                    Uri.encode(address),
-                ),
-                arrayOf(ContactsContract.PhoneLookup._ID),
-                null, null, null,
-            )?.use { c ->
-                if (c.moveToFirst()) result = c.getLong(0)
-            }
-            result
-        } catch (_: Exception) {
-            null
-        }
     }
 
     /** Profile photo URI for [address], or null when the contact has none. */

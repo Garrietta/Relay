@@ -16,7 +16,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.graphics.Color
 import com.garrietta.relay.data.model.ThemeMode
 
 /**
@@ -110,8 +109,6 @@ val incomingBubbleShape = RoundedCornerShape(24.dp, 24.dp, 24.dp, 8.dp)
 @Composable
 fun RelayTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
-    /** App-wide contact seed; null = wallpaper dynamic scheme. */
-    seedColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
     val darkTheme = when (themeMode) {
@@ -120,20 +117,12 @@ fun RelayTheme(
         ThemeMode.DARK -> true
     }
     val context = LocalContext.current
-    val baseScheme = when {
+    val colorScheme = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
         darkTheme -> darkColorScheme()
         else -> lightColorScheme()
-    }
-    // App-wide persistent contact color: the last-viewed contact's seed
-    // tints the whole app (richer than the chat-scoped version — this is the
-    // "more color" Garrett asked for). Falls back to wallpaper dynamic.
-    val colorScheme = if (seedColor != null) {
-        seededAppColorScheme(seedColor, darkTheme, baseScheme)
-    } else {
-        baseScheme
     }
     MaterialTheme(
         colorScheme = colorScheme,

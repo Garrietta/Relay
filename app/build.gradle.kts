@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.garrietta.relay"
-    compileSdk = 36
+    // compileSdk 37: material3 1.5.0-beta01 and SegmentedShape were built
+    // against API 37. targetSdk stays 36 (no behavior changes).
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.garrietta.relay"

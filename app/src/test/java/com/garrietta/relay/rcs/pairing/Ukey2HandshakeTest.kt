@@ -144,11 +144,12 @@ class Ukey2HandshakeTest {
         val info = h.initPayload + serverInitMsg
         val auth = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 auth".toByteArray(), info, 32)
         val expectedNext = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 next".toByteArray(), info, 32)
-        val index = ((auth[0].toInt() and 0xFF) shl 24) or
-                ((auth[1].toInt() and 0xFF) shl 16) or
-                ((auth[2].toInt() and 0xFF) shl 8) or
-                (auth[3].toInt() and 0xFF)
-        val expected = PairingEmojis.forVersion(1)[Math.floorMod(index, PairingEmojis.V1.size)]
+        // Unsigned (Long) like the reference's uint32 — see known-answer test.
+        val index = ((auth[0].toLong() and 0xFF) shl 24) or
+                ((auth[1].toLong() and 0xFF) shl 16) or
+                ((auth[2].toLong() and 0xFF) shl 8) or
+                (auth[3].toLong() and 0xFF)
+        val expected = PairingEmojis.forVersion(1)[(index % PairingEmojis.V1.size).toInt()]
         assertEquals(expected, result.emoji)
         assertEquals(1, result.verificationCodeVersion)
         assertArrayEquals(expectedNext, result.nextKey)
@@ -213,10 +214,11 @@ class Ukey2HandshakeTest {
      * (verified against mautrix/gmessages pair_google.go and Google's
      * official UKEY2 Java implementation). Must produce 🦶 (V1 index 38).
      *
-     * The ECDH stage is covered by the round-trip test above; this locks the
-     * post-ECDH derivation that must agree with the phone. If the phone
-     * disagrees with our emoji, the derivation inputs (logged via debugHex)
-     * differ — not the derivation itself.
+     * This test caught the Build #104 bug: the index must be computed with
+     * UNSIGNED (Long) arithmetic like the reference's uint32. The old code
+     * used signed Int + Math.floorMod, which diverges when the top bit is
+     * set (this vector's auth[:4]=e208837e → signed gives V1[34]=💤, unsigned
+     * gives V1[38]=🦶). The ECDH stage is covered by the round-trip test.
      */
     @Test fun `emoji derivation matches known answer`() {
         // Fixed sharedSecret = sha256(ECDH x-coordinate), from Python generator
@@ -234,16 +236,19 @@ class Ukey2HandshakeTest {
 
         val info = initPayload + serverInit
         val ukeyV1Auth = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 auth".toByteArray(), info, 32)
-        val index = ((ukeyV1Auth[0].toInt() and 0xFF) shl 24) or
-                ((ukeyV1Auth[1].toInt() and 0xFF) shl 16) or
-                ((ukeyV1Auth[2].toInt() and 0xFF) shl 8) or
-                (ukeyV1Auth[3].toInt() and 0xFF)
+        // Must use unsigned (Long) arithmetic like the reference's uint32;
+        // signed Int + floorMod diverges when the top bit is set.
+        val index = ((ukeyV1Auth[0].toLong() and 0xFF) shl 24) or
+                ((ukeyV1Auth[1].toLong() and 0xFF) shl 16) or
+                ((ukeyV1Auth[2].toLong() and 0xFF) shl 8) or
+                (ukeyV1Auth[3].toLong() and 0xFF)
         val table = PairingEmojis.forVersion(1)
-        val emoji = table[Math.floorMod(index, table.size)]
+        val emoji = table[(index % table.size).toInt()]
 
         // Expected: V1[38] = 🦶 (computed by independent Python implementation).
+        // The old signed-Int code produced V1[34] = 💤 for this vector.
         assertEquals("🦶", emoji)
-        assertEquals(3792208766L, index.toLong() and 0xFFFFFFFFL)
+        assertEquals(3792208766L, index)
     }
 
     @Test fun `gaia outgoing envelope has expected layout`() {        val destId = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"

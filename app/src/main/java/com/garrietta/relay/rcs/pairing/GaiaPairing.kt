@@ -389,11 +389,16 @@ class GaiaPairing(private val client: OkHttpClient = RelayApi.client()) {
         val ukeyV1Auth = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 auth".toByteArray(), info, 32)
         val nextKey = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 next".toByteArray(), info, 32)
         val table = PairingEmojis.forVersion(verificationCodeVersion)
-        val index = ((ukeyV1Auth[0].toInt() and 0xFF) shl 24) or
-                ((ukeyV1Auth[1].toInt() and 0xFF) shl 16) or
-                ((ukeyV1Auth[2].toInt() and 0xFF) shl 8) or
-                (ukeyV1Auth[3].toInt() and 0xFF)
-        val emoji = table[Math.floorMod(index, table.size)]
+        // The reference uses uint32 (unsigned) for the index. Kotlin's Int is
+        // signed; when the top bit is set, Math.floorMod(negative, size) gives
+        // a DIFFERENT result than the unsigned modulus. Use Long to hold the
+        // unsigned 0..4294967295 value (this was the Build #104 emoji mismatch:
+        // our 🍼 vs the phone's 🫠🧴🛴).
+        val index = ((ukeyV1Auth[0].toLong() and 0xFF) shl 24) or
+                ((ukeyV1Auth[1].toLong() and 0xFF) shl 16) or
+                ((ukeyV1Auth[2].toLong() and 0xFF) shl 8) or
+                (ukeyV1Auth[3].toLong() and 0xFF)
+        val emoji = table[(index % table.size).toInt()]
         // Note: no Log.d here — android.util.Log throws Stub! in JVM unit tests.
         // The UI layer logs debugHex instead.
         val debugHex = mapOf(

@@ -89,7 +89,6 @@ suspend fun postRpcCancellable(
     url: String,
     contentType: String,
     body: ByteArray,
-    onCall: (okhttp3.Call) -> Unit = {},
 ): RpcResult = withContext(Dispatchers.IO) {
     kotlinx.coroutines.suspendCancellableCoroutine<RpcResult> { cont ->
         val req = Request.Builder()
@@ -98,7 +97,6 @@ suspend fun postRpcCancellable(
             .post(body.toRequestBody(contentType.toMediaType()))
             .build()
         val call = client.newCall(req)
-        onCall(call)
         cont.invokeOnCancellation { call.cancel() }
         try {
             call.execute().use { resp ->

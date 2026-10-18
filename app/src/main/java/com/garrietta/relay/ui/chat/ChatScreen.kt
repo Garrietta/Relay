@@ -1,8 +1,19 @@
 package com.garrietta.relay.ui.chat
 
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,22 +38,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
@@ -59,16 +71,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.ui.motion.M3Duration
+import com.garrietta.relay.ui.motion.M3Easing
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.ContactAvatar
-import com.garrietta.relay.ui.theme.relaySpring
+import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
+import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -89,6 +105,7 @@ fun ChatScreen(
     val sendError by viewModel.sendError.collectAsState()
     val seedColor by viewModel.seedColor.collectAsState()
     val photoUri by viewModel.photoUri.collectAsState()
+    val selectedIds by viewModel.selectedIds.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -120,13 +137,16 @@ fun ChatScreen(
                                 photoUri = photoUri,
                                 modifier = Modifier.motionSharedBounds(
                                     SharedElementKeys.avatar(threadId),
+                                    shape = WavyBlobShape,
                                 ),
                             )
                             Spacer(Modifier.width(12.dp))
                             Column {
                                 Text(
                                     displayName,
+                                    // Emphasized type for the eye-stop moment.
                                     style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                 )
                                 Text(
@@ -149,72 +169,121 @@ fun ChatScreen(
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { padding ->
-            Column(
+            // Thread container: the chat reads as one large rounded container
+            // below the app bar (M3E containment), visually independent of it.
+            // Shared-bounds target for the inbox conversation row.
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
+                    .motionSharedBounds(
+                        SharedElementKeys.conversation(threadId),
+                        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    )
+                    .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
                     .imePadding(),
             ) {
-                LazyColumn(
-                    state = listState,
-                    reverseLayout = true,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                ) {
-                    itemsIndexed(
-                        items = messages,
-                        key = { _, it -> it.id },
-                        contentType = { _, _ -> "message" },
-                    ) { index, message ->
-                        // reverseLayout: index+1 is visually above, index-1 below.
-                        val aboveDiff = messages.getOrNull(index + 1)?.isOutgoing != message.isOutgoing
-                        val belowDiff = messages.getOrNull(index - 1)?.isOutgoing != message.isOutgoing
-                        val position = when {
-                            aboveDiff && belowDiff -> ItemPosition.SINGLE
-                            aboveDiff -> ItemPosition.FIRST
-                            belowDiff -> ItemPosition.LAST
-                            else -> ItemPosition.MIDDLE
+                Column(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        reverseLayout = true,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        itemsIndexed(
+                            items = messages,
+                            key = { _, it -> it.id },
+                            contentType = { _, _ -> "message" },
+                        ) { index, message ->
+                            // reverseLayout: index+1 is visually above, index-1 below.
+                            val aboveDiff = messages.getOrNull(index + 1)?.isOutgoing != message.isOutgoing
+                            val belowDiff = messages.getOrNull(index - 1)?.isOutgoing != message.isOutgoing
+                            val position = when {
+                                aboveDiff && belowDiff -> ItemPosition.SINGLE
+                                aboveDiff -> ItemPosition.FIRST
+                                belowDiff -> ItemPosition.LAST
+                                else -> ItemPosition.MIDDLE
+                            }
+                            MessageBubble(
+                                message = message,
+                                position = position,
+                                selected = message.id in selectedIds,
+                                selectionActive = selectedIds.isNotEmpty(),
+                                onToggleSelect = { viewModel.toggleSelect(message.id) },
+                            )
                         }
-                        MessageBubble(message, position)
                     }
+                    Composer(
+                        sending = sending,
+                        onSend = { viewModel.send(recipient, it) },
+                        onAttachmentSoon = {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("Attachments are coming soon")
+                            }
+                        },
+                    )
                 }
-                Composer(
-                    sending = sending,
-                    onSend = { viewModel.send(recipient, it) },
-                    onAttachmentSoon = {
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Attachments are coming soon")
-                        }
-                    },
-                )
             }
         }
     }
 }
 
+/**
+ * M3E shape-as-state: bubbles rest soft and bubbly; long-press selection
+ * squares them off (and tints them) to communicate the state change.
+ */
 @Composable
-private fun MessageBubble(message: Message, position: ItemPosition) {
+private fun MessageBubble(
+    message: Message,
+    position: ItemPosition,
+    selected: Boolean,
+    selectionActive: Boolean,
+    onToggleSelect: () -> Unit,
+) {
+    val squareness by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = M3Duration.Short2,
+            easing = M3Easing.Standard,
+        ),
+        label = "bubbleSquareness",
+    )
+    val shape = remember(squareness, message.isOutgoing, position) {
+        lerpBubbleShape(squareness, message.isOutgoing, position)
+    }
+    val containerColor = when {
+        selected -> MaterialTheme.colorScheme.secondaryContainer
+        message.isOutgoing -> MaterialTheme.colorScheme.primaryContainer
+        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val contentColor = when {
+        selected -> MaterialTheme.colorScheme.onSecondaryContainer
+        message.isOutgoing -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
     ) {
         Box(
             modifier = Modifier
-                .clip(bubbleShape(message.isOutgoing, position))
-                .background(
-                    if (message.isOutgoing) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                .clip(shape)
+                .background(containerColor)
+                .combinedClickable(
+                    onClick = { if (selectionActive) onToggleSelect() },
+                    onLongClick = onToggleSelect,
                 )
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             Text(
                 message.body,
                 style = MaterialTheme.typography.bodyLarge,
-                color = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimaryContainer
-                else MaterialTheme.colorScheme.onSurface,
+                color = contentColor,
             )
         }
         if (message.isMms) {
@@ -228,27 +297,27 @@ private fun MessageBubble(message: Message, position: ItemPosition) {
     }
 }
 
-/**
- * Bubbly grouped bubbles: consecutive messages from one sender merge with
- * segmented corners (SegmentedShape's ItemPosition), keeping the tail corner
- * tight on the sender's side for the last/single bubble.
- */
-private fun bubbleShape(isOutgoing: Boolean, position: ItemPosition): RoundedCornerShape {
+/** Corner radii for the soft resting bubble shape. */
+private data class BubbleCorners(
+    val topStart: Dp,
+    val topEnd: Dp,
+    val bottomStart: Dp,
+    val bottomEnd: Dp,
+)
+
+private fun bubbleCorners(isOutgoing: Boolean, position: ItemPosition): BubbleCorners {
     val large = 28.dp
     val small = 10.dp
     val tail = 4.dp
     return when (position) {
-        ItemPosition.SINGLE -> RoundedCornerShape(
+        ItemPosition.SINGLE -> BubbleCorners(
             topStart = large, topEnd = large,
             bottomStart = if (isOutgoing) large else tail,
             bottomEnd = if (isOutgoing) tail else large,
         )
-        ItemPosition.FIRST -> RoundedCornerShape(
-            topStart = large, topEnd = large,
-            bottomStart = small, bottomEnd = small,
-        )
-        ItemPosition.MIDDLE -> RoundedCornerShape(small)
-        ItemPosition.LAST -> RoundedCornerShape(
+        ItemPosition.FIRST -> BubbleCorners(large, large, small, small)
+        ItemPosition.MIDDLE -> BubbleCorners(small, small, small, small)
+        ItemPosition.LAST -> BubbleCorners(
             topStart = small, topEnd = small,
             bottomStart = if (isOutgoing) large else tail,
             bottomEnd = if (isOutgoing) tail else large,
@@ -257,8 +326,29 @@ private fun bubbleShape(isOutgoing: Boolean, position: ItemPosition): RoundedCor
 }
 
 /**
- * M3 Expressive composer (per reference): a LARGE tall text-box bubble, an
- * attachment button row UNDERNEATH it, and a LARGE circular send button.
+ * Interpolates between the soft resting bubble and the squared selection
+ * shape. [squareness] 0 = resting, 1 = fully squared off.
+ */
+private fun lerpBubbleShape(
+    squareness: Float,
+    isOutgoing: Boolean,
+    position: ItemPosition,
+): RoundedCornerShape {
+    val soft = bubbleCorners(isOutgoing, position)
+    val squared = 10.dp
+    fun lerp(a: Dp, b: Dp): Dp = a + (b - a) * squareness
+    return RoundedCornerShape(
+        topStart = lerp(soft.topStart, squared),
+        topEnd = lerp(soft.topEnd, squared),
+        bottomEnd = lerp(soft.bottomEnd, squared),
+        bottomStart = lerp(soft.bottomStart, squared),
+    )
+}
+
+/**
+ * M3 Expressive composer: a LARGE tall text-box bubble, a + FAB that fans
+ * out an attachment menu (replacing the old static attachment row), and a
+ * LARGE circular send button with a spring pop on send.
  */
 @Composable
 private fun Composer(
@@ -267,12 +357,26 @@ private fun Composer(
     onAttachmentSoon: () -> Unit,
 ) {
     var text by remember { mutableStateOf("") }
+    var menuExpanded by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
+    val scope = rememberCoroutineScope()
+    val sendPop = remember { Animatable(1f) }
 
     fun submit() {
-        if (canSend) {
-            onSend(text.trim())
-            text = ""
+        if (!canSend) return
+        onSend(text.trim())
+        text = ""
+        menuExpanded = false
+        // Spring pop on send — one of the few sanctioned expressive springs.
+        scope.launch {
+            sendPop.snapTo(0.82f)
+            sendPop.animateTo(
+                1f,
+                spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            )
         }
     }
 
@@ -308,50 +412,18 @@ private fun Composer(
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Bottom,
         ) {
-            // Attachment button row underneath the text box.
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(28.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onAttachmentSoon) {
-                    Icon(
-                        Icons.Filled.Image,
-                        contentDescription = "Gallery",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(onClick = onAttachmentSoon) {
-                    Icon(
-                        Icons.Filled.PhotoCamera,
-                        contentDescription = "Camera",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TextButton(onClick = onAttachmentSoon) {
-                    Text(
-                        "GIF",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(onClick = onAttachmentSoon) {
-                    Icon(
-                        Icons.Filled.Brush,
-                        contentDescription = "Draw",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            // Large circular send button.
+            AttachmentFabMenu(
+                expanded = menuExpanded,
+                onToggle = { menuExpanded = !menuExpanded },
+                onPick = {
+                    menuExpanded = false
+                    onAttachmentSoon()
+                },
+            )
+            Spacer(Modifier.weight(1f))
+            // Large circular send button — the densest color in the scheme.
             IconButton(
                 onClick = ::submit,
                 enabled = canSend,
@@ -363,13 +435,17 @@ private fun Composer(
                 ),
                 modifier = Modifier
                     .size(64.dp)
-                    .clip(CircleShape),
+                    .clip(CircleShape)
+                    .graphicsLayer {
+                        scaleX = sendPop.value
+                        scaleY = sendPop.value
+                    },
             ) {
                 if (sending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(26.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 3.dp,
+                    // Expressive sending state: the seven-shape loop.
+                    SevenShapeLoadingIndicator(
+                        size = 26.dp,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 } else {
                     Icon(
@@ -383,7 +459,129 @@ private fun Composer(
     }
 }
 
-/** Position of a bubble within a sender group (replaces SegmentedShape library). */
+/**
+ * M3 Expressive FAB menu: the + button becomes a circle whose children fan
+ * out above it with spring entrances, in a contrasting color with large
+ * touch targets. Replaces the old static attachment row.
+ */
+@Composable
+private fun AttachmentFabMenu(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    // The + morphs toward × as the menu opens — shape-as-state.
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 45f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        label = "fabMenuRotation",
+    )
+    // Children draw above the FAB, overlapping the composer bubble; the Box
+    // intentionally lets them overflow its collapsed height.
+    Box(contentAlignment = Alignment.BottomStart) {
+        Column(
+            modifier = Modifier.padding(bottom = 66.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AttachMenuItem("Gallery", expanded, 0, onPick) {
+                Icon(Icons.Filled.Image, contentDescription = null)
+            }
+            AttachMenuItem("Camera", expanded, 1, onPick) {
+                Icon(Icons.Filled.PhotoCamera, contentDescription = null)
+            }
+            AttachMenuItem("GIF", expanded, 2, onPick) {
+                Text(
+                    "GIF",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            AttachMenuItem("Files", expanded, 3, onPick) {
+                Icon(Icons.Filled.AttachFile, contentDescription = null)
+            }
+        }
+        FloatingActionButton(
+            onClick = onToggle,
+            shape = CircleShape,
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier
+                .size(56.dp)
+                .graphicsLayer { rotationZ = rotation },
+        ) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = if (expanded) "Close attachments" else "Add attachment",
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttachMenuItem(
+    label: String,
+    expanded: Boolean,
+    index: Int,
+    onPick: (String) -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = expanded,
+        enter = fadeIn(tween(140, delayMillis = index * 45)) +
+            scaleIn(
+                spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+                initialScale = 0.5f,
+            ) +
+            slideInVertically(
+                spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            ) { it / 2 },
+        exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.6f),
+        label = "attachItem$label",
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { onPick(label) },
+            ),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                shadowElevation = 4.dp,
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                shadowElevation = 4.dp,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) { icon() }
+            }
+        }
+    }
+}
+
+/** Position of a bubble within a sender group (segmented corners). */
 private enum class ItemPosition { SINGLE, FIRST, MIDDLE, LAST }
 
 private fun formatDay(millis: Long): String =

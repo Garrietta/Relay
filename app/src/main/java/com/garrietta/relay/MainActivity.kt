@@ -22,6 +22,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -30,13 +31,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -252,9 +255,12 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Two-pane layout (unfolded foldable / tablet): conversation list on the
-     * left, selected chat on the right with a smooth crossfade. Settings and
-     * the new-conversation dialog overlay full-screen.
+     * Two-pane layout (unfolded foldable / tablet): conversation list in its
+     * own container on the left, selected chat in its own container on the
+     * right with a smooth crossfade. The per-contact tint lives inside
+     * ChatScreen's MaterialTheme, so it tints ONLY the detail container —
+     * the list pane keeps the wallpaper scheme. Settings and the
+     * new-conversation dialog overlay full-screen.
      */
     @OptIn(ExperimentalSharedTransitionApi::class)
     @Composable
@@ -273,12 +279,19 @@ class MainActivity : ComponentActivity() {
             CompositionLocalProvider(
                 LocalSharedTransitionScope provides this@SharedTransitionLayout,
             ) {
-                Row(modifier = Modifier.fillMaxSize()) {
-                    // Conversation list pane.
-                    Box(
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    // List pane: its own rounded container.
+                    Surface(
                         modifier = Modifier
                             .weight(1f)
-                            .fillMaxHeight()
+                            .fillMaxHeight(),
+                        shape = RoundedCornerShape(28.dp),
+                        color = MaterialTheme.colorScheme.background,
                     ) {
                         val inboxVm: InboxViewModel = viewModel(
                             factory = InboxViewModelFactory(app.repository)
@@ -293,13 +306,16 @@ class MainActivity : ComponentActivity() {
                             onNewConversation = { showNewConversation = true },
                         )
                     }
-                    VerticalDivider(color = MaterialTheme.colorScheme.surfaceContainerHigh)
-                    // Detail pane: crossfades between the placeholder and the
-                    // selected chat — no hard cut, no bare-background gap.
-                    Box(
+                    // Detail pane: its own rounded container; crossfades
+                    // between the placeholder and the selected chat — no hard
+                    // cut, no bare-background gap.
+                    Surface(
                         modifier = Modifier
                             .weight(1.5f)
-                            .fillMaxHeight()
+                            .fillMaxHeight(),
+                        shape = RoundedCornerShape(28.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        tonalElevation = 1.dp,
                     ) {
                         AnimatedContent(
                             targetState = selected,
@@ -503,3 +519,4 @@ private class SettingsViewModelFactory(
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
         SettingsViewModel(context.applicationContext, repo) as T
 }
+

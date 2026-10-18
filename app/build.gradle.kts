@@ -72,4 +72,10 @@ dependencies {
 
     // Coil: load contact profile photos (content:// photo URIs) into avatars.
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // graphics-shapes (stable): the sanctioned shape-morphing path on
+    // material3 1.4.0 — powers the expressive seven-shape loading loop and
+    // any morphing UI without the SDK 37 / 1.5.0-beta01 toolchain.
+    implementation("androidx.graphics:graphics-shapes:1.0.1")
 }
+

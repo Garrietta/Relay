@@ -7,7 +7,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -17,6 +20,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
 
 /**
  * Shared contact avatar: the contact's profile photo (content:// PHOTO_URI,
@@ -59,14 +63,27 @@ fun ContactAvatar(
             color = fg,
         )
         if (photoUri != null) {
+            // Expressive loading state: the seven-shape loop while the
+            // photo resolves, instead of a spinner or a blank blob.
+            var imgState by remember(photoUri) {
+                mutableStateOf<AsyncImagePainter.State>(AsyncImagePainter.State.Empty)
+            }
             AsyncImage(
                 model = photoUri,
                 contentDescription = "Profile photo for $name",
+                onState = { imgState = it },
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(shape),
                 contentScale = ContentScale.Crop,
             )
+            if (imgState is AsyncImagePainter.State.Loading) {
+                SevenShapeLoadingIndicator(
+                    size = size * 0.45f,
+                    color = fg,
+                )
+            }
         }
     }
 }
+

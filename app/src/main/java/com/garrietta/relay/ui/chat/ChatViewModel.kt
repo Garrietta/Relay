@@ -26,6 +26,23 @@ class ChatViewModel(
     val sendError: StateFlow<String?> = _sendError
 
     /**
+     * Long-press bubble selection (M3E shape-as-state: selected bubbles
+     * square off). Tapping a bubble while any selection is active toggles it.
+     */
+    private val _selectedIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedIds: StateFlow<Set<Long>> = _selectedIds
+
+    fun toggleSelect(id: Long) {
+        _selectedIds.value = _selectedIds.value.let {
+            if (id in it) it - id else it + id
+        }
+    }
+
+    fun clearSelection() {
+        _selectedIds.value = emptySet()
+    }
+
+    /**
      * Palette-extracted seed color from the contact's profile photo; drives
      * per-contact chat theming. Null = no photo (or extraction failed) → the
      * wallpaper dynamic scheme is used instead.
@@ -100,3 +117,4 @@ class ChatViewModel(
         _sendError.value = null
     }
 }
+

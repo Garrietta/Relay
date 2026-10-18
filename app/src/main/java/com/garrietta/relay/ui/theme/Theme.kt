@@ -1,8 +1,6 @@
 package com.garrietta.relay.ui.theme
 
 import android.os.Build
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -102,11 +100,11 @@ private val RelayShapes = Shapes(
 val outgoingBubbleShape = RoundedCornerShape(24.dp, 24.dp, 8.dp, 24.dp)
 val incomingBubbleShape = RoundedCornerShape(24.dp, 24.dp, 24.dp, 8.dp)
 
-/** Shared springy physics for press/scroll motion. */
-fun <T> relaySpring() = spring<T>(
-    dampingRatio = Spring.DampingRatioMediumBouncy,
-    stiffness = Spring.StiffnessMedium,
-)
+// Motion-budget note: there is intentionally no shared spring helper here.
+// Springs are sanctioned only for send pop, the FAB-menu fan-out, container
+// transforms, and the pill press — each call site declares its own spec so
+// the budget stays visible. Everything else uses the centralized ui.motion
+// tokens (standard easing + duration tokens).
 
 @Composable
 fun RelayTheme(
@@ -133,3 +131,4 @@ fun RelayTheme(
         content = content,
     )
 }
+

@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, rcs]
   pull_request:
-    branches: [main]
+    branches: [main, rcs]
   workflow_dispatch:
 
 jobs:
@@ -29,6 +29,9 @@ jobs:
       - name: Install Android SDK 36
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace

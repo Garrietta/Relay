@@ -285,10 +285,11 @@ private fun NewConversationPill(
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        // Not a plain pill: the wide clamshell from the shape set. The
-        // GenericShape sizes to the layout, so the vocabulary shape
-        // stretches into a broad expressive bar.
-        shape = expressiveShape("Clamshell"),
+        // Full-width stretched Clamshell: the vocabulary shape's reference
+        // path is mapped onto the whole bar (non-uniform stretch), so its
+        // points and curves span the full width with the shape's character
+        // intact — the expressive bar, not a small centered pill.
+        shape = stretchedExpressiveShape("Clamshell"),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,

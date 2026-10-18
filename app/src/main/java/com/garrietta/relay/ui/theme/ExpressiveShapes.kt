@@ -1,6 +1,7 @@
 package com.garrietta.relay.ui.theme
 
 import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asComposePath
 import androidx.graphics.shapes.CornerRounding
@@ -23,97 +24,201 @@ import kotlin.math.sin
  * the ovals, pills, fans and cookies. True MaterialShapes need the SDK 37 /
  * AGP 9.x toolchain; these are faithful hand-rolled approximations.
  *
+ * UNIFORM HEIGHT: every shape is fitted so its visual height always equals
+ * the layout height, with its ORIGINAL proportions kept (uniform scale —
+ * a skinny shape stays skinny, just at the common height). [aspectRatio]
+ * reports the natural width/height so avatar containers size themselves as
+ * height=H, width=H*aspect. Reference paths are built lazily so unit tests
+ * (no Android framework) can load the vocabulary.
+ *
  * Shapes are sized to their layout at draw time (GenericShape), so the same
  * definition works from a 26dp message avatar to the group-header cluster.
  */
-data class NamedShape(val name: String, val shape: Shape)
+data class NamedShape(
+    val name: String,
+    val shape: Shape,
+    private val pathBuilder: () -> android.graphics.Path,
+) {
+    /** The reference path; built on first use (draw time on device). */
+    val referencePath: android.graphics.Path by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        pathBuilder()
+    }
+
+    /**
+     * Natural width / height measured from the reference path. Avatars use
+     * this to keep every shape at the same visual height.
+     */
+    val aspectRatio: Float by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val b = android.graphics.RectF()
+        referencePath.computeBounds(b, true)
+        if (b.height() <= 0f) 1f else b.width() / b.height()
+    }
+}
+
+/** Reference radius for all vocabulary paths; fitted to layout at draw time. */
+private const val REF_R = 100f
 
 /**
- * Builds one vocabulary shape from a rounded polygon: optional star inner
- * radius, rotation, and non-uniform scale (ovals, pills, clamshells).
+ * Builds one vocabulary shape's reference path: rounded polygon (or star),
+ * rotated / non-uniformly scaled per the sheet, centered on the origin.
+ * The path is fitted to the layout at draw time (uniform height fit).
  */
-private fun m3ePolygon(
+private fun m3eReferencePath(
     numVertices: Int,
     roundingFrac: Float,
     rotationDeg: Float = 0f,
     scaleX: Float = 1f,
     scaleY: Float = 1f,
     starInnerFrac: Float? = null,
-): Shape = GenericShape { size, _ ->
-    val r = size.minDimension / 2f
-    if (r <= 0f) return@GenericShape
-    val cx = size.width / 2f
-    val cy = size.height / 2f
+): android.graphics.Path {
     val poly = if (starInnerFrac != null) {
         RoundedPolygon.star(
             numVerticesPerRadius = numVertices,
-            radius = r,
-            innerRadius = r * starInnerFrac,
-            rounding = CornerRounding(r * roundingFrac),
-            centerX = cx,
-            centerY = cy,
+            radius = REF_R,
+            innerRadius = REF_R * starInnerFrac,
+            rounding = CornerRounding(REF_R * roundingFrac),
+            centerX = 0f,
+            centerY = 0f,
         )
     } else {
         RoundedPolygon(
             numVertices = numVertices,
-            radius = r,
-            centerX = cx,
-            centerY = cy,
-            rounding = CornerRounding(r * roundingFrac),
+            radius = REF_R,
+            centerX = 0f,
+            centerY = 0f,
+            rounding = CornerRounding(REF_R * roundingFrac),
         )
     }
     val m = android.graphics.Matrix()
-    if (rotationDeg != 0f) m.postRotate(rotationDeg, cx, cy)
-    if (scaleX != 1f || scaleY != 1f) m.postScale(scaleX, scaleY, cx, cy)
-    val path = android.graphics.Path()
-    poly.transformed(m).toPath(path)
-    addPath(path.asComposePath())
+    if (rotationDeg != 0f) m.postRotate(rotationDeg)
+    if (scaleX != 1f || scaleY != 1f) m.postScale(scaleX, scaleY)
+    return android.graphics.Path().also { poly.transformed(m).toPath(it) }
 }
 
 /**
- * Organic modulated blob (sine-wave radius) — the quatrefoil / puffy bottom
- * row of the sheet. Kept in the same spirit as [WavyBlobShape].
+ * Organic modulated blob reference path (sine-wave radius) — the quatrefoil
+ * / puffy bottom row of the sheet. Kept in the same spirit as [WavyBlobShape].
  */
-private fun modulatedBlob(waves: Int, amplitude: Float): Shape = GenericShape { size, _ ->
-    val cx = size.width / 2f
-    val cy = size.height / 2f
-    val baseR = size.minDimension / 2f
-    if (baseR <= 0f) return@GenericShape
+private fun modulatedBlobReferencePath(waves: Int, amplitude: Float): android.graphics.Path {
+    val path = android.graphics.Path()
     val steps = 120
     for (i in 0..steps) {
         val a = (i / steps.toFloat()) * (2f * PI.toFloat())
-        val rr = baseR * (1f + amplitude * cos(waves * a))
-        val x = cx + rr * cos(a)
-        val y = cy + rr * sin(a)
-        if (i == 0) moveTo(x, y) else lineTo(x, y)
+        val rr = REF_R * (1f + amplitude * cos(waves * a))
+        val x = rr * cos(a)
+        val y = rr * sin(a)
+        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
     }
-    close()
+    path.close()
+    return path
+}
+
+/**
+ * Fits [ref] into [size] with a UNIFORM scale so the shape's visual height
+ * always equals the layout height while its original proportions are kept.
+ * The reference path is never mutated (a copy is transformed).
+ */
+private fun androidx.compose.ui.graphics.Path.addFittedByHeight(
+    ref: android.graphics.Path,
+    size: Size,
+) {
+    if (size.height <= 0f) return
+    val src = android.graphics.Path(ref)
+    val bounds = android.graphics.RectF()
+    src.computeBounds(bounds, true)
+    if (bounds.height() <= 0f) return
+    val s = size.height / bounds.height()
+    val fit = android.graphics.Matrix()
+    fit.setScale(s, s)
+    fit.postTranslate(
+        size.width / 2f - bounds.centerX() * s,
+        size.height / 2f - bounds.centerY() * s,
+    )
+    src.transform(fit)
+    addPath(src.asComposePath())
+}
+
+private fun namedPolygon(
+    name: String,
+    numVertices: Int,
+    roundingFrac: Float,
+    rotationDeg: Float = 0f,
+    scaleX: Float = 1f,
+    scaleY: Float = 1f,
+    starInnerFrac: Float? = null,
+): NamedShape {
+    val builder: () -> android.graphics.Path =
+        { m3eReferencePath(numVertices, roundingFrac, rotationDeg, scaleX, scaleY, starInnerFrac) }
+    // Capture the builder for the lazy reference path; the Shape lambda
+    // resolves it at draw time (never at vocabulary construction, so unit
+    // tests stay Android-free).
+    var ref: android.graphics.Path? = null
+    val shape: Shape = GenericShape { size, _ ->
+        val r = ref ?: builder().also { ref = it }
+        addFittedByHeight(r, size)
+    }
+    return NamedShape(name, shape, builder)
+}
+
+private fun namedBlob(name: String, waves: Int, amplitude: Float): NamedShape {
+    val builder: () -> android.graphics.Path = { modulatedBlobReferencePath(waves, amplitude) }
+    var ref: android.graphics.Path? = null
+    val shape: Shape = GenericShape { size, _ ->
+        val r = ref ?: builder().also { ref = it }
+        addFittedByHeight(r, size)
+    }
+    return NamedShape(name, shape, builder)
 }
 
 /** The full rotation set, in sheet order. */
 val ExpressiveAvatarShapes: List<NamedShape> = listOf(
-    NamedShape("Oval", m3ePolygon(16, 0f, scaleX = 0.80f, scaleY = 1.12f)),
-    NamedShape("Pill", m3ePolygon(16, 0f, scaleX = 1.45f)),
-    NamedShape("Triangle", m3ePolygon(3, 0.24f, rotationDeg = -90f)),
-    NamedShape("Arrow", m3ePolygon(3, 0.30f, rotationDeg = 30f)),
-    NamedShape("Fan", m3ePolygon(3, 0.42f, rotationDeg = 45f)),
-    NamedShape("Diamond", m3ePolygon(4, 0.16f, rotationDeg = 45f)),
-    NamedShape("Clamshell", m3ePolygon(6, 0.30f, scaleX = 1.35f, scaleY = 0.92f)),
-    NamedShape("Pentagon", m3ePolygon(5, 0.22f, rotationDeg = -90f)),
-    NamedShape("Gem", m3ePolygon(4, 0.30f, starInnerFrac = 0.70f)),
-    NamedShape("VerySunny", m3ePolygon(12, 0.32f, starInnerFrac = 0.76f)),
-    NamedShape("Sunny", m3ePolygon(8, 0.34f, starInnerFrac = 0.70f)),
-    NamedShape("Cookie4", m3ePolygon(4, 0.44f)),
-    NamedShape("Cookie6", m3ePolygon(6, 0.46f)),
-    NamedShape("Cookie7", m3ePolygon(7, 0.46f)),
-    NamedShape("Cookie9", m3ePolygon(9, 0.46f)),
-    NamedShape("Scallop", m3ePolygon(24, 0.55f)),
-    NamedShape("Quatrefoil", modulatedBlob(waves = 4, amplitude = 0.15f)),
-    NamedShape("Puffy", modulatedBlob(waves = 6, amplitude = 0.10f)),
-    NamedShape("Burst", m3ePolygon(16, 0.08f, starInnerFrac = 0.84f)),
-    NamedShape("Pop", m3ePolygon(14, 0.34f, starInnerFrac = 0.80f)),
+    namedPolygon("Oval", 16, 0f, scaleX = 0.80f, scaleY = 1.12f),
+    namedPolygon("Pill", 16, 0f, scaleX = 1.45f),
+    namedPolygon("Triangle", 3, 0.24f, rotationDeg = -90f),
+    namedPolygon("Arrow", 3, 0.30f, rotationDeg = 30f),
+    namedPolygon("Fan", 3, 0.42f, rotationDeg = 45f),
+    namedPolygon("Diamond", 4, 0.16f, rotationDeg = 45f),
+    namedPolygon("Clamshell", 6, 0.30f, scaleX = 1.35f, scaleY = 0.92f),
+    namedPolygon("Pentagon", 5, 0.22f, rotationDeg = -90f),
+    namedPolygon("Gem", 4, 0.30f, starInnerFrac = 0.70f),
+    namedPolygon("VerySunny", 12, 0.32f, starInnerFrac = 0.76f),
+    namedPolygon("Sunny", 8, 0.34f, starInnerFrac = 0.70f),
+    namedPolygon("Cookie4", 4, 0.44f),
+    namedPolygon("Cookie6", 6, 0.46f),
+    namedPolygon("Cookie7", 7, 0.46f),
+    namedPolygon("Cookie9", 9, 0.46f),
+    namedPolygon("Scallop", 24, 0.55f),
+    namedBlob("Quatrefoil", waves = 4, amplitude = 0.15f),
+    namedBlob("Puffy", waves = 6, amplitude = 0.10f),
+    namedPolygon("Burst", 16, 0.08f, starInnerFrac = 0.84f),
+    namedPolygon("Pop", 14, 0.34f, starInnerFrac = 0.80f),
 )
 
 /** Looks up a vocabulary shape by name; falls back to the wavy blob. */
 fun expressiveShape(name: String): Shape =
     ExpressiveAvatarShapes.firstOrNull { it.name == name }?.shape ?: WavyBlobShape
+
+/**
+ * A horizontally-stretched version of a vocabulary shape: the reference path
+ * is mapped onto the FULL layout rect (non-uniform scale), so the shape's
+ * points, corners and curves span the whole width with its character intact.
+ * Used for the full-width New-conversation bar (stretched Clamshell).
+ */
+fun stretchedExpressiveShape(name: String): Shape {
+    val named = ExpressiveAvatarShapes.firstOrNull { it.name == name } ?: return WavyBlobShape
+    return GenericShape { size, _ ->
+        if (size.width <= 0f || size.height <= 0f) return@GenericShape
+        val src = android.graphics.Path(named.referencePath)
+        val bounds = android.graphics.RectF()
+        src.computeBounds(bounds, true)
+        if (bounds.width() <= 0f || bounds.height() <= 0f) return@GenericShape
+        val fit = android.graphics.Matrix()
+        fit.setRectToRect(
+            android.graphics.RectF(bounds.left, bounds.top, bounds.right, bounds.bottom),
+            android.graphics.RectF(0f, 0f, size.width, size.height),
+            android.graphics.Matrix.ScaleToFit.FILL,
+        )
+        src.transform(fit)
+        addPath(src.asComposePath())
+    }
+}

@@ -3,7 +3,8 @@ package com.garrietta.relay.ui.theme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,6 +33,12 @@ import coil.compose.AsyncImagePainter
  * [AvatarShapeAssigner] rotation (a different M3E shape per contact,
  * reshuffled every app startup). When null, [shape] is used as-is.
  *
+ * UNIFORM HEIGHT: [size] is the avatar's height. With a rotation shape, the
+ * container widths itself as size * shape.aspectRatio so EVERY shape renders
+ * at the same visual height with its original proportions (a skinny shape
+ * stays skinny, just at the common height); the photo center-crops to fit.
+ * Explicit [shape] avatars keep a square box.
+ *
  * When a photo IS present, it also feeds the per-contact Palette theming
  * (see ChatViewModel.loadContactTheme) — photo and color identity stay one.
  */
@@ -47,11 +54,14 @@ fun ContactAvatar(
 ) {
     val scheme = MaterialTheme.colorScheme
     // Expressive rotation wins over the explicit shape when a key is given.
-    val resolvedShape = if (shapeKey != null) {
-        remember(shapeKey) { AvatarShapeAssigner.shapeFor(shapeKey) }
+    val namedShape = if (shapeKey != null) {
+        remember(shapeKey) { AvatarShapeAssigner.namedShapeFor(shapeKey) }
     } else {
-        shape
+        null
     }
+    val resolvedShape = namedShape?.shape ?: shape
+    // Same height for every shape; width follows the shape's nature.
+    val aspect = namedShape?.aspectRatio ?: 1f
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(
@@ -63,7 +73,8 @@ fun ContactAvatar(
     }
     Box(
         modifier = modifier
-            .size(size)
+            .height(size)
+            .width(size * aspect)
             .clip(resolvedShape)
             .background(bg),
         contentAlignment = Alignment.Center,

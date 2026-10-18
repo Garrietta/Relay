@@ -134,6 +134,8 @@ class RcsTransport(context: Context) : Transport {
             QrPairing().persist(com.garrietta.relay.rcs.session.AuthStore(appContext), begun, paired)
             _pairingState.value = RcsPairingState.PAIRED
             startSession()
+            // Keep the long-poll alive under Doze (user is in the foreground here).
+            com.garrietta.relay.rcs.service.RcsService.start(appContext)
             return true
         } catch (e: PairingException) {
             _pairingState.value = RcsPairingState.NOT_PAIRED
@@ -149,6 +151,7 @@ class RcsTransport(context: Context) : Transport {
     fun unpair() {
         com.garrietta.relay.rcs.session.AuthStore(appContext).clear()
         session.stop()
+        com.garrietta.relay.rcs.service.RcsService.stop(appContext)
         _pairingState.value = RcsPairingState.NOT_PAIRED
     }
 

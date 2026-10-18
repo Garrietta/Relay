@@ -13,11 +13,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.garrietta.relay.MainActivity
 import com.garrietta.relay.R
-import com.garrietta.relay.rcs.session.RcsSession
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 
 /**
  * Keeps the RCS long-poll alive in the background.
@@ -30,35 +25,23 @@ import kotlinx.coroutines.cancel
  */
 class RcsService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private lateinit var session: RcsSession
-
-    override fun onCreate() {
-        super.onCreate()
-        session = RcsSession(this)
-        ensureChannel()
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundNotification()
-        if (session.start()) {
-            // Session running; the service just keeps the process alive.
-        } else {
-            // Not paired — nothing to keep alive.
+        // Pure keep-alive: the RcsTransport owns the session; this service's
+        // only job is to keep the process in the foreground so Doze doesn't
+        // kill the long-poll. If we're not paired, there's nothing to keep alive.
+        val paired = com.garrietta.relay.rcs.session.AuthStore(this).load()?.hasToken == true
+        if (!paired) {
             stopSelf()
+            return START_NOT_STICKY
         }
+        startForegroundNotification()
         return START_STICKY
-    }
-
-    override fun onDestroy() {
-        session.stop()
-        scope.cancel()
-        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startForegroundNotification() {
+        ensureChannel()
         val pending = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,

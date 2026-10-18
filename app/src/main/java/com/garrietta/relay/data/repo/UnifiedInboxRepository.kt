@@ -112,6 +112,7 @@ class UnifiedInboxRepository(
                                 unread = !(readI >= 0 && c.getInt(readI) == 1),
                                 messageCount = if (countI >= 0) c.getInt(countI) else 0,
                                 transportLabel = if (looksLikeMmsThread(threadId)) "MMS" else "SMS",
+                                photoUri = contactLookup.photoUri(address),
                             )
                         )
                     }

@@ -1,9 +1,10 @@
 package com.garrietta.relay.ui
 
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.text.font.FontWeight
+import com.garrietta.relay.ui.motion.M3Duration
+import com.garrietta.relay.ui.motion.M3Easing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -30,7 +31,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -70,11 +70,14 @@ fun NewConversationDialog(
     ) {
         var visible by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { visible = true }
+        // Motion budget: dialogs are high-frequency chrome, so the entrance
+        // uses standard emphasized easing — springs are reserved for send,
+        // the FAB menu, container transforms, and the pill.
         val scale by animateFloatAsState(
-            targetValue = if (visible) 1f else 0.9f,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium,
+            targetValue = if (visible) 1f else 0.92f,
+            animationSpec = tween(
+                durationMillis = M3Duration.Medium2,
+                easing = M3Easing.EmphasizedDecelerate,
             ),
             label = "dialogScale",
         )
@@ -103,13 +106,13 @@ fun NewConversationDialog(
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
                     .graphicsLayer(scaleX = scale, scaleY = scale)
-                    .clip(RoundedCornerShape(28.dp))
                     // Swallow taps so they don't fall through to the scrim.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = {},
                     ),
+                shape = RoundedCornerShape(32.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 6.dp,
             ) {
@@ -118,7 +121,8 @@ fun NewConversationDialog(
                 ) {
                     Text(
                         "New message",
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Spacer(Modifier.height(16.dp))
@@ -146,3 +150,4 @@ fun NewConversationDialog(
         }
     }
 }
+

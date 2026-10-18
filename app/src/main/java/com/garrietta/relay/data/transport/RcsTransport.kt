@@ -165,3 +165,4 @@ enum class RcsPairingState {
     PAIRING,
     PAIRED,
 }
+

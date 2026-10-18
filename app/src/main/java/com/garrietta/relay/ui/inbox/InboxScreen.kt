@@ -1,9 +1,15 @@
 package com.garrietta.relay.ui.inbox
 
 import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,9 +41,9 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -51,14 +57,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.ui.motion.M3Duration
+import com.garrietta.relay.ui.motion.M3Easing
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.ContactAvatar
+import com.garrietta.relay.ui.theme.WavyBlobShape
+import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -87,12 +99,18 @@ fun InboxScreen(
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        // Transparent: the screen lives inside the list-pane container (or
+        // the window background in single-pane) — the conversation list is
+        // its own rounded container, visually independent of the app bar.
+        containerColor = Color.Transparent,
         topBar = {
             LargeTopAppBar(
                 title = {
                     Text(
                         "Messages",
+                        // Emphasized display type for the eye-stop moment.
                         style = MaterialTheme.typography.displayLarge,
+                        fontWeight = FontWeight.ExtraBold,
                     )
                 },
                 actions = {
@@ -102,8 +120,8 @@ fun InboxScreen(
                 },
                 scrollBehavior = scrollBehavior,
                 colors = TopAppBarDefaults.largeTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent,
                 ),
             )
         },
@@ -115,85 +133,115 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-            if (!isDefaultSmsApp) {
-                DefaultSmsBanner(onRequestDefaultSms)
-            }
-            // Search — soft pill, expressive radius.
-            OutlinedTextField(
-                value = query,
-                onValueChange = viewModel::setQuery,
-                placeholder = { Text("Search conversations") },
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                singleLine = true,
-                shape = RoundedCornerShape(32.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color.Transparent,
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            if (conversations.isEmpty()) {
-                EmptyInbox()
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    // Bottom inset clears the floating pill so the last card
-                    // is never hidden underneath it.
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 128.dp),
+                if (!isDefaultSmsApp) {
+                    DefaultSmsBanner(onRequestDefaultSms)
+                }
+                // Search — soft pill, expressive radius.
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = viewModel::setQuery,
+                    placeholder = { Text("Search conversations") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(32.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                // The conversation LIST is its own rounded container
+                // (Google Messages M3E pattern) — solid color, no decoration.
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 4.dp, bottom = 8.dp),
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
                 ) {
-                    items(
-                        items = conversations,
-                        key = { it.threadId },
-                        contentType = { "conversation" },
-                    ) { conversation ->
-                        ConversationRow(
-                            conversation = conversation,
-                            onClick = { onOpenChat(conversation) },
-                            onMarkRead = {
-                                if (conversation.unread) viewModel.markRead(conversation.threadId)
-                                else viewModel.markUnread(conversation.threadId)
-                            },
-                            onDelete = { viewModel.delete(conversation.threadId) },
-                        )
+                    if (conversations.isEmpty()) {
+                        EmptyInbox()
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            // Bottom inset clears the floating pill so the
+                            // last row is never hidden underneath it.
+                            contentPadding = PaddingValues(top = 8.dp, bottom = 108.dp),
+                        ) {
+                            items(
+                                items = conversations,
+                                key = { it.threadId },
+                                contentType = { "conversation" },
+                            ) { conversation ->
+                                ConversationRow(
+                                    conversation = conversation,
+                                    onClick = { onOpenChat(conversation) },
+                                    onMarkRead = {
+                                        if (conversation.unread) viewModel.markRead(conversation.threadId)
+                                        else viewModel.markUnread(conversation.threadId)
+                                    },
+                                    onDelete = { viewModel.delete(conversation.threadId) },
+                                )
+                            }
+                        }
                     }
                 }
             }
+            // True floating pill: elevated above the list with margins on all
+            // sides — the list scrolls beneath it. Not a docked bar. The
+            // densest color in the scheme, per the expressive contrast rule.
+            NewConversationPill(
+                onClick = onNewConversation,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 24.dp),
+            )
         }
-        // True floating pill: elevated above the list with margins on all
-        // sides — the list scrolls beneath it. Not a docked bar.
-        NewConversationPill(
-            onClick = onNewConversation,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-        )
     }
-}
 }
 
 /**
  * Floating "New conversation" pill — Google Messages M3E pattern. Wide pill,
  * large corner radius, primary container color, real elevation + shadow so it
- * reads as floating above the conversation list.
+ * reads as floating above the conversation list. Gentle spring press-scale
+ * (one of the sanctioned expressive springs).
  */
 @Composable
 private fun NewConversationPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        label = "pillPress",
+    )
     Surface(
         onClick = onClick,
+        interactionSource = interactionSource,
         shape = RoundedCornerShape(32.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,
         shadowElevation = 8.dp,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
     ) {
         Row(
             modifier = Modifier.padding(vertical = 18.dp),
@@ -260,10 +308,26 @@ private fun EmptyInbox() {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Wavy organic emblem — Koda's shape language for empty states.
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(WavyBlobShapeCalm)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(48.dp),
+                )
+            }
+            Spacer(Modifier.height(20.dp))
             Text(
                 "No conversations yet",
                 style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(8.dp))
             Text(
@@ -285,15 +349,30 @@ private fun ConversationRow(
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
+    // Shape-as-state on press: the row's corners square off slightly while
+    // pressed, then relax back — restraint, not decoration.
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val rowCorner by animateDpAsState(
+        targetValue = if (pressed) 18.dp else 24.dp,
+        animationSpec = tween(
+            durationMillis = M3Duration.Short2,
+            easing = M3Easing.Standard,
+        ),
+        label = "rowPress",
+    )
 
     SwipeToDismissBox(
         state = dismissState,
-        // Soft M3 card treatment (Google Messages M3E reference): each row is
-        // a rounded card with breathing room — not a flat full-bleed row. The
-        // clip also rounds the swipe-reveal background to match.
         modifier = Modifier
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(28.dp)),
+            // Container-transform origin: the row morphs into the chat
+            // thread via shared bounds (avatar morphs nested inside it).
+            .motionSharedBounds(
+                SharedElementKeys.conversation(conversation.threadId),
+                shape = RoundedCornerShape(24.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(rowCorner)),
         enableDismissFromStartToEnd = true,
         enableDismissFromEndToStart = true,
         onDismiss = { value ->
@@ -350,19 +429,20 @@ private fun ConversationRow(
             }
         },
     ) {
+        // Flat row inside the list container — the container carries the
+        // shape; the row itself stays neutral.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
+                    interactionSource = interactionSource,
                     indication = null,
                     onClick = onClick,
                 )
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(name = conversation.displayName, threadId = conversation.threadId)
+            Avatar(conversation)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -413,30 +493,16 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Avatar(name: String, threadId: Long) {
-    val scheme = MaterialTheme.colorScheme
-    val palette = remember(scheme) {
-        listOf(
-            scheme.primaryContainer to scheme.onPrimaryContainer,
-            scheme.secondaryContainer to scheme.onSecondaryContainer,
-            scheme.tertiaryContainer to scheme.onTertiaryContainer,
-        )
-    }
-    val (bg, fg) = palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
-    Box(
-        modifier = Modifier
-            .motionSharedBounds(SharedElementKeys.avatar(threadId))
-            .size(56.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(bg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            style = MaterialTheme.typography.headlineMedium,
-            color = fg,
-        )
-    }
+private fun Avatar(conversation: Conversation) {
+    ContactAvatar(
+        photoUri = conversation.photoUri,
+        name = conversation.displayName,
+        modifier = Modifier.motionSharedBounds(
+            SharedElementKeys.avatar(conversation.threadId),
+            shape = WavyBlobShape,
+        ),
+        size = 56.dp,
+    )
 }
 
 @Composable

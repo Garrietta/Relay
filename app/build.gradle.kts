@@ -81,4 +81,12 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+
+
+    // graphics-shapes (stable): the sanctioned shape-morphing path on
+    // material3 1.4.0 — powers the expressive seven-shape loading loop and
+    // any morphing UI without the SDK 37 / 1.5.0-beta01 toolchain.
+    implementation("androidx.graphics:graphics-shapes:1.0.1")
 }
+
+

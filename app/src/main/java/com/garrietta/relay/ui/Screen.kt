@@ -8,3 +8,4 @@ sealed interface Screen {
     data object NewConversation : Screen
     data object RcsPairing : Screen
 }
+

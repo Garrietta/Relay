@@ -26,12 +26,33 @@ class ChatViewModel(
     val sendError: StateFlow<String?> = _sendError
 
     /**
+     * Long-press bubble selection (M3E shape-as-state: selected bubbles
+     * square off). Tapping a bubble while any selection is active toggles it.
+     */
+    private val _selectedIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedIds: StateFlow<Set<Long>> = _selectedIds
+
+    fun toggleSelect(id: Long) {
+        _selectedIds.value = _selectedIds.value.let {
+            if (id in it) it - id else it + id
+        }
+    }
+
+    fun clearSelection() {
+        _selectedIds.value = emptySet()
+    }
+
+    /**
      * Palette-extracted seed color from the contact's profile photo; drives
      * per-contact chat theming. Null = no photo (or extraction failed) → the
      * wallpaper dynamic scheme is used instead.
      */
     private val _seedColor = MutableStateFlow<androidx.compose.ui.graphics.Color?>(null)
     val seedColor: StateFlow<androidx.compose.ui.graphics.Color?> = _seedColor
+
+    /** Contact profile photo URI for the avatar; null when there is none. */
+    private val _photoUri = MutableStateFlow<String?>(null)
+    val photoUri: StateFlow<String?> = _photoUri
 
     init {
         reload()
@@ -42,8 +63,9 @@ class ChatViewModel(
 
     fun loadContactTheme(recipient: String) {
         viewModelScope.launch {
-            val photoUri = repository.resolvePhotoUri(recipient) ?: return@launch
-            _seedColor.value = repository.extractContactSeed(photoUri)
+            val uri = repository.resolvePhotoUri(recipient) ?: return@launch
+            _photoUri.value = uri
+            _seedColor.value = repository.extractContactSeed(uri)
         }
     }
 
@@ -95,3 +117,4 @@ class ChatViewModel(
         _sendError.value = null
     }
 }
+

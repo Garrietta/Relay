@@ -1,7 +1,6 @@
 package com.garrietta.relay.ui.settings
 
 import android.app.Activity
-import android.app.RoleManager
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
@@ -76,9 +75,7 @@ class SettingsViewModel(
             if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_SMS) &&
                 !rm.isRoleHeld(RoleManager.ROLE_SMS)
             ) {
-                rm.requestRole(RoleManager.ROLE_SMS, activity, activity.mainExecutor) {
-                    refreshDefaultSmsState()
-                }
+                rm.requestRole(RoleManager.ROLE_SMS, activity)
                 return
             }
         }

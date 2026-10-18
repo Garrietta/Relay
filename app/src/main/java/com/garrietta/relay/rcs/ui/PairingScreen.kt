@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.garrietta.relay.data.transport.RcsTransport
+import com.garrietta.relay.rcs.pairing.GaiaPairing
 import com.garrietta.relay.rcs.pairing.MicrogPairing
 import com.garrietta.relay.rcs.pairing.MicrogPairingException
 import com.garrietta.relay.rcs.pairing.PairingException
@@ -73,6 +74,10 @@ fun RcsPairingScreen(
     onBack: () -> Unit,
 ) {
     var phase by remember { mutableStateOf(Phase.CHOOSING) }
+    // Begun Gaia session (SignInGaia) and the live-handshake result — hoisted
+    // so GAIA_SIGNIN / MICROG / GAIA_HANDSHAKE / GAIA_VERIFY share them.
+    var begun by remember { mutableStateOf<GaiaPairing.BegunGaia?>(null) }
+    var handshakeResult by remember { mutableStateOf<RcsTransport.GaiaHandshakeResult?>(null) }
 
     // Never strand in PAIRING: abort on dispose (back-out mid-pairing).
     DisposableEffect(Unit) {
@@ -114,7 +119,7 @@ fun RcsPairingScreen(
             }
             Phase.MICROG -> MicrogFlow(
                 transport = transport,
-                onBegun = { phase = Phase.GAIA_VERIFY },
+                onBegun = { b -> begun = b; handshakeResult = null; phase = Phase.GAIA_HANDSHAKE },
                 onWebView = { phase = Phase.GAIA_SIGNIN },
                 onQr = { phase = Phase.QR },
                 onBack = { phase = Phase.CHOOSING },
@@ -156,10 +161,12 @@ fun RcsPairingScreen(
                         signInAttempted = true
                         transport.trackPairingJob(coroutineContext[Job])
                         try {
-                            withContext(Dispatchers.IO) {
+                            val b = withContext(Dispatchers.IO) {
                                 transport.beginGaiaPairing(cookies!!)
                             }
-                            phase = Phase.GAIA_VERIFY
+                            begun = b
+                            handshakeResult = null
+                            phase = Phase.GAIA_HANDSHAKE
                         } catch (e: Exception) {
                             if (e is kotlinx.coroutines.CancellationException) throw e
                             error = e.message ?: "Sign-in failed"
@@ -185,28 +192,102 @@ fun RcsPairingScreen(
                     }
                 }
             }
+            Phase.GAIA_HANDSHAKE -> {
+                // Live UKEY2 handshake: CLIENT_INIT → phone → SERVER_INIT.
+                // The phone shows its verification prompt when CLIENT_INIT
+                // lands; we show "contacting" until SERVER_INIT is processed.
+                var error by remember { mutableStateOf<String?>(null) }
+                var attempt by remember { mutableStateOf(0) }
+                val b = begun
+                if (b == null) {
+                    Text("Something went wrong — no sign-in session.", color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
+                } else if (error == null) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(16.dp))
+                    Text("Contacting your phone…", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Your phone should show a verification prompt in Google Messages.",
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                    )
+                    LaunchedEffect(attempt) {
+                        transport.trackPairingJob(coroutineContext[Job])
+                        try {
+                            val result = withContext(Dispatchers.IO) {
+                                transport.startGaiaHandshake(b)
+                            }
+                            handshakeResult = result
+                            phase = Phase.GAIA_VERIFY
+                        } catch (e: Exception) {
+                            if (e is kotlinx.coroutines.CancellationException) throw e
+                            error = e.message ?: "Handshake failed"
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Cancel") }
+                } else {
+                    Text("Couldn't reach your phone", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(error!!, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { error = null; attempt++ }) { Text("Try again") }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
+                }
+            }
             Phase.GAIA_VERIFY -> {
-                // Emoji verification UI. The UKEY2 handshake (GaiaPairing)
-                // derives the index; the glyph set is provisional until the
-                // live handshake validates the pairingEmojisV arrays.
-                Text("Match the emoji", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Does this emoji match the one on your phone?",
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(24.dp))
-                Text("😀", fontSize = 72.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Emoji verification UI is ready. The live UKEY2 handshake " +
-                        "completes after your Google sign-in.",
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(24.dp))
-                Button(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
+                // Real emoji from the phone's SERVER_INIT (never a placeholder).
+                val result = handshakeResult
+                var finishing by remember { mutableStateOf(false) }
+                var error by remember { mutableStateOf<String?>(null) }
+                if (result == null) {
+                    Text("Something went wrong — no handshake.", color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { phase = Phase.CHOOSING }) { Text("Back") }
+                } else {
+                    Text("Match the emoji", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Does this emoji match the one on your phone?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    if (finishing) {
+                        CircularProgressIndicator()
+                        Spacer(Modifier.height(16.dp))
+                        Text("Completing pairing…", style = MaterialTheme.typography.bodyMedium)
+                        LaunchedEffect(Unit) {
+                            transport.trackPairingJob(coroutineContext[Job])
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    transport.finishGaiaPairing(result)
+                                }
+                                phase = Phase.PAIRED
+                            } catch (e: Exception) {
+                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                error = e.message ?: "Pairing failed"
+                                finishing = false
+                            }
+                        }
+                    } else {
+                        Text(result.emoji, fontSize = 72.sp)
+                        Spacer(Modifier.height(24.dp))
+                        Button(
+                            onClick = { finishing = true; error = null },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Yes, it matches") }
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = { phase = Phase.CHOOSING }) { Text("Cancel") }
+                    }
+                    error?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                    }
+                }
             }
             Phase.QR -> QrFlow(transport = transport, onBack = onBack, onPaired = { phase = Phase.PAIRED })
             Phase.PAIRED -> {
@@ -222,7 +303,7 @@ fun RcsPairingScreen(
     }
 }
 
-private enum class Phase { CHOOSING, MICROG, GAIA_SIGNIN, GAIA_VERIFY, QR, PAIRED }
+private enum class Phase { CHOOSING, MICROG, GAIA_SIGNIN, GAIA_HANDSHAKE, GAIA_VERIFY, QR, PAIRED }
 
 /**
  * microG pairing flow: enumerate the phone's Google accounts, mint an
@@ -236,7 +317,7 @@ private enum class Phase { CHOOSING, MICROG, GAIA_SIGNIN, GAIA_VERIFY, QR, PAIRE
 @Composable
 private fun MicrogFlow(
     transport: RcsTransport,
-    onBegun: () -> Unit,
+    onBegun: (GaiaPairing.BegunGaia) -> Unit,
     onWebView: () -> Unit,
     onQr: () -> Unit,
     onBack: () -> Unit,
@@ -279,7 +360,7 @@ private fun MicrogFlow(
         scope.launch {
             transport.trackPairingJob(coroutineContext[Job])
             try {
-                withContext(Dispatchers.IO) {
+                val begun = withContext(Dispatchers.IO) {
                     transport.beginMicrogGaiaPairing(account.name) { intent ->
                         status = "Waiting for your consent…"
                         val d = CompletableDeferred<Boolean>()
@@ -289,7 +370,7 @@ private fun MicrogFlow(
                         d.await()
                     }
                 }
-                onBegun()
+                onBegun(begun)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 error = e.message ?: "microG pairing failed"

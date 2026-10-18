@@ -1,9 +1,11 @@
 package com.garrietta.relay.rcs.session
 
 import android.content.Context
+import android.util.Log
 import com.garrietta.relay.rcs.crypto.RcsCrypto
 import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.net.postRpc
+import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.proto.DeviceInfo
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
@@ -13,6 +15,8 @@ import com.garrietta.relay.rcs.proto.PollPayload
 import com.garrietta.relay.rcs.proto.RcsConversation
 import com.garrietta.relay.rcs.proto.RcsMessage
 import com.garrietta.relay.rcs.proto.Rpc
+import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
+import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
 import com.garrietta.relay.rcs.proto.msgArr
 import com.garrietta.relay.rcs.proto.UpdateEvent
 import com.garrietta.relay.rcs.proto.buildOutgoingRpcPblite
@@ -35,6 +39,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -72,20 +77,45 @@ class RcsSession(context: Context) {
 
     private var scope: CoroutineScope? = null
 
+    companion object {
+        private const val TAG = "RcsSession"
+        /** Gaia pairing message TTL (300s, in microseconds) — reference CustomTTL. */
+        const val GAIA_TTL_MICROS = 300_000_000L
+    }
     private val _incoming = MutableSharedFlow<RcsMessage>(extraBufferCapacity = 64)
     val incoming: SharedFlow<RcsMessage> = _incoming.asSharedFlow()
 
     private val _events = MutableSharedFlow<SessionEvent>(extraBufferCapacity = 32)
     val events: SharedFlow<SessionEvent> = _events.asSharedFlow()
 
-    /** requestID → waiter for the inner pblite response string. */
-    private val waiters = ConcurrentHashMap<String, CompletableDeferred<String>>()
+    /** requestID → waiter for the inner response bytes (pblite JSON or binary proto). */
+    private val waiters = ConcurrentHashMap<String, CompletableDeferred<ByteArray>>()
 
     /** (responseID → device) pairs queued for ack. */
     private val ackQueue = Channel<Pair<String, DeviceInfo>>(Channel.UNLIMITED)
 
     @Volatile private var auth: AuthData? = null
     @Volatile private var mobile: DeviceInfo = DeviceInfo()
+
+    /**
+     * Gaia-mode cookie jar: when set, the long-poll and [sendGaia] use the
+     * cookie-authenticated Gaia endpoints (like the reference when
+     * HasCookies()). Set during the pairing handshake; kept afterwards —
+     * the reference keeps using the Google host while cookies exist.
+     */
+    @Volatile private var gaiaCookies: String? = null
+
+    /** Completes when the long-poll channel is first established. Reset on (re)start. */
+    @Volatile private var pollReady = CompletableDeferred<Unit>()
+
+    /**
+     * Injects auth state without persisting (pairing handshake: the provisional
+     * session lives in memory until CLIENT_FINISHED succeeds). Null clears it.
+     */
+    fun injectAuth(a: AuthData?) {
+        auth = a
+        mobile = a?.let { AuthStore.decodeDevice(it.mobileB64) } ?: DeviceInfo()
+    }
 
     val isPaired: Boolean get() = store.load()?.hasToken == true
 
@@ -99,6 +129,10 @@ class RcsSession(context: Context) {
         if (scope != null) return true
         val a = currentAuth() ?: return false
         if (!a.hasToken) return false
+        // Cookie-authenticated sessions use the Gaia endpoints, like the
+        // reference when HasCookies(). (QR pairing never stores cookies, so
+        // its path is unchanged.)
+        if (gaiaCookies == null) gaiaCookies = store.loadCookies()
         val s = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = s
         s.launch { pollLoop() }
@@ -109,6 +143,7 @@ class RcsSession(context: Context) {
     fun stop() {
         scope?.cancel()
         scope = null
+        gaiaCookies = null
     }
 
     // ---------- high-level operations ----------
@@ -173,12 +208,81 @@ class RcsSession(context: Context) {
         val sealed = RcsCrypto.seal(a.aesKey, a.hmacKey, payloadPblite.toByteArray(Charsets.UTF_8))
         val rpcData = encodeOutgoingRpcData(requestId, action, sealed, a.sessionId)
         val body = buildOutgoingRpcPblite(mobile, requestId, rpcData, a.tachyonToken, a.sessionId)
-        val waiter = CompletableDeferred<String>()
+        val waiter = CompletableDeferred<ByteArray>()
         waiters[requestId] = waiter
         try {
-            val res = postRpc(rpcClient, RelayApi.PATH_SEND_MESSAGE, RelayApi.CT_PBLITE, body.toByteArray())
+            // Cookie-authenticated sessions go to the Gaia host (reference:
+            // makeProtobufHTTPRequest picks the Google host when HasCookies).
+            val cookies = gaiaCookies
+            val res = if (cookies != null) {
+                postRpcCancellable(
+                    rpcClient, RelayApi.PATH_SEND_MESSAGE_GAIA,
+                    RelayApi.signInGaiaHeaders(cookies), body.toByteArray(),
+                )
+            } else {
+                postRpc(rpcClient, RelayApi.PATH_SEND_MESSAGE, RelayApi.CT_PBLITE, body.toByteArray())
+            }
             if (!res.isOk()) throw RcsException("uplink HTTP ${res.code}: ${res.text.take(200)}")
-            return withTimeout(60_000) { waiter.await() }
+            return withTimeout(60_000) { waiter.await().toString(Charsets.UTF_8) }
+        } finally {
+            waiters.remove(requestId)
+        }
+    }
+
+    /**
+     * Sends one UNENCRYPTED Gaia pairing message (CLIENT_INIT / CLIENT_FINISHED)
+     * and awaits the correlated response bytes.
+     *
+     * Mirrors the reference sendGaiaPairingMessage: GaiaPairingRequestContainer
+     * bytes go in unencryptedProtoData, the message type is caller-chosen
+     * (GAIA_2=20 for init, BUGLE=2 for finish), TTL is the pairing TTL, and
+     * destRegIds addresses the chosen phone. Starts the Gaia-mode long-poll
+     * (cookie-authenticated) if needed and waits for the channel — the
+     * reference waits for long-poll connect before CLIENT_INIT.
+     *
+     * Returns the raw GaiaPairingResponseContainer bytes. Throws RcsException
+     * (or PairingException callers map) on transport failure / timeout.
+     */
+    suspend fun sendGaia(
+        action: Int,
+        container: ByteArray,
+        messageType: Int,
+        destRegIds: List<String>,
+        cookies: String,
+        timeoutMs: Long = 30_000,
+    ): ByteArray {
+        val a = currentAuth() ?: throw RcsException("not paired")
+        gaiaCookies = cookies
+        if (scope == null) {
+            pollReady = CompletableDeferred()
+            val s = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            scope = s
+            s.launch { pollLoop() }
+            s.launch { ackLoop() }
+        }
+        try {
+            withTimeout(15_000) { pollReady.await() }
+        } catch (e: TimeoutCancellationException) {
+            throw RcsException("long-poll channel never established — check network/cookies")
+        }
+        val requestId = UUID.randomUUID().toString()
+        val rpcData = encodeOutgoingRpcDataUnencrypted(requestId, action, container, a.sessionId)
+        val body = buildGaiaOutgoingPblite(
+            mobile, requestId, rpcData, a.tachyonToken, a.sessionId,
+            GAIA_TTL_MICROS, messageType, destRegIds,
+        )
+        val waiter = CompletableDeferred<ByteArray>()
+        waiters[requestId] = waiter
+        try {
+            val headers = RelayApi.signInGaiaHeaders(cookies)
+            val res = postRpcCancellable(
+                rpcClient, RelayApi.PATH_SEND_MESSAGE_GAIA, headers,
+                body.toByteArray(Charsets.UTF_8),
+            )
+            if (!res.isOk()) throw RcsException("gaia uplink HTTP ${res.code}: ${res.text.take(200)}")
+            Log.d(TAG, "GaiaPairing send action=$action messageType=$messageType " +
+                    "container=${container.size}B destRegIds=$destRegIds")
+            return withTimeout(timeoutMs) { waiter.await() }
         } finally {
             waiters.remove(requestId)
         }
@@ -192,7 +296,17 @@ class RcsSession(context: Context) {
             try {
                 val a = currentAuth() ?: throw RcsException("pairing lost")
                 val body = encodeReceiveMessagesRequest(UUID.randomUUID().toString(), a.tachyonToken)
-                val res = postRpc(pollClient, RelayApi.PATH_RECEIVE_MESSAGES, RelayApi.CT_PBLITE, body.toByteArray())
+                // Gaia mode: cookie-authenticated endpoints on the Gaia host,
+                // like the reference when HasCookies().
+                val cookies = gaiaCookies
+                val res = if (cookies != null) {
+                    postRpcCancellable(
+                        pollClient, RelayApi.PATH_RECEIVE_MESSAGES_GAIA,
+                        RelayApi.signInGaiaHeaders(cookies), body.toByteArray(),
+                    )
+                } else {
+                    postRpc(pollClient, RelayApi.PATH_RECEIVE_MESSAGES, RelayApi.CT_PBLITE, body.toByteArray())
+                }
                 backoffMs = 500L
                 when (res.code) {
                     401, 403, 404 -> {
@@ -201,6 +315,7 @@ class RcsSession(context: Context) {
                     }
                 }
                 if (!res.isOk()) throw RcsException("long-poll HTTP ${res.code}")
+                if (!pollReady.isCompleted) pollReady.complete(Unit)
                 for (payload in decodeLongPollBody(res.text)) handlePayload(payload)
             } catch (e: CancellationException) {
                 throw e
@@ -237,10 +352,22 @@ class RcsSession(context: Context) {
                         val innerBytes = rpcData.encryptedData?.let {
                             runCatching { RcsCrypto.open(a.aesKey, a.hmacKey, it) }.getOrNull()
                         } ?: rpcData.unencryptedData
-                        val inner = innerBytes?.toString(Charsets.UTF_8) ?: return
-                        // Response to one of our RPCs?
-                        waiters.remove(msg.responseId)?.complete(inner)
+                        if (innerBytes == null) return
+                        // Correlate responses: normal RPC responses echo our
+                        // requestID in IncomingRPCMessage.responseID; the Gaia
+                        // pairing server echoes it in RPCMessageData.sessionID
+                        // (documented assumption — log both keys so the device
+                        // test shows which one fires).
+                        val waiter = waiters.remove(msg.responseId)
+                            ?: waiters.remove(rpcData.sessionId)
+                        if (waiter != null) {
+                            Log.d(TAG, "response correlated: responseId=${msg.responseId} " +
+                                    "rpcSessionId=${rpcData.sessionId}")
+                            waiter.complete(innerBytes)
+                            return
+                        }
                         // Otherwise: push event (UpdateEvents).
+                        val inner = innerBytes.toString(Charsets.UTF_8)
                         val update = runCatching { decodeUpdateEvents(decodePbliteMap(inner)) }.getOrNull()
                         when (update) {
                             is UpdateEvent.Messages -> update.messages.forEach { _incoming.emit(it) }

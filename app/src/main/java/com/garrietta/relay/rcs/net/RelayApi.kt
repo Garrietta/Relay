@@ -37,6 +37,9 @@ object RelayApi {
     const val PA_HOST_GAIA = "https://instantmessaging-pa.clients6.google.com"
     const val RPC_GAIA = "$PA_HOST_GAIA/\$rpc/google.internal.communications.instantmessaging.v1"
     const val PATH_SIGN_IN_GAIA = "$RPC_GAIA.Registration/SignInGaia"
+    /** Gaia-mode session endpoints (cookie auth, like the reference when HasCookies()). */
+    const val PATH_SEND_MESSAGE_GAIA = "$RPC_GAIA.Messaging/SendMessage"
+    const val PATH_RECEIVE_MESSAGES_GAIA = "$RPC_GAIA.Messaging/ReceiveMessages"
 
     /** Google's public web-client API key (hardcoded in the official web client too). */
     const val API_KEY = "AIzaSyCA4RsOZUFrm9whhtGosPlJLmVPnfSHKz8"

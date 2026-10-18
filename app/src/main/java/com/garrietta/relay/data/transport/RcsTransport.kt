@@ -6,7 +6,14 @@ import android.util.Log
 import com.garrietta.relay.rcs.pairing.MicrogPairing
 import com.garrietta.relay.rcs.pairing.PairingException
 import com.garrietta.relay.rcs.pairing.QrPairing
+import com.garrietta.relay.rcs.net.RelayApi
+import com.garrietta.relay.rcs.pairing.GaiaPairing
+import com.garrietta.relay.rcs.proto.DeviceInfo
 import com.garrietta.relay.rcs.proto.RcsConversation
+import com.garrietta.relay.rcs.proto.Rpc
+import com.garrietta.relay.rcs.proto.encodeDevice
+import com.garrietta.relay.rcs.session.AuthData
+import com.garrietta.relay.rcs.session.AuthStore
 import com.garrietta.relay.rcs.session.RcsSession
 import com.garrietta.relay.rcs.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
@@ -234,36 +241,158 @@ class RcsTransport(context: Context) : Transport {
     }
 
     /**
-     * Completes Gaia pairing after the user confirms the emoji match.
-     * Persists the session and starts it, exactly like the QR path.
+     * Result of the live UKEY2 handshake: the phone was reached, answered
+     * with SERVER_INIT, and the emoji below is the real computed one — the
+     * UI shows it for the user to match against the phone's prompt.
      */
-    suspend fun awaitGaiaPairing(
-        begun: com.garrietta.relay.rcs.pairing.GaiaPairing.BegunGaia,
-        handshake: com.garrietta.relay.rcs.pairing.GaiaPairing.Ukey2Handshake,
-        serverPublicKey: java.security.PublicKey,
-    ): Boolean {
+    data class GaiaHandshakeResult(
+        val begun: GaiaPairing.BegunGaia,
+        val handshake: GaiaPairing.Ukey2Handshake,
+        val serverPublicKey: java.security.PublicKey,
+        val nextKey: ByteArray,
+        val verificationCodeVersion: Int,
+        val emoji: String,
+    )
+
+    /**
+     * Runs the live UKEY2 handshake after a successful SignInGaia:
+     *  1. Injects a provisional session (real tachyon token; request keys
+     *     only arrive after CLIENT_FINISHED) — in memory only, so a failed
+     *     handshake never clobbers a previous good pairing on disk.
+     *  2. Brings up the Gaia-mode long-poll (cookie-authenticated) and waits
+     *     for the channel, like the reference does before CLIENT_INIT.
+     *  3. Sends CLIENT_INIT as an unencrypted GAIA_2 message addressed to the
+     *     chosen phone, then awaits the correlated SERVER_INIT.
+     *  4. Processes SERVER_INIT → real emoji via the reference tables.
+     *
+     * Throws PairingException on failure. The UI shows "Contacting your
+     * phone…" while this is in flight.
+     */
+    suspend fun startGaiaHandshake(begun: GaiaPairing.BegunGaia): GaiaHandshakeResult {
+        _pairingState.value = RcsPairingState.PAIRING
+        try {
+            val gaia = GaiaPairing()
+            val mobile = DeviceInfo(
+                userId = begun.mobileDevice.userId,
+                sourceId = begun.mobileDevice.sourceId,
+                network = begun.mobileDevice.network,
+            )
+            val ttlMs = (if (begun.tokenData.ttlSeconds > 0) begun.tokenData.ttlSeconds else 24 * 3600) * 1000L
+            val provisional = AuthData(
+                aesKey = ByteArray(32),
+                hmacKey = ByteArray(32),
+                refreshPrivateKey = byteArrayOf(),
+                refreshPublicKey = begun.refreshPublicKey,
+                tachyonToken = begun.tokenData.token,
+                tachyonExpiryMs = System.currentTimeMillis() + ttlMs,
+                sessionId = begun.sessionUuid,
+                pairingId = "",
+                mobileB64 = java.util.Base64.getEncoder().encodeToString(encodeDevice(mobile)),
+                browserB64 = "",
+            )
+            session.injectAuth(provisional)
+
+            val handshake = gaia.prepareUkey2()
+            val container = GaiaPairing.buildClientInitContainer(handshake, RelayApi.WEBVIEW_UA)
+            Log.d(TAG, "GaiaPairing CLIENT_INIT container=${container.size}B -> phone ${begun.chosenDevice.deviceId}")
+            val responseBytes = session.sendGaia(
+                action = Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT,
+                container = container,
+                messageType = Rpc.MSG_TYPE_GAIA_2,
+                destRegIds = listOf(begun.chosenDevice.deviceId),
+                cookies = begun.cookies,
+            )
+            val result = gaia.processServerInit(handshake, responseBytes)
+            return GaiaHandshakeResult(
+                begun = begun,
+                handshake = handshake,
+                serverPublicKey = result.serverPublicKey,
+                nextKey = result.nextKey,
+                verificationCodeVersion = result.verificationCodeVersion,
+                emoji = result.emoji,
+            )
+        } catch (e: Exception) {
+            session.injectAuth(null)
+            session.stop()
+            _pairingState.value =
+                if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+            throw e
+        }
+    }
+
+    /**
+     * Completes Gaia pairing after the user confirms the emoji match:
+     * sends CLIENT_FINISHED as an unencrypted BUGLE_MESSAGE (with the
+     * private-API confirmation string), handles the phone's finish
+     * error codes, runs the Ditto v1 key derivation, persists the final
+     * AuthData + cookies, and keeps the Gaia-mode session running.
+     */
+    suspend fun finishGaiaPairing(h: GaiaHandshakeResult): Boolean {
         var done = false
         try {
             withTimeout(PAIRING_TIMEOUT_MS) {
-                val gaia = com.garrietta.relay.rcs.pairing.GaiaPairing()
-                val auth = gaia.finish(begun, handshake, serverPublicKey)
-                gaia.persist(com.garrietta.relay.rcs.session.AuthStore(appContext), auth, begun.cookies)
+                val begun = h.begun
+                val container = GaiaPairing.buildFinishContainer(h.handshake, RelayApi.WEBVIEW_UA)
+                val responseBytes = session.sendGaia(
+                    action = Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED,
+                    container = container,
+                    messageType = Rpc.MSG_TYPE_BUGLE,
+                    destRegIds = listOf(begun.chosenDevice.deviceId),
+                    cookies = begun.cookies,
+                )
+                val finish = GaiaPairing.parseFinishResponse(responseBytes)
+                if (finish.finishErrorType != 0L) {
+                    throw PairingException(finishErrorMessage(finish))
+                }
+                val (aesKey, hmacKey) = GaiaPairing.deriveDittoV1Keys(h.nextKey)
+                val ttlMs = (if (begun.tokenData.ttlSeconds > 0) begun.tokenData.ttlSeconds else 24 * 3600) * 1000L
+                val finalAuth = AuthData(
+                    aesKey = aesKey,
+                    hmacKey = hmacKey,
+                    refreshPrivateKey = byteArrayOf(),
+                    refreshPublicKey = begun.refreshPublicKey,
+                    tachyonToken = begun.tokenData.token,
+                    tachyonExpiryMs = System.currentTimeMillis() + ttlMs,
+                    sessionId = begun.sessionUuid,
+                    pairingId = h.handshake.pairingAttemptId,
+                    mobileB64 = java.util.Base64.getEncoder()
+                        .encodeToString(encodeDevice(begun.mobileDevice)),
+                    browserB64 = "",
+                )
+                val store = AuthStore(appContext)
+                store.save(finalAuth)
+                store.saveCookies(begun.cookies)
+                session.injectAuth(finalAuth)
                 done = true
             }
             _pairingState.value = RcsPairingState.PAIRED
-            startSession()
+            // The session is already up in Gaia mode; refresh the conversation
+            // list and start the foreground service.
+            scope.launch {
+                runCatching { _rcsConversations.value = session.listConversations() }
+            }
             com.garrietta.relay.rcs.service.RcsService.start(appContext)
             return true
         } catch (e: TimeoutCancellationException) {
-            Log.w(TAG, "Gaia pairing timed out after ${PAIRING_TIMEOUT_MS}ms")
-            throw com.garrietta.relay.rcs.pairing.PairingException("Pairing timed out — try again")
+            Log.w(TAG, "Gaia pairing finish timed out after ${PAIRING_TIMEOUT_MS}ms")
+            throw PairingException("Pairing timed out — try again")
         } finally {
             pairingJob = null
             if (!done) {
+                session.injectAuth(null)
+                session.stop()
                 _pairingState.value =
                     if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
             }
         }
+    }
+
+    /** Maps the phone's finish error codes to user-facing messages. */
+    private fun finishErrorMessage(f: GaiaPairing.GaiaFinishResult): String = when (f.finishErrorCode) {
+        5L -> "Wrong emoji — it didn't match the one on your phone. Try again."
+        7L -> "Pairing was cancelled on your phone."
+        2L, 3L, 6L -> "Pairing timed out — try again."
+        else -> "Pairing failed (phone error ${f.finishErrorType}/${f.finishErrorCode})"
     }
 
     /** Saved Google session cookies, if a Gaia sign-in was captured. */

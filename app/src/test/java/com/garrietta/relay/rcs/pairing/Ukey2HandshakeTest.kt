@@ -1,0 +1,230 @@
+package com.garrietta.relay.rcs.pairing
+
+import com.garrietta.relay.rcs.crypto.RcsCrypto
+import com.garrietta.relay.rcs.pblite.Pblite
+import com.garrietta.relay.rcs.pblite.bytes
+import com.garrietta.relay.rcs.pblite.msg
+import com.garrietta.relay.rcs.pblite.num
+import com.garrietta.relay.rcs.pblite.rep
+import com.garrietta.relay.rcs.pblite.str
+import com.garrietta.relay.rcs.proto.FieldVal
+import com.garrietta.relay.rcs.proto.ProtoCodec
+import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
+import com.garrietta.relay.rcs.proto.DeviceInfo
+import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
+import com.garrietta.relay.rcs.proto.firstBytes
+import com.garrietta.relay.rcs.proto.firstMsg
+import com.garrietta.relay.rcs.proto.firstStr
+import com.garrietta.relay.rcs.proto.firstVarint
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.security.MessageDigest
+import java.security.SecureRandom
+
+/**
+ * Verifies the UKEY2 handshake shapes against the ukey.proto field numbers
+ * (verified 2026-10-18) and the reference PreparePayloads/ProcessServerInit
+ * flow: field numbers, the SHA-512-over-wrapped-finish commitment, the
+ * container layouts, a simulated server round-trip (emoji agreement), the
+ * Ditto v1 key derivation, and the Gaia uplink envelope.
+ */
+class Ukey2HandshakeTest {
+
+    private fun newHandshake() = GaiaPairing().prepareUkey2()
+
+    @Test fun `client init has verified ukey field numbers`() {
+        val h = newHandshake()
+        val msg = ProtoCodec.decode(h.initPayload)
+        assertEquals(2L, msg.firstVarint(1)) // CLIENT_INIT
+        val inner = ProtoCodec.decode(msg.firstBytes(2)!!)
+        assertEquals(1L, inner.firstVarint(1)) // version
+        assertEquals(32, inner.firstBytes(2)!!.size) // random
+        val commitments = inner[3]!!
+        assertEquals(1, commitments.size)
+        val commitment = ProtoCodec.decode((commitments[0] as FieldVal.Bytes).v)
+        assertEquals(100L, commitment.firstVarint(1)) // P256_SHA512
+        assertEquals(64, commitment.firstBytes(2)!!.size) // SHA-512
+        assertEquals("AES_256_CBC-HMAC_SHA256", inner.firstStr(4))
+    }
+
+    @Test fun `commitment is sha512 over the wrapped finish bytes`() {
+        val h = newHandshake()
+        // The finish payload must be the WRAPPED Ukey2Message(CLIENT_FINISH).
+        val finishMsg = ProtoCodec.decode(h.finishPayload)
+        assertEquals(4L, finishMsg.firstVarint(1)) // CLIENT_FINISH
+        val finishInner = ProtoCodec.decode(finishMsg.firstBytes(2)!!)
+        val pubKey = finishInner.firstMsg(1)!!
+        assertEquals(1L, pubKey.firstVarint(1)) // EC_P256
+        val ec = pubKey.firstMsg(2)!!
+        val x = ec.firstBytes(1)!!
+        val y = ec.firstBytes(2)!!
+        assertEquals(33, x.size)
+        assertEquals(33, y.size)
+        assertEquals(0.toByte(), x[0])
+        assertEquals(0.toByte(), y[0])
+
+        val expected = MessageDigest.getInstance("SHA-512").digest(h.finishPayload)
+        val initInner = ProtoCodec.decode(ProtoCodec.decode(h.initPayload).firstBytes(2)!!)
+        val commitment = ProtoCodec.decode((initInner[3]!![0] as FieldVal.Bytes).v)
+        assertArrayEquals(expected, commitment.firstBytes(2)!!)
+    }
+
+    @Test fun `client init container has expected layout`() {
+        val h = newHandshake()
+        val c = ProtoCodec.decode(GaiaPairing.buildClientInitContainer(h, "TestUA"))
+        assertEquals(h.pairingAttemptId, c.firstStr(1))
+        val browser = c.firstMsg(2)!!
+        assertEquals("TestUA", browser.firstStr(1))
+        assertEquals(1L, browser.firstVarint(2)) // OTHER
+        assertEquals("Android", browser.firstStr(3))
+        assertEquals(2L, browser.firstVarint(6)) // TABLET
+        val ts = c.firstVarint(3)!!
+        assertTrue(ts in System.currentTimeMillis() - 60_000..System.currentTimeMillis() + 60_000)
+        assertArrayEquals(h.initPayload, c.firstBytes(4))
+        assertEquals(1L, c.firstVarint(5)) // proposedVerificationCodeVersion
+        assertEquals(1L, c.firstVarint(6)) // proposedKeyDerivationVersion
+    }
+
+    @Test fun `finish container has expected layout`() {
+        val h = newHandshake()
+        val c = ProtoCodec.decode(GaiaPairing.buildFinishContainer(h, "TestUA"))
+        assertEquals(h.pairingAttemptId, c.firstStr(1))
+        assertArrayEquals(h.finishPayload, c.firstBytes(4))
+        assertTrue(c.firstStr(8)!!.contains("undocumented API"))
+        // Proposed versions are NOT sent on finish.
+        assertEquals(null, c.firstVarint(5))
+        assertEquals(null, c.firstVarint(6))
+    }
+
+    @Test fun `server init round trip agrees on emoji`() {
+        val gaia = GaiaPairing()
+        val h = gaia.prepareUkey2()
+
+        // Simulated phone: rebuild our public key from the finish payload,
+        // generate its own keypair, build SERVER_INIT.
+        val finishInner = ProtoCodec.decode(ProtoCodec.decode(h.finishPayload).firstBytes(2)!!)
+        val ec = finishInner.firstMsg(1)!!.firstMsg(2)!!
+        val clientX = ec.firstBytes(1)!!.copyOfRange(1, 33)
+        val clientY = ec.firstBytes(2)!!.copyOfRange(1, 33)
+        val clientPub = GaiaPairing.publicKeyFromXY(clientX, clientY)
+
+        val serverKp = RcsCrypto.generateEcdsaKeyPair()
+        val sharedSecret = RcsCrypto.ecdhSha256(serverKp.private, clientPub)
+        val serverUncompressed = RcsCrypto.uncompressedPublicKey(serverKp.public)
+        val sx = byteArrayOf(0) + serverUncompressed.copyOfRange(1, 33)
+        val sy = byteArrayOf(0) + serverUncompressed.copyOfRange(33, 65)
+        val srvRandom = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val serverInitInner = ProtoCodec.encode(
+            mapOf(
+                1 to FieldVal.Varint(1L),
+                2 to FieldVal.Bytes(srvRandom),
+                3 to FieldVal.Varint(100L),
+                4 to FieldVal.Msg(
+                    mapOf(
+                        1 to FieldVal.Varint(1L),
+                        2 to FieldVal.Msg(
+                            mapOf(1 to FieldVal.Bytes(sx), 2 to FieldVal.Bytes(sy)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val serverInitMsg = ProtoCodec.encode(
+            mapOf(1 to FieldVal.Varint(3L), 2 to FieldVal.Bytes(serverInitInner)),
+        )
+        val container = ProtoCodec.encode(
+            mapOf(5 to FieldVal.Bytes(serverInitMsg), 6 to FieldVal.Varint(1L)),
+        )
+
+        val result = gaia.processServerInit(h, container)
+
+        // Independent recomputation of the expected emoji.
+        val info = h.initPayload + serverInitMsg
+        val auth = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 auth".toByteArray(), info, 32)
+        val expectedNext = RcsCrypto.hkdfSha256(sharedSecret, "UKEY2 v1 next".toByteArray(), info, 32)
+        val index = ((auth[0].toInt() and 0xFF) shl 24) or
+                ((auth[1].toInt() and 0xFF) shl 16) or
+                ((auth[2].toInt() and 0xFF) shl 8) or
+                (auth[3].toInt() and 0xFF)
+        val expected = PairingEmojis.forVersion(1)[Math.floorMod(index, PairingEmojis.V1.size)]
+        assertEquals(expected, result.emoji)
+        assertEquals(1, result.verificationCodeVersion)
+        assertArrayEquals(expectedNext, result.nextKey)
+    }
+
+    @Test fun `ditto v1 key derivation is deterministic with distinct keys`() {
+        val nextKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val (aes1, hmac1) = GaiaPairing.deriveDittoV1Keys(nextKey)
+        val (aes2, hmac2) = GaiaPairing.deriveDittoV1Keys(nextKey)
+        assertEquals(32, aes1.size)
+        assertEquals(32, hmac1.size)
+        assertArrayEquals(aes1, aes2)
+        assertArrayEquals(hmac1, hmac2)
+        assertTrue(!aes1.contentEquals(hmac1))
+        // Different nextKey -> different output.
+        val (aes3, _) = GaiaPairing.deriveDittoV1Keys(ByteArray(32).also { SecureRandom().nextBytes(it) })
+        assertTrue(!aes1.contentEquals(aes3))
+    }
+
+    @Test fun `byte hash matches java signed semantics`() {
+        assertEquals("test".hashCode(), GaiaPairing.byteHash("test".toByteArray()))
+        // Signed bytes: 0xFF is -1, not 255.
+        var out = 1
+        for (b in byteArrayOf(-1, -128, 127)) out = 31 * out + b.toInt()
+        assertEquals(out, GaiaPairing.byteHash(byteArrayOf(-1, -128, 127)))
+    }
+
+    @Test fun `emoji tables match the reference sizes and diff`() {
+        assertEquals(305, PairingEmojis.V0.size)
+        assertEquals(308, PairingEmojis.V1.size)
+        assertEquals(305, PairingEmojis.V0.toSet().size)
+        assertEquals(308, PairingEmojis.V1.toSet().size)
+        val v0Set = PairingEmojis.V0.toSet()
+        val v1Set = PairingEmojis.V1.toSet()
+        val added = v1Set - v0Set
+        val removed = v0Set - v1Set
+        assertEquals(
+            setOf("🍋‍🟩", "🐦‍🔥", "🐲", "🪅", "🦜", "🏺", "🗿", "🫐", "⛽", "🍱", "🥡", "🧋", "🍼", "📐"),
+            added,
+        )
+        assertEquals(
+            setOf("💻", "🤗", "💬", "👋", "😁", "😎", "😇", "🥰", "🤓", "🤩"),
+            removed,
+        )
+        assertEquals(PairingEmojis.V0, PairingEmojis.forVersion(0))
+        assertEquals(PairingEmojis.V1, PairingEmojis.forVersion(1))
+        assertEquals(PairingEmojis.V1, PairingEmojis.forVersion(7))
+    }
+
+    @Test fun `gaia outgoing envelope has expected layout`() {
+        val destId = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        val rpcData = encodeOutgoingRpcDataUnencrypted("req-1", 44, byteArrayOf(1, 2, 3), "sess-1")
+        val body = buildGaiaOutgoingPblite(
+            mobile = DeviceInfo(userId = 123L, sourceId = "src", network = "net"),
+            requestId = "req-1",
+            rpcDataBinary = rpcData,
+            tachyonToken = byteArrayOf(9, 9),
+            sessionId = "sess-1",
+            ttlMicros = 300_000_000L,
+            messageType = 20,
+            destRegIds = listOf(destId),
+        )
+        val m = Pblite.decode(body)
+        assertEquals(300_000_000L, m.num(5))
+        val dests = m.rep(9)
+        assertEquals(1, dests.size)
+        val decoded = java.util.Base64.getDecoder()
+            .decode((dests[0] as com.garrietta.relay.rcs.pblite.PValue.Str).v)
+            .toString(Charsets.UTF_8)
+        assertEquals(destId, decoded)
+        val data = m.msg(2)!!
+        assertEquals(20L, data.msg(23)!!.num(2))
+        val rpcDecoded = ProtoCodec.decode(data.bytes(12)!!)
+        assertEquals("req-1", rpcDecoded.firstStr(1))
+        assertEquals(44L, rpcDecoded.firstVarint(2))
+        assertArrayEquals(byteArrayOf(1, 2, 3), rpcDecoded.firstBytes(3))
+        assertEquals("sess-1", rpcDecoded.firstStr(6))
+    }
+}

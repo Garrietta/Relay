@@ -24,6 +24,7 @@ object Rpc {
 
     // rpc.MessageType
     const val MSG_TYPE_BUGLE = 2
+    const val MSG_TYPE_GAIA_2 = 20
 
     // rpc.ActionType (subset used by the MVP)
     const val ACTION_LIST_CONVERSATIONS = 1
@@ -31,6 +32,8 @@ object Rpc {
     const val ACTION_SEND_MESSAGE = 3
     const val ACTION_GET_OR_CREATE_CONVERSATION = 9
     const val ACTION_MESSAGE_READ = 10
+    const val ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT = 44
+    const val ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED = 45
 
     // client.ListConversationsRequest.Folder
     const val FOLDER_INBOX = 1
@@ -95,8 +98,7 @@ fun buildOutgoingRpcPblite(
     tachyonToken: ByteArray,
     sessionId: String,
     ttl: Long = 0L,
-): String {
-    val mobileArr = msgArr(
+): String {    val mobileArr = msgArr(
         1 to PValue.Num(mobile.userId),
         2 to PValue.Str(mobile.sourceId),
         3 to PValue.Str(mobile.network),
@@ -134,6 +136,86 @@ fun buildOutgoingRpcPblite(
         ),
     )
 }
+
+/**
+ * Builds the uplink HTTP body for a Gaia pairing message (pblite
+ * OutgoingRPCMessage), mirroring the reference buildMessage with
+ * DontEncrypt=true.
+ *
+ * Differences from [buildOutgoingRpcPblite]: the message type is caller-chosen
+ * (GAIA_2=20 for CLIENT_INIT, BUGLE=2 for CLIENT_FINISHED), the RPC data goes
+ * in unencryptedProtoData (field 3, not the sealed field 5), TTL is the
+ * pairing TTL in microseconds, and destRegistrationIDs carries the chosen
+ * phone's UUID (pblite_binary: each UUID string → base64 of its UTF-8 bytes,
+ * per the reference pblite serializer).
+ */
+fun buildGaiaOutgoingPblite(
+    mobile: DeviceInfo,
+    requestId: String,
+    rpcDataBinary: ByteArray,
+    tachyonToken: ByteArray,
+    sessionId: String,
+    ttlMicros: Long,
+    messageType: Int,
+    destRegIds: List<String>,
+): String {
+    val mobileArr = msgArr(
+        1 to PValue.Num(mobile.userId),
+        2 to PValue.Str(mobile.sourceId),
+        3 to PValue.Str(mobile.network),
+    )
+    val cfg = ConfigVersion.CURRENT
+    val cfgArr = msgArr(
+        3 to PValue.Num(cfg.year.toLong()),
+        4 to PValue.Num(cfg.month.toLong()),
+        5 to PValue.Num(cfg.day.toLong()),
+        7 to PValue.Num(cfg.v1.toLong()),
+        9 to PValue.Num(cfg.v2.toLong()),
+    )
+    val dataArr = msgArr(
+        1 to PValue.Str(requestId),
+        2 to PValue.Num(Rpc.ROUTE_DATA_EVENT.toLong()),
+        12 to PValue.Bytes(rpcDataBinary),
+        23 to msgArr(
+            1 to PValue.Arr(emptyList()),
+            2 to PValue.Num(messageType.toLong()),
+        ),
+    )
+    val authArr = msgArr(
+        1 to PValue.Str(requestId),
+        6 to PValue.Bytes(tachyonToken),
+        7 to cfgArr,
+    )
+    val destArr = PValue.Arr(
+        destRegIds.map { id ->
+            PValue.Str(java.util.Base64.getEncoder().encodeToString(id.toByteArray(Charsets.UTF_8)))
+        },
+    )
+    return Pblite.encode(
+        mapOf(
+            1 to mobileArr,
+            2 to dataArr,
+            3 to authArr,
+            5 to PValue.Num(ttlMicros),
+            9 to destArr,
+        ),
+    )
+}
+
+/** Binary OutgoingRPCData{1:requestID, 2:action, 3:unencryptedProtoData, 6:sessionID}. */
+fun encodeOutgoingRpcDataUnencrypted(
+    requestId: String,
+    action: Int,
+    unencryptedPayload: ByteArray,
+    sessionId: String,
+): ByteArray = ProtoCodec.encode(
+    mapOf(
+        1 to FieldVal.Str(requestId),
+        2 to FieldVal.Varint(action.toLong()),
+        3 to FieldVal.Bytes(unencryptedPayload),
+        6 to FieldVal.Str(sessionId),
+    ),
+)
 
 // ---------- action payloads (pblite request bodies, sealed before sending) ----------
 

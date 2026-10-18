@@ -13,7 +13,7 @@ import com.garrietta.relay.notifications.MessageNotifications
 class RelayApp : Application() {
 
     val smsTransport: SmsTransport by lazy { SmsTransport(this) }
-    val rcsTransport: RcsTransport by lazy { RcsTransport() }
+    val rcsTransport: RcsTransport by lazy { RcsTransport(this) }
 
     val repository: UnifiedInboxRepository by lazy {
         UnifiedInboxRepository(this, smsTransport, rcsTransport)

@@ -94,5 +94,10 @@
                 <data android:scheme="mmsto" />
             </intent-filter>
         </service>
+        <!-- RCS connection: foreground service keeps the long-poll alive under Doze. -->
+        <service
+            android:name=".rcs.service.RcsService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
     </application>
 </manifest>

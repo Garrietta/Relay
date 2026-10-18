@@ -1,0 +1,96 @@
+package com.garrietta.relay.rcs.crypto
+
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+/**
+ * Crypto tests: NIST/RFC known-answer vectors for the primitives plus
+ * envelope round-trip and tamper detection. The one thing these cannot prove
+ * is the HMAC input order against Google's servers (see RcsCrypto docs).
+ */
+class RcsCryptoTest {
+
+    @Test fun `aes-ctr nist vector`() {
+        // NIST SP 800-38A F.5.5 CTR-AES256: key 603deb10...6b, iv f0f1f2...ff,
+        // plaintext 6bc1bee22e409f96e93d7e117393172a -> ciphertext 601ec313775789a5b7a7f504bbf3d228
+        val key = hex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a3097b")
+        val iv = hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+        val pt = hex("6bc1bee22e409f96e93d7e117393172a")
+        val cipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding")
+        cipher.init(
+            javax.crypto.Cipher.ENCRYPT_MODE,
+            SecretKeySpec(key, "AES"),
+            javax.crypto.spec.IvParameterSpec(iv),
+        )
+        assertArrayEquals(hex("601ec313775789a5b7a7f504bbf3d228"), cipher.doFinal(pt))
+    }
+
+    @Test fun `hmac-sha256 rfc4231 vector`() {
+        // RFC 4231 test case 1: key = 20x 0x0b, data = "Hi There"
+        val key = ByteArray(20) { 0x0b }
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        assertArrayEquals(
+            hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9bda9355478"),
+            mac.doFinal("Hi There".toByteArray()),
+        )
+    }
+
+    @Test fun `envelope round-trips`() {
+        val aes = RcsCrypto.generateAesKey()
+        val hmac = RcsCrypto.generateHmacKey()
+        val pt = "hello rcs".toByteArray()
+        val sealed = RcsCrypto.seal(aes, hmac, pt)
+        assertTrue(sealed.size == pt.size + 48)
+        assertArrayEquals(pt, RcsCrypto.open(aes, hmac, sealed))
+    }
+
+    @Test fun `envelope detects tampering`() {
+        val aes = RcsCrypto.generateAesKey()
+        val hmac = RcsCrypto.generateHmacKey()
+        val sealed = RcsCrypto.seal(aes, hmac, "secret".toByteArray())
+        sealed[0] = (sealed[0].toInt() xor 0xFF).toByte()
+        try {
+            RcsCrypto.open(aes, hmac, sealed)
+            error("should have thrown")
+        } catch (e: SecurityException) {
+            // expected
+        }
+    }
+
+    @Test fun `envelope rejects wrong key`() {
+        val sealed = RcsCrypto.seal(RcsCrypto.generateAesKey(), RcsCrypto.generateHmacKey(), "x".toByteArray())
+        try {
+            RcsCrypto.open(RcsCrypto.generateAesKey(), RcsCrypto.generateHmacKey(), sealed)
+            error("should have thrown")
+        } catch (e: SecurityException) {
+            // expected
+        }
+    }
+
+    @Test fun `ecdsa sign and verify round-trip`() {
+        val kp = RcsCrypto.generateEcdsaKeyPair()
+        val data = "requestID:1234567890".toByteArray()
+        val sig = RcsCrypto.ecdsaSign(kp.private, data)
+        assertTrue(RcsCrypto.ecdsaVerify(kp.public, data, sig))
+        assertTrue(!RcsCrypto.ecdsaVerify(kp.public, "tampered".toByteArray(), sig))
+    }
+
+    @Test fun `ecdsa keys serialize through pkcs8 and x509`() {
+        val kp = RcsCrypto.generateEcdsaKeyPair()
+        val priv = RcsCrypto.privateKeyFromPkcs8(kp.private.encoded)
+        val pub = RcsCrypto.publicKeyFromX509(kp.public.encoded)
+        val sig = RcsCrypto.ecdsaSign(priv, "abc".toByteArray())
+        assertTrue(RcsCrypto.ecdsaVerify(pub, "abc".toByteArray(), sig))
+    }
+
+    private fun hex(s: String): ByteArray {
+        val clean = s.replace(" ", "")
+        return ByteArray(clean.length / 2) { i ->
+            clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+}

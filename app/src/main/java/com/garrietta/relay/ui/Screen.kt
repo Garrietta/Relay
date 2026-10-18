@@ -6,4 +6,5 @@ sealed interface Screen {
     data class Chat(val threadId: Long, val address: String, val displayName: String) : Screen
     data object Settings : Screen
     data object NewConversation : Screen
+    data object RcsPairing : Screen
 }

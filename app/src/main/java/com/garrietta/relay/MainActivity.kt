@@ -1,19 +1,42 @@
 package com.garrietta.relay
 
 import android.Manifest
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.view.animation.DecelerateInterpolator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -23,16 +46,21 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.activity.viewModels
+import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.ThemeMode
-import kotlinx.coroutines.launch
 import com.garrietta.relay.ui.NewConversationDialog
 import com.garrietta.relay.ui.Screen
 import com.garrietta.relay.ui.chat.ChatScreen
@@ -46,6 +74,9 @@ import com.garrietta.relay.ui.motion.rememberMotionTransforms
 import com.garrietta.relay.ui.settings.SettingsScreen
 import com.garrietta.relay.ui.settings.SettingsViewModel
 import com.garrietta.relay.ui.theme.RelayTheme
+import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
+import com.garrietta.relay.rcs.ui.RcsPairingScreen
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -61,16 +92,19 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { /* inbox refreshes on next resume; repository tolerates denial */ }
 
+    // Animated window background: the theme's background color is painted here
+    // so transitions never reveal a wrong-mode color. Theme changes animate
+    // the color instead of snapping it (see applyWindowBackgroundForTheme).
+    private var windowBgColor: Int = 0
+    private var windowBgAnimator: ValueAnimator? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Flash fix: the theme's windowBackground is white, so during ANY window
-        // transition (navigation crossfade, dialog open) the Compose layer briefly
-        // revealed white — even in dark mode. Set the window background to the
-        // effective theme background BEFORE first composition, and keep it in
-        // sync whenever the theme mode changes.
-        applyWindowBackgroundForTheme()
+        // Paint the window background BEFORE first composition so no frame can
+        // ever show an unthemed color; re-apply (animated) on theme changes.
+        applyWindowBackgroundForTheme(animated = false)
         lifecycleScope.launch {
-            settingsVm.themeMode.collect { applyWindowBackgroundForTheme() }
+            settingsVm.themeMode.collect { applyWindowBackgroundForTheme(animated = true) }
         }
         enableEdgeToEdge()
         requestMessagingPermissions()
@@ -79,74 +113,299 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsVm.themeMode.collectAsState()
             val isDefaultSmsApp by settingsVm.isDefaultSmsAppFlow.collectAsState()
 
-            RelayTheme(themeMode = themeMode) {
-                val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
-                fun push(s: Screen) = backStack.add(s)
-                fun pop() {
-                    if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+            // SMS role request via the Activity Result API. The ViewModel builds
+            // the RoleManager intent; the result callback refreshes state
+            // immediately instead of waiting for onResume.
+            val roleRequestLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                settingsVm.onSmsRoleResult(
+                    this@MainActivity,
+                    result.resultCode == Activity.RESULT_OK,
+                )
+            }
+            fun requestSmsRole() {
+                val intent = settingsVm.smsRoleRequestIntent(this@MainActivity)
+                if (intent != null) {
+                    try {
+                        roleRequestLauncher.launch(intent)
+                    } catch (_: Exception) {
+                        // Role intent didn't resolve — cascade visibly.
+                        settingsVm.openDefaultAppsSettings(this@MainActivity)
+                    }
+                } else {
+                    settingsVm.openDefaultAppsSettings(this@MainActivity)
                 }
-                BackHandler(enabled = backStack.size > 1) { pop() }
+            }
 
-                // Container-transform navigation: conversation avatar morphs
-                // into the chat header via shared bounds (see ui.motion).
-                SharedTransitionLayout {
-                    val motionTransforms = rememberMotionTransforms()
-                    AnimatedContent(
-                        targetState = backStack.last(),
-                        transitionSpec = { motionTransforms[MotionKind.TOP_LEVEL] },
-                        label = "relay-nav",
-                    ) { screen ->
-                        CompositionLocalProvider(
-                            LocalSharedTransitionScope provides this@SharedTransitionLayout,
-                            LocalAnimatedVisibilityScope provides this@AnimatedContent,
-                        ) {
-                            when (screen) {
-                                is Screen.Inbox -> {
-                                    val inboxVm: InboxViewModel = viewModel(
-                                        factory = InboxViewModelFactory(app.repository)
-                                    )
-                                    InboxScreen(
-                                        viewModel = inboxVm,
-                                        isDefaultSmsApp = isDefaultSmsApp,
-                                        userMessages = settingsVm.userMessages,
-                                        onRequestDefaultSms = { settingsVm.requestDefaultSmsRole(this@MainActivity) },
-                                        onOpenChat = {
-                                            push(Screen.Chat(it.threadId, it.address, it.displayName))
-                                        },
-                                        onOpenSettings = { push(Screen.Settings) },
-                                        onNewConversation = { push(Screen.NewConversation) },
-                                    )
-                                }
-                                is Screen.Chat -> {
+            RelayTheme(themeMode = themeMode) {
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    // Foldable adaptive layout: conversation list beside the
+                    // chat when wide (unfolded Fold / tablet), single-pane
+                    // backstack when narrow (folded phone).
+                    if (maxWidth >= 720.dp) {
+                        RelayTwoPane(
+                            isDefaultSmsApp = isDefaultSmsApp,
+                            onRequestDefaultSms = ::requestSmsRole,
+                        )
+                    } else {
+                        RelaySinglePane(
+                            isDefaultSmsApp = isDefaultSmsApp,
+                            onRequestDefaultSms = ::requestSmsRole,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Single-pane navigation (folded phone): manual backstack with
+     * direction-aware transitions — forward pushes slide in on the shared
+     * axis, back pops mirror it.
+     */
+    @OptIn(ExperimentalSharedTransitionApi::class)
+    @Composable
+    private fun RelaySinglePane(
+        isDefaultSmsApp: Boolean,
+        onRequestDefaultSms: () -> Unit,
+    ) {
+        val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
+        var navForward by remember { mutableStateOf(true) }
+        fun push(s: Screen) {
+            navForward = true
+            backStack.add(s)
+        }
+        fun pop() {
+            if (backStack.size > 1) {
+                navForward = false
+                backStack.removeLast()
+            }
+        }
+        BackHandler(enabled = backStack.size > 1) { pop() }
+
+        // Container-transform navigation: conversation avatar morphs
+        // into the chat header via shared bounds (see ui.motion).
+        SharedTransitionLayout {
+            val motionTransforms = rememberMotionTransforms()
+            AnimatedContent(
+                targetState = backStack.last(),
+                transitionSpec = {
+                    motionTransforms[if (navForward) MotionKind.FORWARD else MotionKind.BACKWARD]
+                },
+                label = "relay-nav",
+            ) { screen ->
+                CompositionLocalProvider(
+                    LocalSharedTransitionScope provides this@SharedTransitionLayout,
+                    LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                ) {
+                    when (screen) {
+                        is Screen.Inbox -> {
+                            val inboxVm: InboxViewModel = viewModel(
+                                factory = InboxViewModelFactory(app.repository)
+                            )
+                            InboxScreen(
+                                viewModel = inboxVm,
+                                isDefaultSmsApp = isDefaultSmsApp,
+                                userMessages = settingsVm.userMessages,
+                                onRequestDefaultSms = onRequestDefaultSms,
+                                onOpenChat = {
+                                    push(Screen.Chat(it.threadId, it.address, it.displayName))
+                                },
+                                onOpenSettings = { push(Screen.Settings) },
+                                onNewConversation = { push(Screen.NewConversation) },
+                            )
+                        }
+                        is Screen.Chat -> {
+                            val chatVm: ChatViewModel = viewModel(
+                                key = "chat_${screen.threadId}",
+                                factory = ChatViewModelFactory(app.repository, screen.threadId),
+                            )
+                            ChatScreen(
+                                viewModel = chatVm,
+                                displayName = screen.displayName,
+                                recipient = screen.address,
+                                threadId = screen.threadId,
+                                onBack = ::pop,
+                            )
+                        }
+                        is Screen.Settings -> {
+                            SettingsScreen(
+                                viewModel = settingsVm,
+                                onBack = ::pop,
+                                onRequestDefaultSms = onRequestDefaultSms,
+                                onOpenRcsPairing = { push(Screen.RcsPairing) },
+                            )
+                        }
+                        is Screen.RcsPairing -> {
+                            RcsPairingScreen(
+                                transport = app.rcsTransport,
+                                onBack = ::pop,
+                            )
+                        }
+                        is Screen.NewConversation -> {
+                            NewConversationDialog(
+                                onDismiss = ::pop,
+                                onStart = { number ->
+                                    pop()
+                                    // threadId unknown until first message; use -1 placeholder.
+                                    push(Screen.Chat(-1L, number, number))
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Two-pane layout (unfolded foldable / tablet): conversation list on the
+     * left, selected chat on the right with a smooth crossfade. Settings and
+     * the new-conversation dialog overlay full-screen.
+     */
+    @OptIn(ExperimentalSharedTransitionApi::class)
+    @Composable
+    private fun RelayTwoPane(
+        isDefaultSmsApp: Boolean,
+        onRequestDefaultSms: () -> Unit,
+    ) {
+        var selected by remember { mutableStateOf<Conversation?>(null) }
+        var showSettings by remember { mutableStateOf(false) }
+        var showNewConversation by remember { mutableStateOf(false) }
+        BackHandler(enabled = showSettings) { showSettings = false }
+        BackHandler(enabled = !showSettings && selected != null) { selected = null }
+
+        SharedTransitionLayout {
+            val motionTransforms = rememberMotionTransforms()
+            CompositionLocalProvider(
+                LocalSharedTransitionScope provides this@SharedTransitionLayout,
+            ) {
+                Row(modifier = Modifier.fillMaxSize()) {
+                    // Conversation list pane.
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                    ) {
+                        val inboxVm: InboxViewModel = viewModel(
+                            factory = InboxViewModelFactory(app.repository)
+                        )
+                        InboxScreen(
+                            viewModel = inboxVm,
+                            isDefaultSmsApp = isDefaultSmsApp,
+                            userMessages = settingsVm.userMessages,
+                            onRequestDefaultSms = onRequestDefaultSms,
+                            onOpenChat = { selected = it },
+                            onOpenSettings = { showSettings = true },
+                            onNewConversation = { showNewConversation = true },
+                        )
+                    }
+                    VerticalDivider(color = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    // Detail pane: crossfades between the placeholder and the
+                    // selected chat — no hard cut, no bare-background gap.
+                    Box(
+                        modifier = Modifier
+                            .weight(1.5f)
+                            .fillMaxHeight()
+                    ) {
+                        AnimatedContent(
+                            targetState = selected,
+                            transitionSpec = { motionTransforms[MotionKind.TOP_LEVEL] },
+                            label = "detail-pane",
+                        ) { convo ->
+                            CompositionLocalProvider(
+                                LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                            ) {
+                                if (convo == null) {
+                                    ConversationPlaceholder()
+                                } else {
                                     val chatVm: ChatViewModel = viewModel(
-                                        key = "chat_${screen.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, screen.threadId),
+                                        key = "chat_${convo.threadId}",
+                                        factory = ChatViewModelFactory(app.repository, convo.threadId),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
-                                        displayName = screen.displayName,
-                                        recipient = screen.address,
-                                        threadId = screen.threadId,
-                                        onBack = ::pop,
-                                    )
-                                }
-                                is Screen.Settings -> {
-                                    SettingsScreen(viewModel = settingsVm, onBack = ::pop)
-                                }
-                                is Screen.NewConversation -> {
-                                    NewConversationDialog(
-                                        onDismiss = ::pop,
-                                        onStart = { number ->
-                                            pop()
-                                            // threadId unknown until first message; use -1 placeholder.
-                                            push(Screen.Chat(-1L, number, number))
-                                        },
+                                        displayName = convo.displayName,
+                                        recipient = convo.address,
+                                        threadId = convo.threadId,
+                                        onBack = { selected = null },
                                     )
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if (showNewConversation) {
+            NewConversationDialog(
+                onDismiss = { showNewConversation = false },
+                onStart = { number ->
+                    showNewConversation = false
+                    // Bind to the real thread once the first message sends
+                    // (ChatViewModel rebinds on threadId -1).
+                    selected = Conversation(
+                        threadId = -1L,
+                        address = number,
+                        displayName = number,
+                        snippet = "",
+                        date = System.currentTimeMillis(),
+                        unread = false,
+                        messageCount = 0,
+                        transportLabel = "SMS",
+                        photoUri = null,
+                    )
+                },
+            )
+        }
+        if (showSettings) {
+            SettingsScreen(
+                viewModel = settingsVm,
+                onBack = { showSettings = false },
+                onRequestDefaultSms = onRequestDefaultSms,
+            )
+        }
+    }
+
+    /**
+     * Koda-style empty state for the two-pane detail area: wavy organic
+     * emblem, expressive headline, quiet subhead.
+     */
+    @Composable
+    private fun ConversationPlaceholder() {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .clip(WavyBlobShapeCalm)
+                        .background(MaterialTheme.colorScheme.secondaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.size(52.dp),
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
+                Text(
+                    "Pick a conversation",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Your chats open here, beside the list.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -160,19 +419,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // The system default-SMS dialog is a floating system window: this
-        // activity may never go through onResume when it's dismissed, so the
-        // banner could linger after the role was granted. Refresh on focus too.
+        // The system role dialog is a floating system window: this activity may
+        // never go through onResume when it's dismissed, so refresh on focus too.
         if (hasFocus) settingsVm.refreshDefaultSmsState()
     }
 
     /**
      * Resolves the effective dark/light mode from the user's theme setting and
      * paints the window background to match, so transitions never reveal a
-     * wrong-mode color (the old white windowBackground flashed in dark mode).
+     * wrong-mode color. On theme changes the color ANIMATES instead of
+     * snapping, so the switch feels intentional.
      * Uses the real dynamic scheme background on S+ so it matches Compose.
      */
-    private fun applyWindowBackgroundForTheme() {
+    private fun applyWindowBackgroundForTheme(animated: Boolean) {
         val dark = when (settingsVm.themeMode.value) {
             ThemeMode.SYSTEM ->
                 (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
@@ -180,13 +439,33 @@ class MainActivity : ComponentActivity() {
             ThemeMode.LIGHT -> false
             ThemeMode.DARK -> true
         }
-        val bg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val target = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (dark) dynamicDarkColorScheme(this).background
             else dynamicLightColorScheme(this).background
         } else {
             if (dark) darkColorScheme().background else lightColorScheme().background
+        }.toArgb()
+        if (!animated || windowBgColor == 0 || windowBgColor == target) {
+            windowBgAnimator?.cancel()
+            window.setBackgroundDrawable(ColorDrawable(target))
+            windowBgColor = target
+            return
         }
-        window.setBackgroundDrawable(ColorDrawable(bg.toArgb()))
+        windowBgAnimator?.cancel()
+        val from = windowBgColor
+        windowBgAnimator = ValueAnimator.ofArgb(from, target).apply {
+            duration = 400
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                window.setBackgroundDrawable(ColorDrawable(anim.animatedValue as Int))
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    windowBgColor = target
+                }
+            })
+            start()
+        }
     }
 
     private fun requestMessagingPermissions() {

@@ -69,4 +69,17 @@ dependencies {
     // Palette: extract vibrant colors from contact profile photos to seed
     // per-conversation chat theming (same pattern as Koda's artwork theming).
     implementation("androidx.palette:palette:1.0.0")
+
+    // Coil: load contact profile photos (content:// photo URIs) into avatars.
+    implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // RCS transport: clean-room Messages-for-web protocol client (branch rcs).
+    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("androidx.security:security-crypto:1.0.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }

@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.relaySpring
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import java.text.SimpleDateFormat
@@ -87,6 +88,7 @@ fun ChatScreen(
     val sending by viewModel.sending.collectAsState()
     val sendError by viewModel.sendError.collectAsState()
     val seedColor by viewModel.seedColor.collectAsState()
+    val photoUri by viewModel.photoUri.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -115,6 +117,7 @@ fun ChatScreen(
                             // Shared-element target: the inbox avatar morphs here.
                             ChatAvatar(
                                 name = displayName,
+                                photoUri = photoUri,
                                 modifier = Modifier.motionSharedBounds(
                                     SharedElementKeys.avatar(threadId),
                                 ),
@@ -387,27 +390,12 @@ private fun formatDay(millis: Long): String =
     SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(millis))
 
 @Composable
-private fun ChatAvatar(name: String, modifier: Modifier = Modifier) {
-    val scheme = MaterialTheme.colorScheme
-    val palette = remember(scheme) {
-        listOf(
-            scheme.primaryContainer to scheme.onPrimaryContainer,
-            scheme.secondaryContainer to scheme.onSecondaryContainer,
-            scheme.tertiaryContainer to scheme.onTertiaryContainer,
-        )
-    }
-    val (bg, fg) = palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
-    Box(
-        modifier = modifier
-            .size(40.dp)
-            .clip(RoundedCornerShape(24.dp))
-            .background(bg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            style = MaterialTheme.typography.titleMedium,
-            color = fg,
-        )
-    }
+private fun ChatAvatar(name: String, photoUri: String?, modifier: Modifier = Modifier) {
+    ContactAvatar(
+        photoUri = photoUri,
+        name = name,
+        modifier = modifier,
+        size = 44.dp,
+        textStyle = MaterialTheme.typography.titleLarge,
+    )
 }

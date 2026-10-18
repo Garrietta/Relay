@@ -1,10 +1,12 @@
 package com.garrietta.relay.ui.settings
 
 import android.app.Activity
+import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.provider.Telephony
 import android.util.Log
@@ -49,8 +51,6 @@ class SettingsViewModel(
         prefs.edit().putString(KEY_THEME, mode.name).apply()
     }
 
-    fun isDefaultSmsApp(): Boolean = _isDefaultSmsApp.value
-
     /**
      * User-visible messages (snackbar): the old code swallowed every failure
      * in runCatching, so a broken intent looked like "does nothing".
@@ -75,56 +75,80 @@ class SettingsViewModel(
         _isDefaultSmsApp.value = checkDefaultSmsApp()
     }
 
+    /**
+     * Source of truth for "is Relay the default SMS app".
+     * API 29+: RoleManager.isRoleHeld(ROLE_SMS) — the role system's own answer.
+     * Below 29: Telephony.Sms.getDefaultSmsPackage() fallback.
+     * Either one saying yes hides the banner/row (belt and suspenders against
+     * any device where the two disagree).
+     */
     private fun checkDefaultSmsApp(): Boolean {
-        val def = Telephony.Sms.getDefaultSmsPackage(context)
-        return def == context.packageName
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = context.getSystemService(RoleManager::class.java)
+            if (rm?.isRoleHeld(RoleManager.ROLE_SMS) == true) return true
+        }
+        return try {
+            Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**
-     * Request the default-SMS role via ACTION_CHANGE_DEFAULT — the documented,
-     * universal mechanism (works on all API levels).
-     * Must be called with an Activity (not an application context) so the
-     * system role-request dialog can attach correctly.
+     * Builds the role-request intent for the Activity Result API
+     * (ActivityResultContracts.StartActivityForResult).
      *
-     * Round 2: failures are now surfaced instead of swallowed. We verify the
-     * intent resolves via PackageManager first (needs the <queries> entries in
-     * the manifest on API 30+); if it doesn't resolve, we fall back to the
-     * system default-apps settings screen so the user can always switch
-     * manually. State refreshes via onResume().
+     * API 29+: RoleManager.createRequestRoleIntent(ROLE_SMS) — the modern,
+     * result-bearing mechanism (RESULT_OK = granted, RESULT_CANCELED = not).
+     * Below 29: the legacy ACTION_CHANGE_DEFAULT intent.
+     * Returns null when the RoleManager path is unavailable — the caller then
+     * cascades to openDefaultAppsSettings().
      */
-    fun requestDefaultSmsRole(activity: Activity) {
-        Log.d(TAG, "requestDefaultSmsRole: tap received")
-        val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+    fun smsRoleRequestIntent(activity: Activity): Intent? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = activity.getSystemService(RoleManager::class.java)
+            if (rm == null) {
+                Log.w(TAG, "smsRoleRequestIntent: RoleManager unavailable; cascading")
+                return null
+            }
+            if (!rm.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                Log.w(TAG, "smsRoleRequestIntent: ROLE_SMS not available; cascading")
+                return null
+            }
+            Log.d(TAG, "smsRoleRequestIntent: RoleManager.createRequestRoleIntent(ROLE_SMS)")
+            return rm.createRequestRoleIntent(RoleManager.ROLE_SMS)
+        }
+        Log.d(TAG, "smsRoleRequestIntent: legacy ACTION_CHANGE_DEFAULT (API < 29)")
+        return Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
             putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, activity.packageName)
         }
-        val pm: PackageManager = activity.packageManager
-        val primaryResolves = intent.resolveActivity(pm) != null
-        Log.d(TAG, "requestDefaultSmsRole: ACTION_CHANGE_DEFAULT resolves=$primaryResolves")
-        if (!primaryResolves) {
-            Log.w(TAG, "ACTION_CHANGE_DEFAULT did not resolve; falling back to system settings")
-            notify("Couldn't open the SMS picker; opening system settings instead.")
-            openDefaultAppsSettings(activity)
-            return
-        }
-        try {
-            activity.startActivity(intent)
-            Log.d(TAG, "requestDefaultSmsRole: system picker launched")
-        } catch (e: Exception) {
-            Log.e(TAG, "requestDefaultSmsRole: ACTION_CHANGE_DEFAULT failed", e)
-            notify("Couldn't open the SMS picker (${e.javaClass.simpleName}); opening system settings instead.")
+    }
+
+    /**
+     * Called from the Activity Result launcher when the role-request flow
+     * resolves. Refreshes state immediately (no waiting for onResume) and
+     * cascades visibly when the grant didn't happen.
+     */
+    fun onSmsRoleResult(activity: Activity, granted: Boolean) {
+        refreshDefaultSmsState()
+        if (granted) {
+            Log.d(TAG, "onSmsRoleResult: SMS role GRANTED")
+            notify("Relay is now your default texting app.")
+        } else {
+            Log.w(TAG, "onSmsRoleResult: not granted (RESULT_CANCELED); cascading to system settings")
+            notify("That didn't switch it — opening system settings so you can pick Relay manually.")
             openDefaultAppsSettings(activity)
         }
     }
 
     /**
-     * Cascading fallbacks — three rounds of "nothing happens" are over. Every
-     * tap must produce something visible:
-     *  1. ACTION_CHANGE_DEFAULT system picker (primary path).
+     * Cascading fallbacks — every tap must produce something visible:
+     *  1. RoleManager request intent (primary path, launched via Activity Result).
      *  2. System default-apps settings screen (manual switch).
      *  3. This app's own App info page (tap "SMS app" there).
      * Every step is user-visible (snackbar) or logged (RelaySettings tag).
      */
-    private fun openDefaultAppsSettings(activity: Activity) {
+    fun openDefaultAppsSettings(activity: Activity) {
         val fallback = Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
         if (fallback.resolveActivity(activity.packageManager) == null) {
             Log.e(TAG, "No default-apps settings activity found; falling to app details")

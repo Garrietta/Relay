@@ -69,4 +69,7 @@ dependencies {
     // Palette: extract vibrant colors from contact profile photos to seed
     // per-conversation chat theming (same pattern as Koda's artwork theming).
     implementation("androidx.palette:palette:1.0.0")
+
+    // Coil: load contact profile photos (content:// photo URIs) into avatars.
+    implementation("io.coil-kt:coil-compose:2.7.0")
 }

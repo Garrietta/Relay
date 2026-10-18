@@ -11,6 +11,8 @@ data class Conversation(
     val messageCount: Int,
     /** Dominant transport of the latest message: SMS or MMS. RCS arrives later. */
     val transportLabel: String,
+    /** Contacts profile photo URI (PHOTO_URI), or null when there is none. */
+    val photoUri: String?,
 )
 
 /** A single message inside a conversation. */

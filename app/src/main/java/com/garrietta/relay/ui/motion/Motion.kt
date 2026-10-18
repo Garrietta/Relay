@@ -139,7 +139,7 @@ fun rememberMotionTransforms(): MotionTransforms {
 }
 
 private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<MotionKind, ContentTransform> = buildMap {
-    put(MotionKind.TOP_LEVEL, fadeThrough())
+    put(MotionKind.TOP_LEVEL, crossfade())
 
     if (reducedMotion) {
         put(MotionKind.FORWARD, fadeThrough())
@@ -174,18 +174,28 @@ private fun buildTransforms(t: MotionTokens, reducedMotion: Boolean): Map<Motion
         )
     }
 
-    put(MotionKind.CONTAINER, fadeThrough())
+    put(MotionKind.CONTAINER, crossfade())
 }
 
-private fun fadeThrough(): ContentTransform =
+/**
+ * True crossfade — incoming and outgoing fade SIMULTANEOUSLY, so the two
+ * screens blend through each other with no bare-background gap in between.
+ * (The old fade-through faded out fully before fading in, which read as a
+ * hard "solid screen" cut during navigation.)
+ */
+private fun crossfade(): ContentTransform =
     fadeIn(
         tween(
-            M3Duration.TOP_LEVEL_IN,
-            delayMillis = M3Duration.FADE_OUT,
+            M3Duration.Medium2,
             easing = M3Easing.EmphasizedDecelerate,
         ),
         initialAlpha = 0f,
-    ) togetherWith fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))
+    ) togetherWith fadeOut(
+        tween(
+            M3Duration.Medium2,
+            easing = M3Easing.EmphasizedDecelerate,
+        )
+    )
 
 /**
  * Provided at the navigation root, wrapping content in [SharedTransitionLayout].

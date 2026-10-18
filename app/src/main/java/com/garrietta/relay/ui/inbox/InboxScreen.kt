@@ -59,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.ContactAvatar
+import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -260,10 +262,26 @@ private fun EmptyInbox() {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Wavy organic emblem — Koda's shape language for empty states.
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(WavyBlobShapeCalm)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(48.dp),
+                )
+            }
+            Spacer(Modifier.height(20.dp))
             Text(
                 "No conversations yet",
                 style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(8.dp))
             Text(
@@ -362,7 +380,7 @@ private fun ConversationRow(
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(name = conversation.displayName, threadId = conversation.threadId)
+            Avatar(conversation)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -413,30 +431,15 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Avatar(name: String, threadId: Long) {
-    val scheme = MaterialTheme.colorScheme
-    val palette = remember(scheme) {
-        listOf(
-            scheme.primaryContainer to scheme.onPrimaryContainer,
-            scheme.secondaryContainer to scheme.onSecondaryContainer,
-            scheme.tertiaryContainer to scheme.onTertiaryContainer,
-        )
-    }
-    val (bg, fg) = palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
-    Box(
-        modifier = Modifier
-            .motionSharedBounds(SharedElementKeys.avatar(threadId))
-            .size(56.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(bg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            style = MaterialTheme.typography.headlineMedium,
-            color = fg,
-        )
-    }
+private fun Avatar(conversation: Conversation) {
+    ContactAvatar(
+        photoUri = conversation.photoUri,
+        name = conversation.displayName,
+        modifier = Modifier.motionSharedBounds(
+            SharedElementKeys.avatar(conversation.threadId)
+        ),
+        size = 56.dp,
+    )
 }
 
 @Composable

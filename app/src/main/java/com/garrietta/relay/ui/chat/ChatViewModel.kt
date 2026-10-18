@@ -33,6 +33,10 @@ class ChatViewModel(
     private val _seedColor = MutableStateFlow<androidx.compose.ui.graphics.Color?>(null)
     val seedColor: StateFlow<androidx.compose.ui.graphics.Color?> = _seedColor
 
+    /** Contact profile photo URI for the avatar; null when there is none. */
+    private val _photoUri = MutableStateFlow<String?>(null)
+    val photoUri: StateFlow<String?> = _photoUri
+
     init {
         reload()
         viewModelScope.launch {
@@ -42,8 +46,9 @@ class ChatViewModel(
 
     fun loadContactTheme(recipient: String) {
         viewModelScope.launch {
-            val photoUri = repository.resolvePhotoUri(recipient) ?: return@launch
-            _seedColor.value = repository.extractContactSeed(photoUri)
+            val uri = repository.resolvePhotoUri(recipient) ?: return@launch
+            _photoUri.value = uri
+            _seedColor.value = repository.extractContactSeed(uri)
         }
     }
 

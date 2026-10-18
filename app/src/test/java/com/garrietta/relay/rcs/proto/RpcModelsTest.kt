@@ -2,7 +2,9 @@ package com.garrietta.relay.rcs.proto
 
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
+import com.garrietta.relay.rcs.pblite.asList
 import com.garrietta.relay.rcs.pblite.asMsg
+import com.garrietta.relay.rcs.pblite.msg
 import com.garrietta.relay.rcs.pblite.num
 import com.garrietta.relay.rcs.pblite.str
 import org.junit.Assert.assertEquals

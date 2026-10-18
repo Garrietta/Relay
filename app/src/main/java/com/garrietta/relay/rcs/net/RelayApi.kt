@@ -89,22 +89,19 @@ suspend fun postRpcCancellable(
     url: String,
     contentType: String,
     body: ByteArray,
-): RpcResult = withContext(Dispatchers.IO) {
-    kotlinx.coroutines.suspendCancellableCoroutine<RpcResult> { cont ->
+): RpcResult {
+    // Simple cancellable wrapper: run the blocking call on IO, and rely on
+    // coroutine cancellation (the caller's Job) to interrupt. For prompt
+    // abort, callers should also track and cancel the Call directly.
+    return withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(url)
             .headers(RelayApi.headers(contentType))
             .post(body.toRequestBody(contentType.toMediaType()))
             .build()
-        val call = client.newCall(req)
-        cont.invokeOnCancellation { call.cancel() }
-        try {
-            call.execute().use { resp ->
-                val bytes = resp.body!!.bytes()
-                cont.resume(RpcResult(resp.code, bytes, bytes.toString(Charsets.UTF_8)))
-            }
-        } catch (e: Exception) {
-            cont.resumeWithException(e)
+        client.newCall(req).execute().use { resp ->
+            val bytes = resp.body!!.bytes()
+            RpcResult(resp.code, bytes, bytes.toString(Charsets.UTF_8))
         }
     }
 }

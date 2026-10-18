@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
+import android.util.Log
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.transport.IncomingMessage
@@ -23,7 +24,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+private const val TAG = "UnifiedInbox"
 
 /**
  * Merges all [Transport]s into one chronological unified inbox.
@@ -48,6 +53,13 @@ class UnifiedInboxRepository(
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
     private val refreshTick = MutableStateFlow(0)
+
+    /**
+     * Serializes conversation loads. Concurrent refreshes race the Telephony
+     * provider (DB-locked failures) and each other; without this, a failed
+     * load could win the race and clobber a good list.
+     */
+    private val refreshMutex = Mutex()
 
     init {
         // Observe the Telephony provider: any SMS/MMS change refreshes the inbox.
@@ -78,48 +90,93 @@ class UnifiedInboxRepository(
 
     fun refresh() {
         scope.launch {
-            _conversations.value = loadConversations()
-            refreshTick.value += 1
+            // A failed load must NEVER clobber the last good list — that
+            // single defect is what wiped the inbox on reopen. Null means
+            // "load failed"; only a real result replaces the state.
+            refreshMutex.withLock {
+                val loaded = loadConversations()
+                if (loaded == null) {
+                    Log.w(TAG, "refresh: conversation load failed; keeping last-good list")
+                } else {
+                    _conversations.value = loaded
+                    refreshTick.value += 1
+                }
+            }
         }
     }
 
     /** Emits whenever the inbox data changes; chat screens collect to reload. */
     fun inboxChanges(): Flow<Int> = refreshTick
 
-    suspend fun loadConversations(): List<Conversation> = withContext(Dispatchers.IO) {
+    /**
+     * Loads the conversation list, or null when the load FAILED. Null is
+     * distinct from "no conversations": [refresh] keeps the last-good list on
+     * null so a transient provider failure can never wipe the inbox.
+     *
+     * Thread list: content://mms-sms/conversations?simple=true — the standard
+     * Telephony.Threads URI; the `simple` flag is honored by AOSP's
+     * MmsSmsProvider. Note its `snippet` column comes back blank for MMS
+     * threads on Samsung's provider, hence the [fallbackSnippet] below.
+     */
+    suspend fun loadConversations(): List<Conversation>? = withContext(Dispatchers.IO) {
         val out = mutableListOf<Conversation>()
         try {
             val uri = Uri.parse("content://mms-sms/conversations?simple=true")
             val projection = arrayOf("_id", "date", "message_count", "snippet", "read")
-            context.contentResolver.query(uri, projection, null, null, "date DESC")
-                ?.use { c ->
-                    val idI = c.getColumnIndex("_id")
-                    val dateI = c.getColumnIndex("date")
-                    val countI = c.getColumnIndex("message_count")
-                    val snippetI = c.getColumnIndex("snippet")
-                    val readI = c.getColumnIndex("read")
-                    while (c.moveToNext()) {
-                        val threadId = if (idI >= 0) c.getLong(idI) else continue
-                        val address = threadAddress(threadId) ?: continue
-                        val snippet = if (snippetI >= 0) c.getString(snippetI).orEmpty() else ""
-                        out.add(
-                            Conversation(
-                                threadId = threadId,
-                                address = address,
-                                displayName = contactLookup.displayName(address),
-                                snippet = snippet,
-                                date = if (dateI >= 0) c.getLong(dateI) else 0L,
-                                unread = !(readI >= 0 && c.getInt(readI) == 1),
-                                messageCount = if (countI >= 0) c.getInt(countI) else 0,
-                                transportLabel = if (looksLikeMmsThread(threadId)) "MMS" else "SMS",
-                                photoUri = contactLookup.photoUri(address),
-                            )
-                        )
+            val cursor = context.contentResolver.query(uri, projection, null, null, "date DESC")
+            if (cursor == null) {
+                // Busy/unavailable provider — transient, not "no conversations".
+                Log.w(TAG, "loadConversations: provider returned null cursor")
+                return@withContext null
+            }
+            var rows = 0
+            var dropped = 0
+            cursor.use { c ->
+                val idI = c.getColumnIndex("_id")
+                val dateI = c.getColumnIndex("date")
+                val countI = c.getColumnIndex("message_count")
+                val snippetI = c.getColumnIndex("snippet")
+                val readI = c.getColumnIndex("read")
+                while (c.moveToNext()) {
+                    rows++
+                    val threadId = if (idI >= 0) c.getLong(idI) else continue
+                    val address = threadAddress(threadId)
+                    if (address == null) {
+                        dropped++
+                        Log.w(TAG, "loadConversations: no address for thread $threadId; dropping row")
+                        continue
                     }
+                    val providerSnippet = if (snippetI >= 0) c.getString(snippetI).orEmpty() else ""
+                    val snippet = providerSnippet.ifBlank { fallbackSnippet(threadId) }
+                    out.add(
+                        Conversation(
+                            threadId = threadId,
+                            address = address,
+                            displayName = contactLookup.displayName(address),
+                            snippet = snippet,
+                            date = if (dateI >= 0) c.getLong(dateI) else 0L,
+                            unread = !(readI >= 0 && c.getInt(readI) == 1),
+                            messageCount = if (countI >= 0) c.getInt(countI) else 0,
+                            transportLabel = if (looksLikeMmsThread(threadId)) "MMS" else "SMS",
+                            photoUri = contactLookup.photoUri(address),
+                        )
+                    )
                 }
-        } catch (_: SecurityException) {
+            }
+            if (rows > 0 && dropped == rows) {
+                // Every row failed address resolution — systemic failure, not
+                // an empty inbox. Null keeps the last-good list.
+                Log.w(TAG, "loadConversations: all $rows threads dropped in address resolution")
+                return@withContext null
+            }
+        } catch (e: SecurityException) {
             // READ_SMS not granted yet — empty inbox until permissions arrive.
-        } catch (_: Exception) { /* keep what we have */ }
+            Log.w(TAG, "loadConversations: READ_SMS not granted", e)
+            return@withContext null
+        } catch (e: Exception) {
+            Log.w(TAG, "loadConversations: query failed", e)
+            return@withContext null
+        }
         out
     }
 
@@ -284,6 +341,46 @@ class UnifiedInboxRepository(
 
     // ---- provider helpers ----
 
+    /**
+     * Newest message text for [threadId], used when the conversations
+     * provider's snippet column is blank (MMS threads with ?simple=true on
+     * Samsung's provider). Newest of the latest SMS body and the latest MMS
+     * text part wins.
+     */
+    private fun fallbackSnippet(threadId: Long): String {
+        var best: String? = null
+        var bestDate = -1L
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://sms"),
+                arrayOf("body", "date"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val body = c.getString(0)
+                    if (!body.isNullOrBlank()) {
+                        best = body
+                        bestDate = c.getLong(1)
+                    }
+                }
+            }
+        } catch (_: Exception) { }
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id", "date"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val text = mmsText(c.getLong(0))
+                    val date = c.getLong(1) * 1000L
+                    if (text.isNotBlank() && date >= bestDate) best = text
+                }
+            }
+        } catch (_: Exception) { }
+        return best.orEmpty()
+    }
+
     private fun threadAddress(threadId: Long): String? {
         // Prefer the latest SMS address…
         try {
@@ -395,11 +492,14 @@ class UnifiedInboxRepository(
     }
 }
 
-/** In-memory cache over PhoneLookup. */
+/** In-memory cache over PhoneLookup. Methods are synchronized: refreshes run
+ * on Dispatchers.IO and must never hit ConcurrentModificationException on
+ * these maps (which used to surface as a swallowed load failure). */
 private class ContactLookup(private val context: Context) {
     private val cache = mutableMapOf<String, String>()
     private val photoCache = mutableMapOf<String, String?>()
 
+    @Synchronized
     fun displayName(address: String): String {
         cache[address]?.let { return it }
         val name = try {
@@ -423,6 +523,7 @@ private class ContactLookup(private val context: Context) {
     }
 
     /** Profile photo URI for [address], or null when the contact has none. */
+    @Synchronized
     fun photoUri(address: String): String? {
         if (photoCache.containsKey(address)) return photoCache[address]
         val uri = try {

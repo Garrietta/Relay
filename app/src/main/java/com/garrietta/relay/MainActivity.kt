@@ -58,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -107,9 +108,15 @@ class MainActivity : ComponentActivity() {
         // ever show an unthemed color; re-apply (animated) on theme changes.
         applyWindowBackgroundForTheme(animated = false)
         lifecycleScope.launch {
-            settingsVm.themeMode.collect { applyWindowBackgroundForTheme(animated = true) }
+            settingsVm.themeMode.collect {
+                applyWindowBackgroundForTheme(animated = true)
+                applySystemBarAppearance()
+            }
         }
         enableEdgeToEdge()
+        // After enableEdgeToEdge: its SystemBarStyle.auto detection follows the
+        // SYSTEM theme, not the app's override — our explicit flags win.
+        applySystemBarAppearance()
         requestMessagingPermissions()
 
         setContent {
@@ -450,6 +457,33 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Effective dark/light from the user's theme setting (System follows the
+     * current uiMode). Single source of truth for window background AND
+     * system-bar appearance so they can never disagree.
+     */
+    private fun isEffectiveDarkTheme(): Boolean = when (settingsVm.themeMode.value) {
+        ThemeMode.SYSTEM ->
+            (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+
+    /**
+     * Drives status/navigation-bar icon appearance from the effective theme:
+     * light icons on dark theme, dark icons on light theme. Round 4 removed
+     * the hardcoded windowLightStatusBar and nothing has driven these flags
+     * since — leaving dark icons on the dark background (nearly invisible).
+     * Re-applied on every theme change (see onCreate collector).
+     */
+    private fun applySystemBarAppearance() {
+        val dark = isEffectiveDarkTheme()
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = !dark
+        controller.isAppearanceLightNavigationBars = !dark
+    }
+
+    /**
      * Resolves the effective dark/light mode from the user's theme setting and
      * paints the window background to match, so transitions never reveal a
      * wrong-mode color. On theme changes the color ANIMATES instead of
@@ -457,13 +491,7 @@ class MainActivity : ComponentActivity() {
      * Uses the real dynamic scheme background on S+ so it matches Compose.
      */
     private fun applyWindowBackgroundForTheme(animated: Boolean) {
-        val dark = when (settingsVm.themeMode.value) {
-            ThemeMode.SYSTEM ->
-                (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                    Configuration.UI_MODE_NIGHT_YES
-            ThemeMode.LIGHT -> false
-            ThemeMode.DARK -> true
-        }
+        val dark = isEffectiveDarkTheme()
         val target = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (dark) dynamicDarkColorScheme(this).background
             else dynamicLightColorScheme(this).background

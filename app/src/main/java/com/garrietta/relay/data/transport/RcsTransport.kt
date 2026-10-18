@@ -214,10 +214,7 @@ class RcsTransport(context: Context) : Transport {
 
     private fun startSession() {
         if (session.start()) {
-            scope.launch {
-                runCatching { _rcsConversations.value = session.listConversations() }
-                    .onFailure { Log.w(TAG, "listConversations failed: ${it.message}") }
-            }
+            scope.launch { refreshConversations() }
         }
     }
 

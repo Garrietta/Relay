@@ -98,8 +98,9 @@ class ChatViewModel(
     private val pendingOptimistic = mutableMapOf<String, Message>()
 
     init {
-        if (rcsConversationId != null) {
-            initRcs(rcsConversationId)
+        val initialRcsId = rcsConversationId
+        if (initialRcsId != null) {
+            initRcs(initialRcsId)
         } else if (address.isNotBlank() && repository.isRcsPaired()) {
             // Paired + brand-new conversation (e.g. the self-chat test):
             // resolve the server conversation first, then run the RCS path.

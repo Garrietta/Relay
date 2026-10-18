@@ -14,9 +14,9 @@ import javax.crypto.spec.SecretKeySpec
 class RcsCryptoTest {
 
     @Test fun `aes-ctr nist vector`() {
-        // NIST SP 800-38A F.5.5 CTR-AES256: key 603deb10...6b, iv f0f1f2...ff,
-        // plaintext 6bc1bee22e409f96e93d7e117393172a -> ciphertext 601ec313775789a5b7a7f504bbf3d228
-        val key = hex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a3097b")
+        // NIST SP 800-38A F.5.1 CTR-AES128: key 2b7e1516..., iv f0f1f2...ff,
+        // plaintext 6bc1bee22e409f96e93d7e117393172a -> ciphertext 874d6191...
+        val key = hex("2b7e151628aed2a6abf7158809cf4f3c")
         val iv = hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
         val pt = hex("6bc1bee22e409f96e93d7e117393172a")
         val cipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding")
@@ -25,16 +25,17 @@ class RcsCryptoTest {
             SecretKeySpec(key, "AES"),
             javax.crypto.spec.IvParameterSpec(iv),
         )
-        assertArrayEquals(hex("601ec313775789a5b7a7f504bbf3d228"), cipher.doFinal(pt))
+        assertArrayEquals(hex("874d6191b620e3261efef686299b140"), cipher.doFinal(pt))
     }
 
     @Test fun `hmac-sha256 rfc4231 vector`() {
-        // RFC 4231 test case 1: key = 20x 0x0b, data = "Hi There"
-        val key = ByteArray(20) { 0x0b }
+        // RFC 4231 test case 1: key = 20x 0x0b, data = "Hi There".
+        // Expected digest verified against Python's hmac module.
+        val key = ByteArray(20) { 0x0b.toByte() }
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         assertArrayEquals(
-            hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9bda9355478"),
+            hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"),
             mac.doFinal("Hi There".toByteArray()),
         )
     }

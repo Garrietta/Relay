@@ -70,6 +70,12 @@ object M3Duration {
     const val TOP_LEVEL_IN = 250
     const val PREDICTIVE_PROGRESS_TOTAL = 100
     const val PREDICTIVE_SWAP_THRESHOLD = 35
+    // Expressive duration tokens (M3 spec values).
+    const val Short2 = 200
+    const val Short4 = 400
+    const val Medium1 = 250
+    const val Medium2 = 300
+    const val Long2 = 500
 }
 
 /** Shared-axis travel is a fraction of the container width, not a fixed dp value. */
@@ -283,7 +289,6 @@ fun Modifier.motionSharedElement(key: String, shape: Shape? = null): Modifier {
                 sharedContentState = sharedContentState,
                 animatedVisibilityScope = animatedScope,
                 boundsTransform = boundsTransform,
-                clipInOverlayDuringTransition = overlayClip,
             )
         }
     }

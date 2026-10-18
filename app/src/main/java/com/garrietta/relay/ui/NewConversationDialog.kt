@@ -8,11 +8,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -46,6 +48,7 @@ import androidx.compose.ui.window.DialogWindowProvider
  * Issue 3: bubbly softly-rounded surface (large radii), with a
  * springy scale+fade entrance.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewConversationDialog(
     onDismiss: () -> Unit,

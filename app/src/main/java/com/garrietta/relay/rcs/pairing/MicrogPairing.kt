@@ -139,9 +139,13 @@ object MicrogPairing {
                     account, OAUTH_LOGIN_SCOPE, null, null,
                     AccountManagerCallback { f ->
                         try {
-                            cont.resume(f.result)
+                            // NOTE: this project's coroutines version has no
+                            // default for onCancellation, and resumeWithException
+                            // doesn't resolve here — pass null explicitly and
+                            // use the Continuation.resumeWith member instead.
+                            cont.resume(f.result, null)
                         } catch (e: Exception) {
-                            cont.resumeWithException(e)
+                            cont.resumeWith(Result.failure(e))
                         }
                     },
                     null,

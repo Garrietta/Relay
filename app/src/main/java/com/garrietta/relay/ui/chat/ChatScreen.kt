@@ -12,15 +12,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -61,13 +65,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -76,7 +86,9 @@ import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
 import com.garrietta.relay.ui.theme.SquircleShape
 import com.garrietta.relay.ui.theme.WavyBlobShape
+import com.garrietta.relay.ui.theme.expressiveShape
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
+import com.garrietta.relay.ui.theme.senderBubbleColors
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,9 +111,14 @@ fun ChatScreen(
     val seedColor by viewModel.seedColor.collectAsState()
     val photoUri by viewModel.photoUri.collectAsState()
     val selectedIds by viewModel.selectedIds.collectAsState()
+    val participants by viewModel.participants.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    // Group threads (>1 distinct participant) get the clustered header and
+    // per-sender bubble theming; 1:1 chats are untouched.
+    val isGroup = participants.size > 1
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     // Per-contact theming: seed the chat color scheme from the contact's
     // profile photo (Palette). Falls back to the wallpaper dynamic scheme.
@@ -119,8 +136,18 @@ fun ChatScreen(
     }
 
     MaterialTheme(colorScheme = chatScheme) {
+        // Inside the seeded scheme: the thread background the sender-name
+        // tones are contrast-checked against.
+        val threadBackground = MaterialTheme.colorScheme.surfaceContainerLow
         Scaffold(
             topBar = {
+                if (isGroup) {
+                    GroupChatHeader(
+                        participants = participants,
+                        transportLabel = transportLabel,
+                        onBack = onBack,
+                    )
+                } else {
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -131,6 +158,7 @@ fun ChatScreen(
                             ChatAvatar(
                                 name = displayName,
                                 photoUri = photoUri,
+                                shapeKey = recipient,
                                 modifier = Modifier.motionSharedAvatar(
                                     SharedElementKeys.avatar(threadId),
                                     shape = WavyBlobShape,
@@ -162,6 +190,7 @@ fun ChatScreen(
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
                     ),
                 )
+                }
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { padding ->
@@ -210,6 +239,16 @@ fun ChatScreen(
                                 selected = message.id in selectedIds,
                                 selectionActive = selectedIds.isNotEmpty(),
                                 onToggleSelect = { viewModel.toggleSelect(message.id) },
+                                // Group mode: resolve the sender for
+                                // per-sender bubble theming. 1:1 chats pass
+                                // null and render exactly as before.
+                                sender = if (isGroup && !message.isOutgoing)
+                                    viewModel.senderFor(message.address) else null,
+                                senderSeed = if (isGroup && !message.isOutgoing)
+                                    viewModel.seedFor(message.address) else null,
+                                isGroup = isGroup,
+                                threadBackground = threadBackground,
+                                darkTheme = darkTheme,
                             )
                         }
                     }
@@ -229,8 +268,111 @@ fun ChatScreen(
 }
 
 /**
+ * Group chat header: a centered cluster of overlapping avatars in UNEVEN
+ * sizes — contact photos and initial-shapes scattered with playful offsets,
+ * like a collage rather than a grid — with the group name below. Each mini
+ * avatar takes its own shape from the per-session rotation, so the cluster
+ * itself is a sampler of the shape vocabulary.
+ */
+@Composable
+private fun GroupChatHeader(
+    participants: List<Participant>,
+    transportLabel: String,
+    onBack: () -> Unit,
+) {
+    val groupName = remember(participants) {
+        val names = participants.map {
+            it.displayName.substringBefore(" ").ifBlank { it.address }
+        }
+        if (names.size <= 3) names.joinToString(", ")
+        else names.take(3).joinToString(", ") + " +${names.size - 3}"
+    }
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(bottom = 12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Spacer(Modifier.weight(1f))
+            }
+            GroupAvatarCluster(
+                participants = participants,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = groupName,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+            )
+            Text(
+                text = "${participants.size} people · $transportLabel",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/**
+ * Scattered avatar collage: up to seven participants at deliberately uneven
+ * sizes, offset from center on both axes (deterministic scatter, not a grid),
+ * later avatars drawing over earlier ones.
+ */
+@Composable
+private fun GroupAvatarCluster(
+    participants: List<Participant>,
+    modifier: Modifier = Modifier,
+) {
+    val shown = participants.take(7)
+    // Uneven sizes — the collage feel.
+    val sizes = listOf(46, 32, 50, 30, 42, 34, 48)
+    Box(
+        modifier = modifier.height(68.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        shown.forEachIndexed { index, p ->
+            val sizeDp = sizes[index % sizes.size].dp
+            val xOff = ((index - (shown.size - 1) / 2f) * 26f).dp
+            val yOff = (((index * 37) % 3) - 1) * 7f
+            ContactAvatar(
+                photoUri = p.photoUri,
+                name = p.displayName.ifBlank { p.address },
+                size = sizeDp,
+                shapeKey = p.address,
+                textStyle = MaterialTheme.typography.titleSmall,
+                modifier = Modifier
+                    .offset(x = xOff, y = yOff.dp)
+                    .zIndex((shown.size - index).toFloat()),
+            )
+        }
+    }
+}
+
+/**
  * M3E shape-as-state: bubbles rest soft and bubbly; long-press selection
  * squares them off (and tints them) to communicate the state change.
+ *
+ * In GROUP chats, incoming bubbles are themed per SENDER: the bubble fill
+ * comes from the sender's avatar image (Palette seed) and the sender's name
+ * rides above the bubble in a matching tone — the reference's high-variety
+ * group look. 1:1 chats keep the neutral incoming treatment.
  */
 @Composable
 private fun MessageBubble(
@@ -239,6 +381,11 @@ private fun MessageBubble(
     selected: Boolean,
     selectionActive: Boolean,
     onToggleSelect: () -> Unit,
+    sender: Participant? = null,
+    senderSeed: Color? = null,
+    isGroup: Boolean = false,
+    threadBackground: Color = Color.Transparent,
+    darkTheme: Boolean = false,
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
@@ -248,14 +395,20 @@ private fun MessageBubble(
     val shape = remember(squareness, message.isOutgoing, position) {
         lerpBubbleShape(squareness, message.isOutgoing, position)
     }
+    val groupIncoming = isGroup && !message.isOutgoing && sender != null
+    // Per-sender colors; every text pair is contrast-verified inside.
+    val (senderContainer, senderOnContainer, senderNameTone) =
+        senderBubbleColors(senderSeed, threadBackground, darkTheme, MaterialTheme.colorScheme)
     val containerColor = when {
         selected -> MaterialTheme.colorScheme.secondaryContainer
         message.isOutgoing -> MaterialTheme.colorScheme.primaryContainer
+        groupIncoming -> senderContainer
         else -> MaterialTheme.colorScheme.surfaceContainerHigh
     }
     val contentColor = when {
         selected -> MaterialTheme.colorScheme.onSecondaryContainer
         message.isOutgoing -> MaterialTheme.colorScheme.onPrimaryContainer
+        groupIncoming -> senderOnContainer
         else -> MaterialTheme.colorScheme.onSurface
     }
 
@@ -263,20 +416,49 @@ private fun MessageBubble(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
     ) {
-        Box(
-            modifier = Modifier
-                .clip(shape)
-                .background(containerColor)
-                .combinedClickable(
-                    onClick = { if (selectionActive) onToggleSelect() },
-                    onLongClick = onToggleSelect,
+        if (isGroup && !message.isOutgoing && sender != null) {
+            // Sender identity: mini avatar in the sender's own expressive
+            // shape, name above the bubble in the sender's tone.
+            // (Smart-cast: the null check is inline so `sender` is non-null.)
+            Row(verticalAlignment = Alignment.Top) {
+                ContactAvatar(
+                    photoUri = sender.photoUri,
+                    name = sender.displayName.ifBlank { sender.address },
+                    size = 28.dp,
+                    shapeKey = sender.address,
+                    textStyle = MaterialTheme.typography.labelMedium,
                 )
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        ) {
-            Text(
-                message.body,
-                style = MaterialTheme.typography.bodyLarge,
-                color = contentColor,
+                Spacer(Modifier.width(8.dp))
+                Column(
+                    modifier = Modifier.weight(1f, fill = false),
+                    horizontalAlignment = Alignment.Start,
+                ) {
+                    Text(
+                        text = sender.displayName.ifBlank { sender.address },
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = senderNameTone,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    BubbleBox(
+                        shape = shape,
+                        containerColor = containerColor,
+                        contentColor = contentColor,
+                        selectionActive = selectionActive,
+                        onToggleSelect = onToggleSelect,
+                        body = message.body,
+                    )
+                }
+            }
+        } else {
+            BubbleBox(
+                shape = shape,
+                containerColor = containerColor,
+                contentColor = contentColor,
+                selectionActive = selectionActive,
+                onToggleSelect = onToggleSelect,
+                body = message.body,
             )
         }
         if (message.isMms) {
@@ -290,6 +472,34 @@ private fun MessageBubble(
     }
 }
 
+/** The bubble surface itself, shared by the 1:1 and group layouts. */
+@Composable
+private fun BubbleBox(
+    shape: RoundedCornerShape,
+    containerColor: Color,
+    contentColor: Color,
+    selectionActive: Boolean,
+    onToggleSelect: () -> Unit,
+    body: String,
+) {
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(containerColor)
+            .combinedClickable(
+                onClick = { if (selectionActive) onToggleSelect() },
+                onLongClick = onToggleSelect,
+            )
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Text(
+            body,
+            style = MaterialTheme.typography.bodyLarge,
+            color = contentColor,
+        )
+    }
+}
+
 /** Corner radii for the soft resting bubble shape. */
 private data class BubbleCorners(
     val topStart: Dp,
@@ -299,9 +509,11 @@ private data class BubbleCorners(
 )
 
 private fun bubbleCorners(isOutgoing: Boolean, position: ItemPosition): BubbleCorners {
-    val large = 28.dp
-    val small = 10.dp
-    val tail = 4.dp
+    // Generous radii over the background underlay (Garrett's reference):
+    // big soft rounds, tighter sender-side tails.
+    val large = 30.dp
+    val small = 12.dp
+    val tail = 6.dp
     return when (position) {
         ItemPosition.SINGLE -> BubbleCorners(
             topStart = large, topEnd = large,
@@ -396,33 +608,56 @@ private fun Composer(
             maxLines = 6,
         )
         Spacer(Modifier.height(8.dp))
-        // Attached attachment bar: persistent row of rounded-square buttons
-        // beneath the text box; send sits at the row's right end.
+        // Attached attachment bar: persistent row of expressive buttons
+        // beneath the text box; send sits at the row's right end. Each
+        // attachment button takes a DIFFERENT shape and tonal color from the
+        // vocabulary (one family, varied members); the send button keeps the
+        // densest color in the scheme.
+        val attachStyles = listOf(
+            AttachSpec(
+                icon = Icons.Filled.Image,
+                label = "Gallery",
+                shape = expressiveShape("Cookie6"),
+                container = MaterialTheme.colorScheme.secondaryContainer,
+                content = MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
+            AttachSpec(
+                icon = Icons.Filled.PhotoCamera,
+                label = "Camera",
+                shape = expressiveShape("Sunny"),
+                container = MaterialTheme.colorScheme.tertiaryContainer,
+                content = MaterialTheme.colorScheme.onTertiaryContainer,
+            ),
+            AttachSpec(
+                icon = Icons.Filled.Gif,
+                label = "GIF",
+                shape = expressiveShape("Gem"),
+                container = MaterialTheme.colorScheme.secondaryContainer,
+                content = MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
+            AttachSpec(
+                icon = Icons.Filled.AttachFile,
+                label = "Files",
+                shape = expressiveShape("Pill"),
+                container = MaterialTheme.colorScheme.tertiaryContainer,
+                content = MaterialTheme.colorScheme.onTertiaryContainer,
+            ),
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            AttachmentBarButton(
-                icon = Icons.Filled.Image,
-                label = "Gallery",
-                onClick = onAttachmentSoon,
-            )
-            AttachmentBarButton(
-                icon = Icons.Filled.PhotoCamera,
-                label = "Camera",
-                onClick = onAttachmentSoon,
-            )
-            AttachmentBarButton(
-                icon = Icons.Filled.Gif,
-                label = "GIF",
-                onClick = onAttachmentSoon,
-            )
-            AttachmentBarButton(
-                icon = Icons.Filled.AttachFile,
-                label = "Files",
-                onClick = onAttachmentSoon,
-            )
+            for (spec in attachStyles) {
+                AttachmentBarButton(
+                    icon = spec.icon,
+                    label = spec.label,
+                    shape = spec.shape,
+                    containerColor = spec.container,
+                    contentColor = spec.content,
+                    onClick = onAttachmentSoon,
+                )
+            }
             Spacer(Modifier.weight(1f))
             // Large circular send button — the densest color in the scheme.
             IconButton(
@@ -461,15 +696,26 @@ private fun Composer(
 }
 
 /**
- * One persistent attachment button: SQUIRCLE (expressive superellipse),
- * tonal container, no toggle behavior. Presses bounce and the squircle
- * tightens slightly — shape-as-state. Picks are stubbed ("coming soon").
+ * One persistent attachment button: an expressive shape + tonal color from
+ * the vocabulary (not all squircles), no toggle behavior. Presses bounce —
+ * shape-as-state via press scale. Picks are stubbed ("coming soon").
  */
+private data class AttachSpec(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val label: String,
+    val shape: Shape,
+    val container: Color,
+    val content: Color,
+)
+
 @Composable
 private fun AttachmentBarButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit,
+    shape: Shape = SquircleShape,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -481,8 +727,8 @@ private fun AttachmentBarButton(
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        shape = SquircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = shape,
+        color = containerColor,
         tonalElevation = 1.dp,
         modifier = Modifier
             .size(52.dp)
@@ -495,7 +741,7 @@ private fun AttachmentBarButton(
             Icon(
                 icon,
                 contentDescription = label,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = contentColor,
                 modifier = Modifier.size(24.dp),
             )
         }
@@ -509,12 +755,18 @@ private fun formatDay(millis: Long): String =
     SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(millis))
 
 @Composable
-private fun ChatAvatar(name: String, photoUri: String?, modifier: Modifier = Modifier) {
+private fun ChatAvatar(
+    name: String,
+    photoUri: String?,
+    shapeKey: String,
+    modifier: Modifier = Modifier,
+) {
     ContactAvatar(
         photoUri = photoUri,
         name = name,
         modifier = modifier,
         size = 44.dp,
+        shapeKey = shapeKey,
         textStyle = MaterialTheme.typography.titleLarge,
     )
 }

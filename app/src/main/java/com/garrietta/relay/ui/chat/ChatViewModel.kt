@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
@@ -63,10 +64,52 @@ class ChatViewModel(
     private val _photoUri = MutableStateFlow<String?>(null)
     val photoUri: StateFlow<String?> = _photoUri
 
+    /**
+     * Group participants (1:1 threads: the single other party). Drives the
+     * group header cluster and per-sender bubble theming. Keyed maps below
+     * are indexed by NORMALIZED address so message senders match regardless
+     * of provider address formatting.
+     */
+    private val _participants = MutableStateFlow<List<Participant>>(emptyList())
+    val participants: StateFlow<List<Participant>> = _participants
+
+    /** Palette seed per participant (null = no photo) for per-sender bubbles. */
+    private val _senderSeeds = MutableStateFlow<Map<String, androidx.compose.ui.graphics.Color?>>(emptyMap())
+    val senderSeeds: StateFlow<Map<String, androidx.compose.ui.graphics.Color?>> = _senderSeeds
+
+    private var participantIndex: Map<String, Participant> = emptyMap()
+
     init {
         reload()
+        loadParticipants()
         viewModelScope.launch {
             repository.inboxChanges().collect { reload() }
+        }
+    }
+
+    /** Resolves the participant who sent [address], or null when unknown. */
+    fun senderFor(address: String): Participant? {
+        val idx = participantIndex
+        return idx[address] ?: idx[repository.normalizedAddress(address)]
+    }
+
+    /** Palette seed for the sender of [address] (null = no photo). */
+    fun seedFor(address: String): androidx.compose.ui.graphics.Color? {
+        val seeds = _senderSeeds.value
+        return seeds[address] ?: seeds[repository.normalizedAddress(address)]
+    }
+
+    fun loadParticipants() {
+        viewModelScope.launch {
+            val parts = repository.getGroupParticipants(threadIds)
+            _participants.value = parts
+            participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
+            val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
+            for (p in parts) {
+                val key = repository.normalizedAddress(p.address)
+                seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
+            }
+            _senderSeeds.value = seeds
         }
     }
 

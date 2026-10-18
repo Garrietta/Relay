@@ -36,3 +36,10 @@ data class Message(
 
 /** Theme preference persisted in SharedPreferences. */
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
+/** One participant of a conversation: 1:1 threads have exactly one. */
+data class Participant(
+    val address: String,
+    val displayName: String,
+    val photoUri: String?,
+)

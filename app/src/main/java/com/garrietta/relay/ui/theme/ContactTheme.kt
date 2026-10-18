@@ -238,3 +238,43 @@ private fun ensureContrast(fg: Int, bg: Int, minRatio: Float = 4.5f): Int {
     }
     return c
 }
+
+/**
+ * Per-sender bubble colors for GROUP chats: each incoming bubble is filled
+ * with the color derived from THAT SENDER's avatar image (Palette seed), so
+ * a group thread reads as a high-variety color conversation — Garrett's
+ * "more colors" directive, scoped to where variety belongs.
+ *
+ * Returns (bubbleContainer, onBubbleContainer, senderNameTone). Every
+ * text-bearing pair is verified against WCAG AA (4.5:1) via the same
+ * [ensureContrast] guard as the chat schemes — contrast is non-negotiable,
+ * color density is not. Null seed (no photo / extraction failed) falls back
+ * to the neutral 1:1 incoming treatment so nothing ever looks broken.
+ */
+fun senderBubbleColors(
+    seed: Color?,
+    threadBackground: Color,
+    darkTheme: Boolean,
+    fallback: ColorScheme,
+): Triple<Color, Color, Color> {
+    if (seed == null) {
+        return Triple(
+            fallback.surfaceContainerHigh,
+            fallback.onSurface,
+            fallback.onSurfaceVariant,
+        )
+    }
+    val s = seed.toArgb()
+    val white = android.graphics.Color.WHITE
+    val black = android.graphics.Color.BLACK
+    fun blendTo(target: Int, ratio: Float) = Color(ColorUtils.blendARGB(s, target, ratio))
+    // Pastel-but-present fill: the sender's color reads clearly without
+    // shouting over the message text.
+    val container = if (!darkTheme) blendTo(white, 0.74f) else blendTo(black, 0.60f)
+    val onContainer = Color(
+        ensureContrast(if (!darkTheme) black else white, container.toArgb())
+    )
+    // Sender name sits on the thread background, not the bubble.
+    val nameTone = Color(ensureContrast(s, threadBackground.toArgb()))
+    return Triple(container, onContainer, nameTone)
+}

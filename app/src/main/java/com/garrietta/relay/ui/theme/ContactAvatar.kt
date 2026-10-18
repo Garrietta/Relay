@@ -24,9 +24,13 @@ import coil.compose.AsyncImagePainter
 
 /**
  * Shared contact avatar: the contact's profile photo (content:// PHOTO_URI,
- * loaded with Coil) clipped to the wavy organic blob shape, with the initial
- * letter composed underneath so it shows through whenever there's no photo
- * or the load fails.
+ * loaded with Coil) clipped to an expressive shape, with the initial letter
+ * composed underneath so it shows through whenever there's no photo or the
+ * load fails.
+ *
+ * [shapeKey]: when provided, the avatar takes its shape from the per-session
+ * [AvatarShapeAssigner] rotation (a different M3E shape per contact,
+ * reshuffled every app startup). When null, [shape] is used as-is.
  *
  * When a photo IS present, it also feeds the per-contact Palette theming
  * (see ChatViewModel.loadContactTheme) — photo and color identity stay one.
@@ -38,9 +42,16 @@ fun ContactAvatar(
     modifier: Modifier = Modifier,
     size: Dp = 56.dp,
     shape: Shape = WavyBlobShape,
+    shapeKey: String? = null,
     textStyle: TextStyle = MaterialTheme.typography.headlineMedium,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // Expressive rotation wins over the explicit shape when a key is given.
+    val resolvedShape = if (shapeKey != null) {
+        remember(shapeKey) { AvatarShapeAssigner.shapeFor(shapeKey) }
+    } else {
+        shape
+    }
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(
@@ -53,7 +64,7 @@ fun ContactAvatar(
     Box(
         modifier = modifier
             .size(size)
-            .clip(shape)
+            .clip(resolvedShape)
             .background(bg),
         contentAlignment = Alignment.Center,
     ) {
@@ -74,7 +85,7 @@ fun ContactAvatar(
                 onState = { imgState = it },
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(shape),
+                    .clip(resolvedShape),
                 contentScale = ContentScale.Crop,
             )
             if (imgState is AsyncImagePainter.State.Loading) {

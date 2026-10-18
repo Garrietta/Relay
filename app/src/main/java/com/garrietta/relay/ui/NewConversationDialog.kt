@@ -21,12 +21,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +46,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
+import com.garrietta.relay.ui.theme.expressiveShape
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -220,7 +221,12 @@ fun NewConversationDialog(
                     Row(
                         modifier = Modifier.align(Alignment.End),
                     ) {
-                        TextButton(onClick = onDismiss) { Text("Cancel") }
+                        // Tonal button in a cookie shape — dialog actions are
+                        // part of the shape family too, not default pills.
+                        FilledTonalButton(
+                            onClick = onDismiss,
+                            shape = expressiveShape("Cookie4"),
+                        ) { Text("Cancel") }
                     }
                 }
             }
@@ -290,6 +296,7 @@ private fun ContactMatchRow(match: ContactMatch, onClick: () -> Unit) {
             photoUri = match.photoUri,
             name = match.name,
             size = 48.dp,
+            shapeKey = match.number,
             textStyle = MaterialTheme.typography.titleMedium,
         )
         Spacer(Modifier.width(14.dp))

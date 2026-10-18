@@ -6,6 +6,7 @@ import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.notifications.MessageNotifications
+import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 
 /**
  * Manual dependency graph (no DI framework for v1 — the graph is tiny).
@@ -26,6 +27,9 @@ class RelayApp : Application() {
     override fun onCreate() {
         super.onCreate()
         MessageNotifications.ensureChannel(this)
+        // Fresh avatar-shape variety on every cold start (Garrett: shapes
+        // "maybe even changing shape on each startup").
+        AvatarShapeAssigner.reshuffle()
     }
 }
 

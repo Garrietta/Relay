@@ -73,6 +73,7 @@ import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
+import com.garrietta.relay.ui.theme.expressiveShape
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -263,10 +264,11 @@ private fun CollapsingMessagesHeader(
 }
 
 /**
- * Floating "New conversation" pill — Google Messages M3E pattern. Wide pill,
- * large corner radius, primary container color, real elevation + shadow so it
- * reads as floating above the conversation list. Bouncy press-scale AND
- * corner morph (shape-as-state) in the unified spring language.
+ * Floating "New conversation" pill — Google Messages M3E pattern, but in
+ * Relay's voice: a WIDE clamshell from the expressive vocabulary instead of
+ * a plain pill, real elevation + shadow so it reads as floating above the
+ * conversation list. Bouncy press-scale in the unified spring language; the
+ * densest color in the scheme, per the expressive contrast rule.
  */
 @Composable
 private fun NewConversationPill(
@@ -280,16 +282,13 @@ private fun NewConversationPill(
         animationSpec = RelaySprings.bouncy(),
         label = "pillPress",
     )
-    // Shape-as-state: the pill's corners tighten while pressed.
-    val corner by animateDpAsState(
-        targetValue = if (pressed) 20.dp else 32.dp,
-        animationSpec = RelaySprings.bouncy(),
-        label = "pillCorner",
-    )
     Surface(
         onClick = onClick,
         interactionSource = interactionSource,
-        shape = RoundedCornerShape(corner),
+        // Not a plain pill: the wide clamshell from the shape set. The
+        // GenericShape sizes to the layout, so the vocabulary shape
+        // stretches into a broad expressive bar.
+        shape = expressiveShape("Clamshell"),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         tonalElevation = 3.dp,
@@ -562,6 +561,7 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
     ContactAvatar(
         photoUri = conversation.photoUri,
         name = conversation.displayName,
+        shapeKey = conversation.address.ifBlank { conversation.displayName },
         modifier = Modifier
             .motionSharedAvatar(
                 SharedElementKeys.avatar(conversation.threadId),
@@ -576,6 +576,10 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
     )
 }
 
+/**
+ * Transport chip: SMS gets the stadium pill, MMS the clover — two members
+ * of the same shape family, so the labels vary without clashing.
+ */
 @Composable
 private fun TransportChip(label: String) {
     Text(
@@ -583,7 +587,7 @@ private fun TransportChip(label: String) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier
-            .clip(CloverShape)
+            .clip(if (label == "MMS") CloverShape else RoundedCornerShape(percent = 50))
             .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(horizontal = 14.dp, vertical = 6.dp),
     )

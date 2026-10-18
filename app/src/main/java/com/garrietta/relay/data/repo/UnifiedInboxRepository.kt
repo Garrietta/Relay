@@ -10,6 +10,7 @@ import android.provider.ContactsContract
 import android.util.Log
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -509,6 +510,27 @@ class UnifiedInboxRepository(
         } catch (_: Exception) { }
         -1L
     }
+
+    /**
+     * All distinct participants across [threadIds], with resolved display
+     * names and photo URIs. 1:1 conversations return a single entry; group
+     * (multi-recipient MMS) threads return everyone. Drives the group chat
+     * header cluster and per-sender bubble theming.
+     */
+    suspend fun getGroupParticipants(threadIds: List<Long>): List<Participant> =
+        withContext(Dispatchers.IO) {
+            val addresses = threadIds.flatMap { threadRecipients(it) }.distinct()
+            addresses.map { address ->
+                Participant(
+                    address = address,
+                    displayName = contactLookup.displayName(address),
+                    photoUri = contactLookup.photoUri(address),
+                )
+            }
+        }
+
+    /** Public address normalizer for matching message senders to participants. */
+    fun normalizedAddress(address: String): String = normalizeAddress(address)
 
     fun observeIncoming(): Flow<IncomingMessage> = callbackFlow {
         val jobs = transports.map { t ->

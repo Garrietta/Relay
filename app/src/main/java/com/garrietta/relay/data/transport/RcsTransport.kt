@@ -10,8 +10,12 @@ import com.garrietta.relay.rcs.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -111,13 +115,25 @@ class RcsTransport(context: Context) : Transport {
 
     // ---------- pairing (used by the pairing UI) ----------
 
+    /**
+     * The in-flight pairing coroutine, tracked so [cancelPairing] can abort
+     * it promptly. Set by the pairing UI before calling [awaitQrPairing].
+     */
+    @Volatile
+    private var pairingJob: Job? = null
+
+    fun trackPairingJob(job: Job?) {
+        pairingJob?.cancel()
+        pairingJob = job
+    }
+
     /** Begins QR pairing; returns the QR content + session handles. */
     suspend fun beginQrPairing(): QrPairing.BegunPairing {
         _pairingState.value = RcsPairingState.PAIRING
         try {
             return QrPairing().begin()
         } catch (e: Exception) {
-            _pairingState.value = RcsPairingState.NOT_PAIRED
+            _pairingState.value = if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
             throw e
         }
     }
@@ -125,28 +141,103 @@ class RcsTransport(context: Context) : Transport {
     /**
      * Polls for the phone's pair event, persists on success, starts the
      * session. Returns true when paired.
+     *
+     * The state machine can never strand in PAIRING: a [withTimeout] bounds
+     * the whole attempt, and the finally block resets to the true session
+     * state on cancellation, timeout, or failure.
      */
     suspend fun awaitQrPairing(begun: QrPairing.BegunPairing): Boolean {
+        var done = false
         try {
-            val paired = QrPairing().awaitPairEvent(begun)
-            // Let the phone save the pair data before we reconnect (per spec).
-            delay(2000)
-            QrPairing().persist(com.garrietta.relay.rcs.session.AuthStore(appContext), begun, paired)
+            withTimeout(PAIRING_TIMEOUT_MS) {
+                val paired = QrPairing().awaitPairEvent(begun)
+                // Let the phone save the pair data before we reconnect (per spec).
+                delay(2000)
+                QrPairing().persist(com.garrietta.relay.rcs.session.AuthStore(appContext), begun, paired)
+                done = true
+            }
             _pairingState.value = RcsPairingState.PAIRED
             startSession()
             // Keep the long-poll alive under Doze (user is in the foreground here).
             com.garrietta.relay.rcs.service.RcsService.start(appContext)
             return true
-        } catch (e: PairingException) {
-            _pairingState.value = RcsPairingState.NOT_PAIRED
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "QR pairing timed out after ${PAIRING_TIMEOUT_MS}ms")
+            throw PairingException("Pairing timed out — try again")
+        } finally {
+            pairingJob = null
+            if (!done) {
+                _pairingState.value =
+                    if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+            }
+        }
+    }
+
+    /**
+     * Aborts any in-flight pairing and resets the state machine. Safe to
+     * call when nothing is pairing. The pairing screen calls this on dispose
+     * so backing out mid-pairing can never leave Settings stuck on
+     * "Pairing...".
+     */
+    fun cancelPairing() {
+        pairingJob?.cancel()
+        pairingJob = null
+        _pairingState.value =
+            if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+    }
+
+    // ---------- Gaia (Google-account / emoji) pairing ----------
+
+    /**
+     * Begins Gaia pairing with captured Google session cookies. Returns the
+     * begun handshake; the UI then drives the UKEY2 emoji verification.
+     */
+    suspend fun beginGaiaPairing(cookies: String): com.garrietta.relay.rcs.pairing.GaiaPairing.BegunGaia {
+        _pairingState.value = RcsPairingState.PAIRING
+        try {
+            return com.garrietta.relay.rcs.pairing.GaiaPairing().begin(cookies)
+        } catch (e: Exception) {
+            _pairingState.value = if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
             throw e
         }
     }
 
-    fun cancelPairing() {
-        _pairingState.value =
-            if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+    /**
+     * Completes Gaia pairing after the user confirms the emoji match.
+     * Persists the session and starts it, exactly like the QR path.
+     */
+    suspend fun awaitGaiaPairing(
+        begun: com.garrietta.relay.rcs.pairing.GaiaPairing.BegunGaia,
+        handshake: com.garrietta.relay.rcs.pairing.GaiaPairing.Ukey2Handshake,
+        serverPublicKey: java.security.PublicKey,
+    ): Boolean {
+        var done = false
+        try {
+            withTimeout(PAIRING_TIMEOUT_MS) {
+                val gaia = com.garrietta.relay.rcs.pairing.GaiaPairing()
+                val auth = gaia.finish(begun, handshake, serverPublicKey)
+                gaia.persist(com.garrietta.relay.rcs.session.AuthStore(appContext), auth, begun.cookies)
+                done = true
+            }
+            _pairingState.value = RcsPairingState.PAIRED
+            startSession()
+            com.garrietta.relay.rcs.service.RcsService.start(appContext)
+            return true
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "Gaia pairing timed out after ${PAIRING_TIMEOUT_MS}ms")
+            throw com.garrietta.relay.rcs.pairing.PairingException("Pairing timed out — try again")
+        } finally {
+            pairingJob = null
+            if (!done) {
+                _pairingState.value =
+                    if (session.isPaired) RcsPairingState.PAIRED else RcsPairingState.NOT_PAIRED
+            }
+        }
     }
+
+    /** Saved Google session cookies, if a Gaia sign-in was captured. */
+    fun loadGaiaCookies(): String? =
+        com.garrietta.relay.rcs.session.AuthStore(appContext).loadCookies()
 
     fun unpair() {
         com.garrietta.relay.rcs.session.AuthStore(appContext).clear()
@@ -157,6 +248,8 @@ class RcsTransport(context: Context) : Transport {
 
     companion object {
         private const val TAG = "RcsTransport"
+        /** Whole pairing attempt bound: 5 minutes, then back to idle. */
+        private const val PAIRING_TIMEOUT_MS = 5 * 60 * 1000L
     }
 }
 

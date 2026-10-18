@@ -1,6 +1,7 @@
 package com.garrietta.relay
 
 import android.app.Application
+import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -18,6 +19,9 @@ class RelayApp : Application() {
     val repository: UnifiedInboxRepository by lazy {
         UnifiedInboxRepository(this, smsTransport, rcsTransport)
     }
+
+    /** App-wide persistent contact color seed (see AppSeedStore). */
+    val appSeedStore: AppSeedStore by lazy { AppSeedStore(this) }
 
     override fun onCreate() {
         super.onCreate()

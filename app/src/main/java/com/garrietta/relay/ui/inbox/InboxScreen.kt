@@ -74,6 +74,7 @@ import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
 import com.garrietta.relay.ui.theme.expressiveShape
+import com.garrietta.relay.ui.theme.stretchedExpressiveShape
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat

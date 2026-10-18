@@ -54,7 +54,7 @@ class ProtoCodecTest {
 
     @Test fun `repeated fields decode as lists`() {
         val bytes = ProtoCodec.encode(
-            mapOf(4 to ProtoCodec.Rep(listOf(FieldVal.Str("a"), FieldVal.Str("b")))),
+            mapOf(4 to FieldVal.Rep(listOf(FieldVal.Str("a"), FieldVal.Str("b")))),
         )
         val decoded = ProtoCodec.decode(bytes)
         val items = decoded[4]!!

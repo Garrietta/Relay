@@ -39,7 +39,7 @@ object ProtoCodec {
         val cos = CodedOutputStream.newInstance(out)
         for (n in fields.keys.sorted()) {
             val vs = fields[n]
-            val list = if (vs is Rep) vs.items else listOf(vs!!)
+            val list = if (vs is FieldVal.Rep) vs.items else listOf(vs!!)
             for (v in list) {
                 when (v) {
                     is FieldVal.Varint -> {
@@ -60,7 +60,7 @@ object ProtoCodec {
                         cos.writeUInt32NoTag(nested.size)
                         cos.writeRawBytes(nested)
                     }
-                    is Rep -> error("nested Rep is not supported")
+                    is FieldVal.Rep -> error("nested Rep is not supported")
                 }
             }
         }
@@ -88,9 +88,6 @@ object ProtoCodec {
         }
         return out
     }
-
-    /** Repeated-field wrapper for [encode]. */
-    data class Rep(val items: List<FieldVal>)
 }
 
 /** Decode helpers: first occurrence of a field, typed. */

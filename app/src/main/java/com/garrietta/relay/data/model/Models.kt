@@ -1,0 +1,29 @@
+package com.garrietta.relay.data.model
+
+/** A single conversation thread in the unified inbox. */
+data class Conversation(
+    val threadId: Long,
+    val address: String,
+    val displayName: String,
+    val snippet: String,
+    val date: Long,
+    val unread: Boolean,
+    val messageCount: Int,
+    /** Dominant transport of the latest message: SMS or MMS. RCS arrives later. */
+    val transportLabel: String,
+)
+
+/** A single message inside a conversation. */
+data class Message(
+    val id: Long,
+    val threadId: Long,
+    val address: String,
+    val body: String,
+    val date: Long,
+    val isOutgoing: Boolean,
+    val isMms: Boolean,
+    val read: Boolean,
+)
+
+/** Theme preference persisted in SharedPreferences. */
+enum class ThemeMode { SYSTEM, LIGHT, DARK }

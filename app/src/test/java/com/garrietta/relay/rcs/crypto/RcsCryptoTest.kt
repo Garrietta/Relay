@@ -14,8 +14,8 @@ import javax.crypto.spec.SecretKeySpec
 class RcsCryptoTest {
 
     @Test fun `aes-ctr nist vector`() {
-        // NIST SP 800-38A F.5.1 CTR-AES128: key 2b7e1516..., iv f0f1f2...ff,
-        // plaintext 6bc1bee22e409f96e93d7e117393172a -> ciphertext 874d6191...
+        // AES-128-CTR, NIST SP 800-38A F.5.1 inputs. Expected ciphertext
+        // verified against OpenSSL (independent implementation).
         val key = hex("2b7e151628aed2a6abf7158809cf4f3c")
         val iv = hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
         val pt = hex("6bc1bee22e409f96e93d7e117393172a")
@@ -25,7 +25,7 @@ class RcsCryptoTest {
             SecretKeySpec(key, "AES"),
             javax.crypto.spec.IvParameterSpec(iv),
         )
-        assertArrayEquals(hex("874d6191b620e3261efef686299b140"), cipher.doFinal(pt))
+        assertArrayEquals(hex("874d6191b620e3261bef6864990db6ce"), cipher.doFinal(pt))
     }
 
     @Test fun `hmac-sha256 rfc4231 vector`() {

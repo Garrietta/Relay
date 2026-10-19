@@ -36,10 +36,16 @@ object AvatarShapeAssigner {
         }
     }
 
-    /** Normalizes a shape key so formatting variants of one contact agree. */
+    /**
+     * Normalizes a shape key so formatting variants of one contact agree:
+     * digits-only, keeping the last 10 when a country code is present, so
+     * "+1 (765) 341-9588" and "7653419588" map to the same shape (the same
+     * last-10 convention as self-address matching).
+     */
     fun normalizeKey(key: String): String {
         val digits = key.filter { it.isDigit() }
-        return digits.ifEmpty { key }
+        if (digits.isEmpty()) return key
+        return if (digits.length > 10) digits.takeLast(10) else digits
     }
 
     fun namedShapeFor(key: String): NamedShape = synchronized(lock) {

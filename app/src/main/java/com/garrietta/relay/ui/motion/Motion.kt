@@ -181,21 +181,27 @@ private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTran
 
         put(
             MotionKind.BACKWARD,
-            // Pop: the exiting screen fades and springs down WITHIN its
-            // bounds (already clipped to its container) — no horizontal
-            // slide, so its content can never sweep across the incoming
-            // destination. The inbox fades in beneath it. The avatar is
-            // exempt: it reverse-morphs via motionSharedAvatar.
+            // Pop: the exiting screen fades and settles down WITHIN its
+            // bounds — no horizontal slide, so its content can never sweep
+            // across the incoming destination. The scale is a short TWEEN,
+            // never a spring: a bouncy scaleOut overshoots and settles back,
+            // which reads as the exiting content flashing/flickering once
+            // (diagnosed 2026-10-19 from his exit-flash report). The inbox
+            // fades in beneath it. Nothing from the exiting screen may draw
+            // in the transition overlay on pop (see motionSharedAvatar) —
+            // the exiting screen sits UNDER the incoming inbox from the
+            // first frame, so avatars can never flash above the incoming
+            // "New conversation" pill.
             fadeIn(
                 tween(
                     M3Duration.FADE_IN,
                     easing = M3Easing.EmphasizedDecelerate,
                 ),
             ) togetherWith
-                (fadeOut(tween(150, easing = M3Easing.Standard)) +
+                (fadeOut(tween(180, easing = M3Easing.Standard)) +
                     scaleOut(
-                        RelaySprings.bouncy(),
-                        targetScale = 0.96f,
+                        tween(220, easing = M3Easing.EmphasizedAccelerate),
+                        targetScale = 0.97f,
                     )),
         )
     }
@@ -237,13 +243,12 @@ val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilitySc
 /**
  * Navigation direction for the current transition, provided by the nav root.
  * Shared-element morphs run on push only: on pop the shared bounds are
- * disabled so the exiting screen fades and shrinks within its own bounds —
+ * disabled so the exiting screen fades and settles within its own bounds —
  * nothing from the exiting screen may draw above the incoming one (the
- * transition overlay always renders above both destinations). The AVATAR is
- * exempt via [motionSharedAvatar]: it reverse-morphs on pop too, scoped
- * narrowly enough that no text can ghost. Defaults to
- * true so surfaces outside the single-pane backstack (two-pane detail,
- * previews) keep the morph behavior.
+ * transition overlay always renders above both destinations, so anything
+ * morphing there would flash over the incoming "New conversation" pill).
+ * Defaults to true so surfaces outside the single-pane backstack (two-pane
+ * detail, previews) keep the morph behavior.
  */
 val LocalNavForward = staticCompositionLocalOf { true }
 
@@ -317,17 +322,23 @@ fun Modifier.motionSharedBounds(
 }
 
 /**
- * AVATAR-ONLY shared bounds — stays active on pop too, so the avatar morphs
- * BACK down into its inbox row on chat exit (a true reverse shared-element
- * transition), while everything else in the chat fades+shrinks in place.
+ * AVATAR-ONLY shared bounds — active on PUSH only, so the avatar morphs up
+ * into the chat header when opening a conversation. On POP the modifier is
+ * a no-op: the transition overlay always renders ABOVE both destinations,
+ * so a reverse-morphing avatar would draw over the incoming inbox —
+ * visibly flashing above the "New conversation" pill (diagnosed 2026-10-19).
+ * On pop the avatar instead fades+settles WITH the exiting chat, which sits
+ * UNDER the incoming inbox from the first frame: contact photos move
+ * immediately to the layer under the new-chat button layer, no flash.
  *
  * Scoped NARROWLY to the avatar: message content carries no shared
- * modifiers, so the #45 text-ghosting fix is preserved — only the small
- * clipped avatar ever draws in the transition overlay on pop.
+ * modifiers, so the #45 text-ghosting fix is preserved.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.motionSharedAvatar(key: String, shape: Shape? = null): Modifier {
+    // No overlay morph on pop — see above.
+    if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()

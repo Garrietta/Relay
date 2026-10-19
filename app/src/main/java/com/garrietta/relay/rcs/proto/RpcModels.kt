@@ -119,6 +119,59 @@ fun decodeRcsParticipant(m: Map<Int, List<FieldVal>>): RcsParticipant {
     )
 }
 
+/** Digits-only form of a participant number for comparison. */
+private fun RcsParticipant.normNumber(): String = number.filter(Char::isDigit)
+
+/** True when this participant is one of [selfNumbers] (last-10-digit match). */
+private fun RcsParticipant.isSelfNumber(selfNumbers: Set<String>): Boolean {
+    val norm = normNumber()
+    if (norm.isEmpty() || selfNumbers.isEmpty()) return false
+    return selfNumbers.any { s ->
+        val d = s.filter(Char::isDigit)
+        d.isNotEmpty() && norm.takeLast(10) == d.takeLast(10)
+    }
+}
+
+/**
+ * Display name for a participant that can NEVER render "Unknown": a blank
+ * or placeholder ("Unknown", any case) name falls back to the number, so a
+ * ghost entry renders as digits, never the word "Unknown".
+ */
+fun RcsParticipant.displayNameOrNumber(): String {
+    val n = fullName.ifBlank { firstName }.trim()
+    return if (n.isBlank() || n.equals("Unknown", ignoreCase = true)) number else n
+}
+
+/**
+ * Drops self and ghost participants from a server participant list.
+ * Pure function — unit-tested with the GIRTH shape.
+ *
+ * - isMe-flagged entries go.
+ * - Entries whose number matches any of [selfNumbers] go (the server doesn't
+ *   always flag every self entry — the GIRTH ghost was an unflagged self
+ *   entry with a real number and an "Unknown"/blank name; callers pass
+ *   ownAddress() plus every isMe number seen across conversations).
+ * - "Ghosts" (blank number AND blank/"Unknown" name) go.
+ * - Duplicates collapse by normalized number.
+ */
+fun cleanRcsParticipantList(
+    parts: List<RcsParticipant>,
+    selfNumbers: Set<String>,
+): List<RcsParticipant> {
+    val seen = mutableSetOf<String>()
+    return parts.filter { p ->
+        if (p.isMe) return@filter false
+        if (p.isSelfNumber(selfNumbers)) return@filter false
+        val norm = p.normNumber()
+        if (norm.isEmpty()) {
+            val name = p.fullName.ifBlank { p.firstName }.trim()
+            if (name.isBlank() || name.equals("Unknown", ignoreCase = true)) return@filter false
+            return@filter true
+        }
+        seen.add(norm)
+    }
+}
+
 data class RcsMessage(
     val id: String,
     val conversationId: String,

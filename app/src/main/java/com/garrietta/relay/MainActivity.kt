@@ -215,11 +215,13 @@ class MainActivity : ComponentActivity() {
                     LocalAnimatedVisibilityScope provides this@AnimatedContent,
                     // Container shared-element morphs run on push only. On pop
                     // the shared bounds are disabled so the exiting chat fades
-                    // and shrinks within its own bounds — nothing from the chat
-                    // may draw above the incoming inbox (e.g. thread text
-                    // ghosting over the "New conversation" pill). The avatar
-                    // is exempt via motionSharedAvatar: it reverse-morphs
-                    // down into its row on pop too.
+                    // and settles within its own bounds — nothing from the chat
+                    // may draw above the incoming inbox (the transition
+                    // overlay renders above both destinations, so a morphing
+                    // avatar would flash over the "New conversation" pill).
+                    // The exiting screen sits UNDER the incoming inbox from
+                    // the first frame: avatars move immediately to the layer
+                    // under the new-chat button layer, no flash.
                     LocalNavForward provides navForward,
                 ) {
                     when (screen) {

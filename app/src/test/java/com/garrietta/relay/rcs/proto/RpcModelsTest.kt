@@ -292,3 +292,65 @@ class RpcModelsTest {
         assertTrue(!isWeirdPreResponse(real, hasCookies = true))
     }
 }
+
+    // ---------- participant cleaning (GIRTH ghost) ----------
+
+    private fun part(
+        number: String,
+        fullName: String = "",
+        firstName: String = "",
+        isMe: Boolean = false,
+    ) = RcsParticipant(
+        participantId = "p/$number",
+        number = number,
+        firstName = firstName,
+        fullName = fullName,
+        isMe = isMe,
+    )
+
+    @Test fun `cleanRcsParticipantList drops the GIRTH ghost`() {
+        // GIRTH as the server sent it: Alec, Trenton, plus an unflagged self
+        // entry carrying his real number with an "Unknown" name (the ghost
+        // that survived the #114 blank-number-only filter).
+        val selfNumber = "+17653419588"
+        val parts = listOf(
+            part("+13175550101", fullName = "Alec"),
+            part("+13175550102", fullName = "Trenton"),
+            part(selfNumber, fullName = "Unknown", isMe = false),
+        )
+        val cleaned = cleanRcsParticipantList(parts, setOf(selfNumber))
+        assertEquals(
+            listOf("+13175550101", "+13175550102"),
+            cleaned.map { it.number },
+        )
+    }
+
+    @Test fun `cleanRcsParticipantList catches self in different formats`() {
+        // Server lists him as 7653419588 (no country code), ownAddress()
+        // resolved +17653419588 — last-10 match must still drop him.
+        val parts = listOf(
+            part("7653419588", fullName = "", isMe = false),
+            part("+13175550101", fullName = "Alec"),
+        )
+        val cleaned = cleanRcsParticipantList(parts, setOf("+17653419588"))
+        assertEquals(listOf("+13175550101"), cleaned.map { it.number })
+    }
+
+    @Test fun `cleanRcsParticipantList drops isMe and blank ghosts and dedupes`() {
+        val parts = listOf(
+            part("+13175550101", fullName = "Alec"),
+            part("+13175550101", fullName = "Alec"), // duplicate
+            part("+19998887777", fullName = "Me", isMe = true),
+            part("", fullName = ""), // blank ghost
+            part("", fullName = "Unknown"), // named ghost, no number
+        )
+        val cleaned = cleanRcsParticipantList(parts, emptySet())
+        assertEquals(listOf("+13175550101"), cleaned.map { it.number })
+    }
+
+    @Test fun `displayNameOrNumber never renders Unknown`() {
+        assertEquals("15551234567", part("15551234567", fullName = "Unknown").displayNameOrNumber())
+        assertEquals("15551234567", part("15551234567", fullName = "unknown").displayNameOrNumber())
+        assertEquals("15551234567", part("15551234567").displayNameOrNumber())
+        assertEquals("Alec", part("15551234567", fullName = "Alec").displayNameOrNumber())
+    }

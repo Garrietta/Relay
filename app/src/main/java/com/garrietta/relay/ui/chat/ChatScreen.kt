@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -73,6 +75,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -494,10 +497,13 @@ private fun GroupHeader(
     patternKey: String,
     onBack: () -> Unit,
 ) {
+    // Defense in depth: a participant whose name is blank or the literal
+    // "Unknown" renders as its number, never the word "Unknown".
     val names = remember(others) {
-        others.joinToString(", ") {
-            it.displayName.substringBefore(" ").ifBlank { it.address }
-        }
+        others.map {
+            val n = it.displayName.substringBefore(" ").ifBlank { it.address }
+            if (n.equals("Unknown", ignoreCase = true)) it.address else n
+        }.filter { it.isNotBlank() }.joinToString(", ")
     }
     Row(
         modifier = Modifier
@@ -565,6 +571,16 @@ private fun SystemNotice(text: String) {
 }
 
 /**
+ * True pixel dimensions of encoded image [bytes] without decoding the
+ * pixels, or null when the bytes aren't a decodable image.
+ */
+private fun decodeImageBounds(bytes: ByteArray): Pair<Int, Int>? {
+    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    return if (opts.outWidth > 0 && opts.outHeight > 0) opts.outWidth to opts.outHeight else null
+}
+
+/**
  * RCS media bubble: downloads + decrypts the attachment on first compose
  * (disk-cached in the transport), renders images with an expressive clip,
  * tap to view fullscreen. Failures surface VERBATIM ("Media unavailable:
@@ -616,22 +632,32 @@ private fun MediaBubble(
                     modifier = Modifier.padding(16.dp),
                 )
                 b != null && media.isImage -> {
-                    val aspect = if (media.width > 0 && media.height > 0) {
-                        (media.width.toFloat() / media.height.toFloat()).coerceIn(0.5f, 2.2f)
+                    // Natural-size rendering: decode the true pixel bounds and
+                    // NEVER upscale. A small inline/thumbnail image blown up to
+                    // bubble size is exactly the blocky "corrupted" look
+                    // (diagnosed 2026-10-19). Small images render small and
+                    // sharp; large ones are capped at the bubble max.
+                    val bounds = remember(message.id) { decodeImageBounds(b) }
+                    if (bounds == null) {
+                        Text(
+                            text = "Media unavailable: undecodable image",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp),
+                        )
                     } else {
-                        null
+                        val density = LocalDensity.current
+                        val naturalW = with(density) { bounds.first.toDp() }
+                        val naturalH = with(density) { bounds.second.toDp() }
+                        val w = minOf(naturalW, maxBubbleWidth)
+                        val h = (w * naturalH / naturalW).coerceAtLeast(24.dp)
+                        AsyncImage(
+                            model = b,
+                            contentDescription = "Shared image",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(w, h),
+                        )
                     }
-                    AsyncImage(
-                        model = b,
-                        contentDescription = "Shared image",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .widthIn(max = maxBubbleWidth)
-                            .then(
-                                if (aspect != null) Modifier.aspectRatio(aspect)
-                                else Modifier.heightIn(min = 120.dp, max = 340.dp),
-                            ),
-                    )
                 }
                 b != null -> {
                     // Non-image file: labeled tile.
@@ -944,7 +970,13 @@ private fun Composer(
 ) {
     var text by remember { mutableStateOf("") }
     var showAttachSheet by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
+    // Focus animation (Garrett's directive): tapping the text field expands
+    // the inner Message pill to the full width of the outer pill while the
+    // attachment buttons fade+shrink away; they spring back when the field
+    // is unfocused and empty. Send + smiley stay put.
+    val expanded = focused || text.isNotEmpty()
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
 
@@ -975,41 +1007,81 @@ private fun Composer(
                 .padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // + : opens the attachment sheet. Fixed size — never shrinks.
-            IconButton(
-                onClick = { showAttachSheet = true },
-                modifier = Modifier.requiredSize(48.dp),
+            // Attachment buttons hide while the text field is expanded
+            // (focused or non-empty): fade+shrink out, bouncy spring back.
+            // Exits use a quick tween — exits never bounce, so nothing
+            // flickers. Fixed sizes — never coerced smaller (#110 rule).
+            AnimatedVisibility(
+                visible = !expanded,
+                enter = fadeIn() + expandHorizontally(
+                    expandFrom = Alignment.Start,
+                    animationSpec = RelaySprings.bouncy(),
+                ),
+                exit = fadeOut(animationSpec = tween(150)) + shrinkHorizontally(
+                    shrinkTowards = Alignment.Start,
+                    animationSpec = tween(200),
+                ),
             ) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = "Attachments",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(24.dp),
-                )
+                // + : opens the attachment sheet.
+                IconButton(
+                    onClick = { showAttachSheet = true },
+                    modifier = Modifier.requiredSize(48.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = "Attachments",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
             }
-            // Camera: opens the sheet (Camera is one of its options).
-            IconButton(
-                onClick = { showAttachSheet = true },
-                modifier = Modifier.requiredSize(48.dp),
+            AnimatedVisibility(
+                visible = !expanded,
+                enter = fadeIn() + expandHorizontally(
+                    expandFrom = Alignment.Start,
+                    animationSpec = RelaySprings.bouncy(),
+                ),
+                exit = fadeOut(animationSpec = tween(150)) + shrinkHorizontally(
+                    shrinkTowards = Alignment.Start,
+                    animationSpec = tween(200),
+                ),
             ) {
-                Icon(
-                    Icons.Filled.PhotoCamera,
-                    contentDescription = "Camera",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(24.dp),
-                )
+                // Camera: opens the sheet (Camera is one of its options).
+                IconButton(
+                    onClick = { showAttachSheet = true },
+                    modifier = Modifier.requiredSize(48.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.PhotoCamera,
+                        contentDescription = "Camera",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
             }
-            // Voice messages: stub for now.
-            IconButton(
-                onClick = onAttachmentSoon,
-                modifier = Modifier.requiredSize(48.dp),
+            AnimatedVisibility(
+                visible = !expanded,
+                enter = fadeIn() + expandHorizontally(
+                    expandFrom = Alignment.Start,
+                    animationSpec = RelaySprings.bouncy(),
+                ),
+                exit = fadeOut(animationSpec = tween(150)) + shrinkHorizontally(
+                    shrinkTowards = Alignment.Start,
+                    animationSpec = tween(200),
+                ),
             ) {
-                Icon(
-                    Icons.Filled.Mic,
-                    contentDescription = "Voice message",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(24.dp),
-                )
+                // Voice messages: stub for now.
+                IconButton(
+                    onClick = onAttachmentSoon,
+                    modifier = Modifier.requiredSize(48.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Mic,
+                        contentDescription = "Voice message",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
             }
             // Inner text pill: the distinct "Message" field, like the
             // reference's white inner pill on the blue outer pill.
@@ -1042,7 +1114,9 @@ private fun Composer(
                             unfocusedContainerColor = Color.Transparent,
                             disabledContainerColor = Color.Transparent,
                         ),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .onFocusChanged { focused = it.isFocused },
                         minLines = 1,
                         maxLines = 5,
                     )

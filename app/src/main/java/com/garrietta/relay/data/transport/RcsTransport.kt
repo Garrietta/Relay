@@ -627,6 +627,8 @@ class RcsTransport(context: Context) : Transport {
         else -> "Pairing failed (phone error ${f.finishErrorType}/${f.finishErrorCode})"
     }
 
+    // (image magic validation lives in top-level isValidImageBytes below)
+
     /**
      * Downloads and AES-GCM-decrypts an RCS media attachment, cached on disk
      * by mediaID. Throws with a verbatim reason when unavailable — the UI
@@ -640,17 +642,39 @@ class RcsTransport(context: Context) : Transport {
      * returning it raw renders as blocky garbage (diagnosed 2026-10-19).
      * When a mediaId exists we ALWAYS download the authoritative bytes;
      * the inline thumbnail is used only when there is nothing to download.
+     *
+     * Corruption guards (2026-10-19): the cache is versioned (v2) so stale
+     * bytes from earlier builds are never served; every byte payload —
+     * cached, downloaded, or inline — must pass the image magic check when
+     * the attachment claims to be an image, and a downloaded payload
+     * dramatically smaller than the server-declared size is rejected (that
+     * shape means the server answered with the thumbnail instead of the
+     * full media). A corrupt-looking image must NEVER render.
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
             if (att.mediaId.isEmpty()) {
-                // No server copy — the inline thumbnail is the only bytes.
-                return@withContext att.inlineData
+                // No server copy — the inline bytes are the only bytes.
+                // They may be a small full image or just a thumbnail; either
+                // way the UI renders them at natural size, never upscaled.
+                val inline = att.inlineData
                     ?: throw IllegalStateException("media unavailable: no attachment id or data")
+                if (att.isImage && !isValidImageBytes(inline)) {
+                    throw IllegalStateException("media unavailable: inline bytes are not a valid image")
+                }
+                return@withContext inline
             }
             require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
-            val cacheFile = java.io.File(java.io.File(appContext.cacheDir, "rcs_media"), att.mediaId)
-            if (cacheFile.exists()) return@withContext cacheFile.readBytes()
+            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v2")
+            val cacheFile = java.io.File(cacheDir, att.mediaId.sanitizeFileName())
+            if (cacheFile.exists()) {
+                val cached = cacheFile.readBytes()
+                if (att.isImage && !isValidImageBytes(cached)) {
+                    cacheFile.delete()
+                } else {
+                    return@withContext cached
+                }
+            }
             val token = session.currentAuth()?.tachyonToken
                 ?: throw IllegalStateException("media unavailable: not paired")
             val meta = java.util.Base64.getEncoder().encodeToString(
@@ -682,10 +706,25 @@ class RcsTransport(context: Context) : Transport {
                 resp.body!!.bytes()
             }
             val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
-            cacheFile.parentFile?.mkdirs()
+            // Sanity: the server-declared size is the full media. A payload
+            // dramatically smaller means we got the thumbnail (or wrong
+            // bytes) — refuse to cache or render it as the photo.
+            if (att.size > 0 && plain.size * 2 < att.size) {
+                throw IllegalStateException(
+                    "media unavailable: server returned ${plain.size} bytes, expected ~${att.size}",
+                )
+            }
+            if (att.isImage && !isValidImageBytes(plain)) {
+                throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
+            }
+            cacheDir.mkdirs()
             cacheFile.writeBytes(plain)
             plain
         }
+
+    /** Strips path-unsafe characters from a cache file name. */
+    private fun String.sanitizeFileName(): String =
+        replace(Regex("[^A-Za-z0-9._-]"), "_").take(128).ifBlank { "media" }
 
     /** Saved Google session cookies, if a Gaia sign-in was captured. */
     fun loadGaiaCookies(): String? =
@@ -723,3 +762,28 @@ enum class RcsPairingState {
     PAIRED,
 }
 
+
+/**
+ * True when [bytes] start with a known image magic number (JPEG, PNG, GIF,
+ * WebP, HEIC/HEIF, BMP). Top-level for unit testing. Used to refuse to
+ * render (or cache) bytes that are not actually an image — a corrupt-looking
+ * image must never render; it surfaces as an error instead.
+ */
+fun isValidImageBytes(bytes: ByteArray): Boolean {
+    if (bytes.size < 12) return false
+    // JPEG: FF D8 FF
+    if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return true
+    // PNG: 89 50 4E 47
+    if (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return true
+    // GIF: 47 49 46 ("GIF")
+    if (bytes[0] == 0x47.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte()) return true
+    // WebP: 52 49 46 46 ("RIFF") .... 57 45 42 50 ("WEBP")
+    if (bytes[0] == 0x52.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte() && bytes[3] == 0x46.toByte() &&
+        bytes[8] == 0x57.toByte() && bytes[9] == 0x45.toByte() && bytes[10] == 0x42.toByte() && bytes[11] == 0x50.toByte()
+    ) return true
+    // HEIC/HEIF: .... 66 74 79 70 ("ftyp") at offset 4
+    if (bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() && bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()) return true
+    // BMP: 42 4D ("BM")
+    if (bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) return true
+    return false
+}

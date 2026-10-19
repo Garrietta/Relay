@@ -252,60 +252,61 @@ class UnifiedInboxRepository(
         rcsTransport.conversationForNumber(number)
 
     private suspend fun loadRcsConversations(): List<Conversation> {
-        val selfNorm = runCatching { ownAddress() }.getOrNull()
         return rcsTransport.currentRcsConversations()
-            .map { mapRcsConversation(it, selfNorm) }
+            .map { mapRcsConversation(it) }
             .sortedByDescending { it.date }
     }
 
     /**
-     * RCS participant cleanup: the server's participant list can include
+     * RCS participant cleanup, delegated to the pure, unit-tested
+     * [cleanRcsParticipantList]: the server's participant list can include
      * self — sometimes twice, and not always flagged isMe ("Grace, Garrett,
-     * Garrett"). Drop every self entry via the isMe flag plus an ownAddress
-     * match, and collapse duplicates by normalized address. His name must
-     * never appear in a header unless the chat is to himself specifically.
-     *
-     * Also drops "ghost" participants with no usable identity (blank number
-     * AND blank/placeholder name, e.g. the "Unknown" in the GIRTH group) —
-     * they render as "Unknown" in headers and name lists otherwise.
+     * Garrett", and the GIRTH ghost: an unflagged self entry with a real
+     * number and an "Unknown"/blank name). Self is matched via the isMe flag
+     * plus every known self number (ownAddress() plus every isMe number seen
+     * across conversations — server-grounded, works when the Telephony-based
+     * ownAddress() can't resolve in paired mode). His name must never appear
+     * in a header unless the chat is to himself specifically, and the word
+     * "Unknown" must never render.
      */
-    private fun isGhostParticipant(
-        p: com.garrietta.relay.rcs.proto.RcsParticipant,
-    ): Boolean {
-        if (p.number.isNotBlank()) return false
-        val name = p.fullName.ifBlank { p.firstName }.trim()
-        return name.isBlank() || name.equals("Unknown", ignoreCase = true)
-    }
-
-    private fun cleanRcsParticipants(
-        parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
-        selfNorm: String?,
-    ): List<com.garrietta.relay.rcs.proto.RcsParticipant> {
-        val seen = mutableSetOf<String>()
-        return parts.filter { p ->
-            if (p.isMe) return@filter false
-            if (isGhostParticipant(p)) return@filter false
-            val norm = normalizedAddress(p.number)
-            if (norm.isEmpty()) return@filter true
-            if (norm == selfNorm) return@filter false
-            seen.add(norm)
+    private suspend fun selfNumberSet(): Set<String> {
+        val out = mutableSetOf<String>()
+        runCatching { ownAddress() }.getOrNull()?.let {
+            if (it.isNotBlank()) out.add(it)
         }
+        // Server-grounded fallback: any isMe-flagged participant number,
+        // across every conversation, is self by definition.
+        rcsTransport.currentRcsConversations().forEach { c ->
+            c.participants.forEach { p ->
+                if (p.isMe && p.number.isNotBlank()) out.add(p.number)
+            }
+        }
+        return out
     }
 
-    private fun mapRcsConversation(
+    private suspend fun cleanRcsParticipants(
+        parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
+    ): List<com.garrietta.relay.rcs.proto.RcsParticipant> =
+        com.garrietta.relay.rcs.proto.cleanRcsParticipantList(parts, selfNumberSet())
+
+    private suspend fun mapRcsConversation(
         c: com.garrietta.relay.rcs.proto.RcsConversation,
-        selfNorm: String?,
     ): Conversation {
-        val others = cleanRcsParticipants(c.participants, selfNorm)
-        val name = c.name.ifBlank {
-            others.joinToString(", ") {
-                it.fullName.ifBlank { it.firstName }.ifBlank { it.number }
-            }
-        }.ifBlank { c.id }
-        // Self-chat (no others): address on the self number so the photo
+        val others = cleanRcsParticipants(c.participants)
+        // Never trust a server conversation name containing "unknown" — the
+        // server auto-names groups from raw participants ("Alec, Trenton,
+        // Unknown"); rebuild from the cleaned list instead. A genuine custom
+        // name (no "unknown" in it) is kept.
+        val name = c.name
+            .takeIf { it.isNotBlank() && !it.contains("unknown", ignoreCase = true) }
+            ?: others.joinToString(", ") {
+                com.garrietta.relay.rcs.proto.displayNameOrNumber(it)
+            }.ifBlank { c.id }
+        // Self-chat (no others): address on a self number so the photo
         // lookup and the avatar shape key match the chat header's. Falling
         // back to the display name here showed an initial in the inbox
         // while the chat showed the photo (and a different shape).
+        val selfNorm = runCatching { ownAddress() }.getOrNull()
         val address = others.firstOrNull()?.number?.ifBlank { null }
             ?: selfNorm?.ifBlank { null }
             ?: name
@@ -398,27 +399,26 @@ class UnifiedInboxRepository(
 
     /**
      * Header-ready others for an RCS conversation: self removed (isMe flag
-     * plus ownAddress fallback — the server doesn't always flag every self
-     * entry) and deduped by normalized address.
+     * plus every known self number — the server doesn't always flag every
+     * self entry, e.g. the GIRTH ghost) and deduped by normalized address.
+     * The word "Unknown" can never survive into the name list.
      */
     suspend fun rcsOthers(conversationId: String): List<Participant> =
         withContext(Dispatchers.IO) {
-            val selfNorm = runCatching { ownAddress() }.getOrNull()
-            val seen = mutableSetOf<String>()
-            getRcsParticipants(conversationId).filter { p ->
-                if (p.isSelf) false
-                else {
-                    val norm = normalizedAddress(p.address)
-                    // Ghost check on the mapped Participant: blank address
-                    // and blank/"Unknown" display name.
-                    val ghost = norm.isEmpty() &&
-                        (p.displayName.isBlank() || p.displayName.equals("Unknown", ignoreCase = true))
-                    if (ghost) false
-                    else if (norm.isEmpty()) true
-                    else if (norm == selfNorm) false
-                    else seen.add(norm)
+            val conv = rcsTransport.currentRcsConversations()
+                .firstOrNull { it.id == conversationId }
+                ?: return@withContext emptyList()
+            val selfNumbers = selfNumberSet()
+            com.garrietta.relay.rcs.proto.cleanRcsParticipantList(conv.participants, selfNumbers)
+                .map { p ->
+                    Participant(
+                        address = p.number,
+                        displayName = com.garrietta.relay.rcs.proto.displayNameOrNumber(p)
+                            .ifBlank { p.number },
+                        photoUri = contactLookup.photoUri(p.number),
+                        isSelf = p.isMe,
+                    )
                 }
-            }
         }
 
     /** Outcome of an RCS send: the tmpId for echo correlation, or the verbatim reason. */

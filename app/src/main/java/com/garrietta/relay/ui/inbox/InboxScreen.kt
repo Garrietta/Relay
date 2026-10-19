@@ -1,12 +1,18 @@
 package com.garrietta.relay.ui.inbox
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,11 +29,12 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
@@ -57,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +83,7 @@ import com.garrietta.relay.ui.theme.GroupAvatarCluster
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
+import com.garrietta.relay.ui.theme.expressiveShape
 import com.garrietta.relay.ui.theme.expressiveShape
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
@@ -144,24 +153,64 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search — soft pill, expressive radius.
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = viewModel::setQuery,
-                    placeholder = { Text("Search conversations") },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(32.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent,
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    ),
+                // Search — compact 48dp pill (was a 56dp OutlinedTextField with
+                // 8dp vertical padding: 72dp total). Custom field for tight
+                // control; clear button appears when there's a query.
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                )
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .heightIn(min = 48.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Search,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        BasicTextField(
+                            value = query,
+                            onValueChange = viewModel::setQuery,
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            decorationBox = { inner ->
+                                if (query.isEmpty()) {
+                                    Text(
+                                        "Search conversations",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                                inner()
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (query.isNotEmpty()) {
+                            IconButton(
+                                onClick = { viewModel.setQuery("") },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Clear search",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
+                }
                 // The conversation LIST is its own rounded container
                 // (Google Messages M3E pattern) — solid color, no decoration.
                 Surface(
@@ -183,20 +232,35 @@ fun InboxScreen(
                             // last row is never hidden underneath it.
                             contentPadding = PaddingValues(top = 8.dp, bottom = 108.dp),
                         ) {
-                            items(
+                            // Staggered entrance: each row fades+slides in the
+                            // first time it's composed (keyed by threadId, so
+                            // scroll recycling never replays it for the same
+                            // row). Stagger caps at the first screenful so
+                            // fast scrolling never feels laggy.
+                            itemsIndexed(
                                 items = conversations,
-                                key = { it.threadId },
-                                contentType = { "conversation" },
-                            ) { conversation ->
-                                ConversationRow(
-                                    conversation = conversation,
-                                    onClick = { onOpenChat(conversation) },
-                                    onMarkRead = {
-                                        if (conversation.unread) viewModel.markRead(conversation.threadIds)
-                                        else viewModel.markUnread(conversation.threadIds)
-                                    },
-                                    onDelete = { viewModel.delete(conversation.threadIds) },
-                                )
+                                key = { _, it -> it.threadId },
+                                contentType = { _, _ -> "conversation" },
+                            ) { index, conversation ->
+                                val staggerDelay = if (index < 12) index * 45 else 0
+                                AnimatedVisibility(
+                                    visible = true,
+                                    enter = fadeIn(
+                                        tween(280, delayMillis = staggerDelay),
+                                    ) + slideInVertically(
+                                        tween(320, delayMillis = staggerDelay),
+                                    ) { it / 4 },
+                                ) {
+                                    ConversationRow(
+                                        conversation = conversation,
+                                        onClick = { onOpenChat(conversation) },
+                                        onMarkRead = {
+                                            if (conversation.unread) viewModel.markRead(conversation.threadIds)
+                                            else viewModel.markUnread(conversation.threadIds)
+                                        },
+                                        onDelete = { viewModel.delete(conversation.threadIds) },
+                                    )
+                                }
                             }
                         }
                     }
@@ -205,22 +269,35 @@ fun InboxScreen(
             // True floating pill: elevated above the list with margins on all
             // sides — the list scrolls beneath it. Not a docked bar. The
             // densest color in the scheme, per the expressive contrast rule.
-            NewConversationPill(
-                onClick = onNewConversation,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 24.dp)
-                    .padding(bottom = 24.dp),
-            )
+            // One-shot entrance: rises + fades in with the bouncy language
+            // when the inbox appears.
+            var pillVisible by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) { pillVisible = true }
+            AnimatedVisibility(
+                visible = pillVisible,
+                enter = fadeIn(tween(300, delayMillis = 150)) +
+                    slideInVertically(
+                        tween(450, delayMillis = 150),
+                    ) { it },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                NewConversationPill(
+                    onClick = onNewConversation,
+                    modifier = Modifier
+                        .padding(horizontal = 24.dp)
+                        .padding(bottom = 24.dp),
+                )
+            }
         }
     }
 }
 
 /**
- * The "Messages" header collapses aggressively on scroll: the 52sp display
- * title shrinks all the way down to a compact 20sp bar title, and the header
- * tints as it collapses. Driven by the spring-smoothed collapse fraction —
- * fluid and bouncy, never rigid.
+ * The "Messages" header: a designed lockup, not a default top bar. An
+ * expressive Pop-star mark + tight ExtraBold title, and the gear in a
+ * tonal Cookie-shaped button with a bouncy press. Collapses 40sp → 20sp
+ * on scroll. Transparent at every fraction — no separate polygon (the
+ * #111 rule stands).
  */
 @Composable
 private fun CollapsingMessagesHeader(
@@ -228,11 +305,6 @@ private fun CollapsingMessagesHeader(
     onOpenSettings: () -> Unit,
 ) {
     Surface(
-        // No separate polygon: the header is fully transparent at every
-        // collapse fraction, so the title + gear sit directly on the screen
-        // background (Garrett's directive 2026-10-18 — the tinted/tonal
-        // header read as a separate darker shape). Explicit content color so
-        // the title stays legible in both themes.
         color = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
@@ -249,25 +321,69 @@ private fun CollapsingMessagesHeader(
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(
                     start = 20.dp,
-                    end = 8.dp,
-                    top = (12 - 6 * collapse).dp,
-                    bottom = (4 + 4 * collapse).dp,
+                    end = 12.dp,
+                    top = (10 - 4 * collapse).dp,
+                    bottom = (2 + 2 * collapse).dp,
                 ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Brand mark: a Pop star in the primary container, shrinking
+            // with the collapse.
+            Box(
+                modifier = Modifier
+                    .size((34 - 12 * collapse).dp)
+                    .clip(expressiveShape("Pop"))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size((18 - 6 * collapse).dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
             Text(
                 "Messages",
-                // Emphasized display type for the eye-stop moment; shrinks
-                // with the collapse fraction.
                 style = MaterialTheme.typography.displayLarge,
-                fontSize = (52 - 32 * collapse).sp,
-                lineHeight = (56 - 30 * collapse).sp,
+                fontSize = (40 - 20 * collapse).sp,
+                lineHeight = (44 - 22 * collapse).sp,
                 fontWeight = FontWeight.ExtraBold,
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = onOpenSettings) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings")
+            // Gear in an expressive shaped tonal button — the header's
+            // tactile moment instead of a default IconButton.
+            val interaction = remember { MutableInteractionSource() }
+            val pressed by interaction.collectIsPressedAsState()
+            val pressScale by animateFloatAsState(
+                targetValue = if (pressed) 0.86f else 1f,
+                animationSpec = RelaySprings.bouncy(),
+                label = "gearPress",
+            )
+            Box(
+                modifier = Modifier
+                    .size((52 - 8 * collapse).dp)
+                    .graphicsLayer {
+                        scaleX = pressScale
+                        scaleY = pressScale
+                    }
+                    .clip(expressiveShape("Cookie7"))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onOpenSettings,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = "Settings",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
             }
         }
     }
@@ -515,10 +631,10 @@ private fun ConversationRow(
 @Composable
 private fun Avatar(conversation: Conversation, pressed: Boolean) {
     // Shape-as-state: the blob morphs tighter while pressed, with a bouncy
-    // press scale — the avatar feels alive under the finger. The avatar is
-    // the ONE shared element that reverse-morphs on pop (motionSharedAvatar);
-    // message content carries no shared modifiers, preserving the #45
-    // text-ghosting fix.
+    // press scale — the avatar feels alive under the finger. The avatar
+    // shared-morphs on push (motionSharedAvatar); on pop the morph is
+    // disabled so nothing draws above the incoming inbox — message content
+    // carries no shared modifiers, preserving the #45 text-ghosting fix.
     val pressScale by animateFloatAsState(
         targetValue = if (pressed) 0.9f else 1f,
         animationSpec = RelaySprings.bouncy(),

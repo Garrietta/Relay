@@ -304,8 +304,7 @@ class RcsSession(context: Context) {
             } catch (e: TimeoutCancellationException) {
                 throw TimeoutCancellationException(
                     "Timed out waiting for 60000 ms (${diagnostics()})",
-                    e,
-                )
+                ).also { it.initCause(e) }
             }
         } finally {
             waiters.remove(requestId)

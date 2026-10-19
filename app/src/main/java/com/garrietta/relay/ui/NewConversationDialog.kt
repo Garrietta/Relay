@@ -153,8 +153,9 @@ fun NewConversationDialog(
         // constraints, so no animation or recomposition can perturb it and
         // it can never accumulate across opens (the caller also keys each
         // open fresh).
-        val sheetHeight = remember {
-            (LocalConfiguration.current.screenHeightDp * 0.92f).dp
+        val configuration = LocalConfiguration.current
+        val sheetHeight = remember(configuration) {
+            (configuration.screenHeightDp * 0.92f).dp
         }
 
         // In-Compose scrim: theme-aware, covers the whole window, dismisses

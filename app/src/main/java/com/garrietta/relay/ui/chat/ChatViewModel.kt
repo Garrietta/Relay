@@ -28,7 +28,13 @@ class ChatViewModel(
      * Mutable: a brand-new conversation resolves it on init.
      */
     private var rcsConversationId: String? = null,
+    /** Header/composer transport label from the nav arg; refreshed from the server type for RCS rows. */
+    initialTransportLabel: String = "SMS",
 ) : ViewModel() {
+
+    /** The REAL transport label: the server's Conversation.type for RCS rows, the nav arg otherwise. */
+    private val _transportLabel = MutableStateFlow(initialTransportLabel)
+    val transportLabel: StateFlow<String> = _transportLabel
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
@@ -123,8 +129,10 @@ class ChatViewModel(
 
     /**
      * RCS thread init: history from the server, participants from the server
-     * (self flagged by the server — no heuristics), and a live subscription
-     * for echoes + new arrivals.
+     * (self excluded via isMe + ownAddress fallback, deduped — never in the
+     * header unless it's the self-chat), and a live subscription for echoes
+     * + new arrivals. The transport label comes from the server's
+     * Conversation.type, never hardcoded.
      */
     private fun initRcs(conversationId: String) {
         viewModelScope.launch {
@@ -132,9 +140,13 @@ class ChatViewModel(
             repository.markRcsRead(conversationId)
         }
         viewModelScope.launch {
+            _transportLabel.value =
+                if (repository.rcsConversationType(conversationId) == 1) "SMS" else "RCS"
+        }
+        viewModelScope.launch {
             val parts = repository.getRcsParticipants(conversationId)
             _participants.value = parts
-            _others.value = parts.filterNot { it.isSelf }
+            _others.value = repository.rcsOthers(conversationId)
             participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {
@@ -178,7 +190,7 @@ class ChatViewModel(
         )
         _messages.value = _messages.value
             .map { if (it.tmpId == tmpId) mapped else it }
-            .sortedBy { it.date }
+            .sortedByDescending { it.date }
         viewModelScope.launch { repository.markRcsRead(rcsConversationId ?: return@launch) }
     }
 
@@ -262,7 +274,12 @@ class ChatViewModel(
                     .getOrNull()?.also { rcsConversationId = it }
             } else null
             if (convId != null) {
-                sendRcs(convId, body)
+                // Route by the REAL server transport: an SMS-marked
+                // conversation (type=1) sends via SMS even when paired; only
+                // RCS-marked conversations go through the RCS session.
+                val type = repository.rcsConversationType(convId)
+                _transportLabel.value = if (type == 1) "SMS" else "RCS"
+                if (type == 1) sendSms(recipient, body) else sendRcs(convId, body)
             } else {
                 sendSms(recipient, body)
             }
@@ -289,7 +306,8 @@ class ChatViewModel(
             tmpId = tmpId,
         )
         pendingOptimistic[tmpId] = optimistic
-        _messages.value = (_messages.value + optimistic).sortedBy { it.date }
+        // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
+        _messages.value = (_messages.value + optimistic).sortedByDescending { it.date }
         when (val outcome = repository.sendRcs(conversationId, body, tmpId)) {
             is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
                 // The server echo (same tmpId) replaces the optimistic bubble.
@@ -305,7 +323,8 @@ class ChatViewModel(
     private suspend fun sendSms(recipient: String, body: String) {
         when (val result = repository.smsTransport.sendMessage(recipient, body)) {
             is SendResult.Sent -> {
-                // Optimistic insert so the bubble appears instantly.
+                // Optimistic insert so the bubble appears instantly —
+                // newest first, so it lands at the bottom of the thread.
                 val optimistic = Message(
                     id = System.currentTimeMillis(),
                     threadId = activeThreadId,
@@ -316,7 +335,7 @@ class ChatViewModel(
                     isMms = false,
                     read = true,
                 )
-                _messages.value = _messages.value + optimistic
+                _messages.value = (_messages.value + optimistic).sortedByDescending { it.date }
                 repository.refresh()
                 // A brand-new conversation has no thread yet; bind to the
                 // real one once the provider knows about it.

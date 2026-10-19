@@ -79,7 +79,22 @@ data class RcsConversation(
      * IDs excluding me — the server's own answer, no heuristics needed.
      */
     val otherParticipantIds: List<String> = emptyList(),
-)
+) {
+    /**
+     * The REAL per-conversation transport from conversations.Conversation
+     * field 22 (type: SMS=1 / RCS=2). Never hardcoded: a conversation the
+     * server marks SMS (e.g. the (463) 225-0067 campaign thread) must read
+     * "SMS" in the header, chips and composer routing. Unknown (0) defaults
+     * to RCS in paired mode — the common case.
+     */
+    fun transportLabel(): String = when (type) {
+        1 -> "SMS"
+        else -> "RCS"
+    }
+
+    /** True when the server marks this conversation RCS-capable. */
+    fun isRcsType(): Boolean = type != 1
+}
 
 /**
  * conversations.Participant: ID=1 (SmallInfo{1:type, 2:number,

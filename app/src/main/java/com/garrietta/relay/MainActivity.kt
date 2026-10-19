@@ -240,7 +240,7 @@ class MainActivity : ComponentActivity() {
                         is Screen.Chat -> {
                             val chatVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId),
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
                             )
                             ChatScreen(
                                 viewModel = chatVm,
@@ -355,7 +355,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val chatVm: ChatViewModel = viewModel(
                                         key = "chat_${convo.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds, convo.address, convo.rcsConversationId),
+                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds, convo.address, convo.rcsConversationId, convo.transportLabel),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
@@ -557,10 +557,11 @@ private class ChatViewModelFactory(
     private val threadIds: List<Long> = listOf(threadId),
     private val address: String = "",
     private val rcsConversationId: String? = null,
+    private val initialTransportLabel: String = "SMS",
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(repo, appSeedStore, threadId, threadIds, address, rcsConversationId) as T
+        ChatViewModel(repo, appSeedStore, threadId, threadIds, address, rcsConversationId, initialTransportLabel) as T
 }
 
 private class SettingsViewModelFactory(

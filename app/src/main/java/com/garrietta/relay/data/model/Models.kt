@@ -1,5 +1,21 @@
 package com.garrietta.relay.data.model
 
+/**
+ * Google Messages' inline transport notices. The server emits these as
+ * timeline entries ("RCS chat with {name}", "Texting with {number}
+ * (SMS/MMS)") and Google Messages renders them as CENTERED inline text,
+ * never as bubbles and never attributed to a sender. The patterns match the
+ * system format exactly (full-string match) so real user text is never
+ * misclassified.
+ */
+private val RcsChatNotice = Regex("^RCS chat with .+$")
+private val SmsMmsNotice = Regex("^Texting with .+ \\(SMS/MMS\\)$")
+
+fun isTransportSystemNotice(body: String): Boolean {
+    val t = body.trim()
+    return RcsChatNotice.matches(t) || SmsMmsNotice.matches(t)
+}
+
 /** A single conversation thread in the unified inbox. */
 data class Conversation(
     val threadId: Long,

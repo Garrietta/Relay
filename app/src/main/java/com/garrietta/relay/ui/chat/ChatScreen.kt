@@ -1,7 +1,14 @@
 package com.garrietta.relay.ui.chat
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -57,7 +64,6 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,10 +83,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -121,25 +127,20 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    // Header mode from the OTHER-participant count (self excluded — the
-    // provider's MMS addr table lists self, which used to misdetect him+1
-    // threads as groups). Per-sender bubble theming applies to pair + hex.
-    val headerMode = when {
-        others.size <= 1 -> HeaderMode.OneToOne
-        others.size == 2 -> HeaderMode.Pair
-        else -> HeaderMode.Hex
-    }
-    val isGroup = headerMode != HeaderMode.OneToOne
+    // Header mode from the OTHER-participant count (self excluded and
+    // deduped — the server's participant list can include him twice).
+    // Per-sender bubble theming applies to groups.
+    val headerMode = if (others.size <= 1) HeaderMode.OneToOne else HeaderMode.Group
+    val isGroup = headerMode == HeaderMode.Group
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    // Hex header minimizes 1:1 with scroll — direct tracking, NO spring (a
-    // spring retargeted every scroll frame never settles; the #102 lesson).
-    val rawCollapse by remember {
-        derivedStateOf {
-            val offset = listState.firstVisibleItemScrollOffset.toFloat()
-            val jump = if (listState.firstVisibleItemIndex > 0) 240f else 0f
-            ((jump + offset) / 240f).coerceIn(0f, 1f)
-        }
-    }
+    // Any scroll collapses the 1:1 header to top-bar height and drops the
+    // group avatar stack. Boolean-driven (never a spring retargeted every
+    // scroll frame — the #102 lesson); RelaySprings animate the change.
+    val scrolled = listState.firstVisibleItemIndex > 0 ||
+        listState.firstVisibleItemScrollOffset > 0
+    // The REAL transport label: the ViewModel refreshes it from the
+    // server's Conversation.type for RCS rows (never hardcoded).
+    val liveTransportLabel by viewModel.transportLabel.collectAsState()
 
     // Per-contact theming: seed the chat color scheme from the contact's
     // profile photo (Palette). Falls back to the wallpaper dynamic scheme.
@@ -170,8 +171,8 @@ fun ChatScreen(
                     photoUri = photoUri,
                     recipient = recipient,
                     threadId = threadId,
-                    transportLabel = transportLabel,
-                    collapse = rawCollapse,
+                    transportLabel = liveTransportLabel,
+                    scrolled = scrolled,
                     onBack = onBack,
                 )
             },
@@ -216,9 +217,16 @@ fun ChatScreen(
                             key = { _, it -> it.id },
                             contentType = { _, _ -> "message" },
                         ) { index, message ->
+                            // Transport system notices render as centered
+                            // inline text — never bubbles, never attributed.
+                            if (isTransportSystemNotice(message.body)) {
+                                SystemNotice(text = message.body.trim())
+                                return@itemsIndexed
+                            }
                             // reverseLayout: index+1 is visually above, index-1 below.
-                            val aboveDiff = messages.getOrNull(index + 1)?.isOutgoing != message.isOutgoing
-                            val belowDiff = messages.getOrNull(index - 1)?.isOutgoing != message.isOutgoing
+                            // System notices don't break bubble grouping.
+                            val aboveDiff = nearestNonNotice(messages, index, +1)?.isOutgoing != message.isOutgoing
+                            val belowDiff = nearestNonNotice(messages, index, -1)?.isOutgoing != message.isOutgoing
                             val position = when {
                                 aboveDiff && belowDiff -> ItemPosition.SINGLE
                                 aboveDiff -> ItemPosition.FIRST
@@ -261,16 +269,16 @@ fun ChatScreen(
     }
 }
 
-/** Which header layout a thread gets — from the OTHER-participant count. */
-private enum class HeaderMode { OneToOne, Pair, Hex }
+/** Which header layout a thread gets — from the OTHER-participant count (self excluded, deduped). */
+private enum class HeaderMode { OneToOne, Group }
 
 /**
- * Chat header dispatch. 1:1 = their face centered at the top with their name
- * directly under. 2 others = the two avatars side by side (second offset to
- * the right of the first, small gap, never overlapping) with comma-separated
- * names below — or the chat name when the chat has one. 3+ = avatars filling
- * a hexagonal space, minimizing on scroll. Back arrow always top-left.
- * Background matches the thread container — no seam.
+ * Chat header dispatch. 1:1 = their face centered at the top with their
+ * name directly under; on scroll it collapses (RelaySprings) to the height
+ * of the top bar. Group = a static inline row: back arrow, contact photos
+ * stacked with 50% overlap (max five, then a "+N" circle), comma-separated
+ * member names with ellipsis; on scroll the photos drop away and only the
+ * names remain. Background matches the thread container — no seam.
  */
 @Composable
 private fun ChatHeader(
@@ -282,7 +290,7 @@ private fun ChatHeader(
     recipient: String,
     threadId: Long,
     transportLabel: String,
-    collapse: Float,
+    scrolled: Boolean,
     onBack: () -> Unit,
 ) {
     Column(
@@ -291,17 +299,9 @@ private fun ChatHeader(
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .windowInsetsPadding(WindowInsets.statusBars),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-            }
-        }
         when (mode) {
             HeaderMode.OneToOne -> {
-                // Self-chat (no others): show self.
+                // Self-chat (no others): show self, once.
                 val peer = others.firstOrNull() ?: participants.firstOrNull()
                 val name = peer?.displayName?.ifBlank { peer.address }
                     ?.ifBlank { displayName } ?: displayName
@@ -311,25 +311,26 @@ private fun ChatHeader(
                     shapeKey = peer?.address ?: recipient,
                     threadId = threadId,
                     transportLabel = transportLabel,
+                    scrolled = scrolled,
+                    onBack = onBack,
                 )
             }
-            HeaderMode.Pair -> PairHeader(
+            HeaderMode.Group -> GroupHeader(
                 others = others,
                 transportLabel = transportLabel,
-            )
-            HeaderMode.Hex -> HexHeader(
-                others = others,
-                transportLabel = transportLabel,
-                collapse = collapse,
+                scrolled = scrolled,
+                onBack = onBack,
             )
         }
     }
 }
 
 /**
- * 1:1 header: their face centered at the top with their name directly under.
- * Compact. The avatar keeps the inbox shared-element morph target (message
- * content is exempt, so the #45 ghosting fix holds).
+ * 1:1 header: their face centered at the top with their name directly
+ * under. On scroll it collapses (RelaySprings crossfade) to the height of
+ * the top bar: back arrow, small avatar, name + transport. The avatar keeps
+ * the inbox shared-element morph target (message content is exempt, so the
+ * #45 ghosting fix holds).
  */
 @Composable
 private fun OneToOneHeader(
@@ -338,190 +339,176 @@ private fun OneToOneHeader(
     shapeKey: String,
     threadId: Long,
     transportLabel: String,
+    scrolled: Boolean,
+    onBack: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        ContactAvatar(
-            photoUri = photoUri,
-            name = name,
-            size = 60.dp,
-            shapeKey = shapeKey,
-            textStyle = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.motionSharedAvatar(
-                SharedElementKeys.avatar(threadId),
-                shape = WavyBlobShape,
-            ),
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = name,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-        Text(
-            text = transportLabel,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-    }
-}
-
-/**
- * 2-other-people header: the two avatars side by side — the second
- * horizontally offset to the right of the first with a small gap, never
- * overlapping — names comma-separated below (or the chat name when the chat
- * has a custom name; hook: replace [names] with the custom name).
- */
-@Composable
-private fun PairHeader(
-    others: List<Participant>,
-    transportLabel: String,
-) {
-    val names = remember(others) {
-        others.take(2).map {
-            it.displayName.substringBefore(" ").ifBlank { it.address }
-        }.joinToString(", ")
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            others.take(2).forEach { p ->
+    AnimatedContent(
+        targetState = scrolled,
+        transitionSpec = {
+            fadeIn(animationSpec = RelaySprings.bouncy()) togetherWith
+                fadeOut(animationSpec = RelaySprings.bouncy())
+        },
+        label = "oneToOneCollapse",
+    ) { isScrolled ->
+        if (isScrolled) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(64.dp)
+                    .padding(end = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
                 ContactAvatar(
-                    photoUri = p.photoUri,
-                    name = p.displayName.ifBlank { p.address },
-                    size = 48.dp,
-                    shapeKey = p.address,
+                    photoUri = photoUri,
+                    name = name,
+                    size = 40.dp,
+                    shapeKey = shapeKey,
                     textStyle = MaterialTheme.typography.titleMedium,
                 )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = transportLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    ContactAvatar(
+                        photoUri = photoUri,
+                        name = name,
+                        size = 72.dp,
+                        shapeKey = shapeKey,
+                        textStyle = MaterialTheme.typography.headlineSmall,
+                        modifier = Modifier.motionSharedAvatar(
+                            SharedElementKeys.avatar(threadId),
+                            shape = WavyBlobShape,
+                        ),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                    Text(
+                        text = transportLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = names,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-        Text(
-            text = transportLabel,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
     }
 }
 
 /**
- * 3+-other-people header: avatars arranged to fill a hexagonal space —
- * one centered with up to six around it (or all evenly around the ring when
- * six or fewer), small gaps, never overlapping. Minimizes 1:1 with scroll.
+ * Group header: a static inline row — back arrow, contact photos STACKED
+ * with 50% overlap (first fully visible on top, each next half-obscured by
+ * the previous; max five, then a "+N" circle tucked under the fifth for the
+ * remainder), then the comma-separated member names, ellipsized before the
+ * right edge. No scroll-driven avatar animation: the stack stays in line
+ * from the start; on scroll the photos drop away and only the names remain.
  */
 @Composable
-private fun HexHeader(
+private fun GroupHeader(
     others: List<Participant>,
     transportLabel: String,
-    collapse: Float,
+    scrolled: Boolean,
+    onBack: () -> Unit,
 ) {
-    val shown = others.take(7)
-    val avatarSize = (40 - 14 * collapse).dp
-    val nameSize = (20 - 5 * collapse).sp
-    val verticalPad = (10 - 6 * collapse).dp
-    val groupName = remember(others) {
-        val names = others.map {
+    val names = remember(others) {
+        others.joinToString(", ") {
             it.displayName.substringBefore(" ").ifBlank { it.address }
         }
-        if (names.size <= 3) names.joinToString(", ")
-        else names.take(3).joinToString(", ") + " +${names.size - 3}"
     }
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = verticalPad),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .padding(end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        HexAvatarField(
-            participants = shown,
-            avatarSize = avatarSize,
-        )
-        Spacer(Modifier.height((8 - 4 * collapse).dp))
-        Text(
-            text = groupName,
-            fontSize = nameSize,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-        Text(
-            text = "${others.size} people \u00b7 $transportLabel",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
+        IconButton(onClick = onBack) {
+            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+        }
+        AnimatedVisibility(
+            visible = !scrolled,
+            enter = fadeIn(RelaySprings.gentle()) + expandHorizontally(RelaySprings.gentle()),
+            exit = fadeOut(RelaySprings.gentle()) + shrinkHorizontally(RelaySprings.gentle()),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AvatarStack(others = others)
+                Spacer(Modifier.width(10.dp))
+            }
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = names,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = transportLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
 /**
- * Hexagonal avatar arrangement: with 7, one centered and six around it;
- * with 6 or fewer, all evenly spaced around the ring starting at the top.
- * The ring radius derives from avatar size + gap so neighbors never overlap.
+ * Stacked group avatars: each avatar overlaps the previous by 50% of its
+ * size, the first drawn on top so it stays fully visible. Max five visible;
+ * beyond five a "+N" circle for the remaining count, tucked under the fifth
+ * with the same 50% overlap.
  */
 @Composable
-private fun HexAvatarField(
-    participants: List<Participant>,
-    avatarSize: Dp,
-) {
-    val k = participants.size
-    if (k == 0) return
-    val gap = 8.dp
-    val ring = if (k == 7) participants.drop(1) else participants
-    val center = if (k == 7) participants.first() else null
-    val ringCount = ring.size
-    // Chord between adjacent ring avatars must clear avatarSize + gap:
-    // R = chord / (2 * sin(pi / ringCount)).
-    val radius: Dp = if (ringCount < 3) {
-        (avatarSize + gap) / 2
-    } else {
-        (avatarSize + gap) / (2 * kotlin.math.sin(kotlin.math.PI / ringCount).toFloat())
-    }
+private fun AvatarStack(others: List<Participant>) {
+    val avatarSize = 40.dp
+    val step = avatarSize / 2
+    val shown = others.take(5)
+    val remaining = others.size - shown.size
+    val totalWidth = avatarSize + step * (shown.size - 1).coerceAtLeast(0) +
+        if (remaining > 0) step else 0.dp
     Box(
-        modifier = Modifier.size(radius * 2 + avatarSize),
-        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .width(totalWidth)
+            .height(avatarSize),
     ) {
-        center?.let { p ->
-            ContactAvatar(
-                photoUri = p.photoUri,
-                name = p.displayName.ifBlank { p.address },
-                size = avatarSize,
-                shapeKey = p.address,
-                textStyle = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.align(Alignment.Center),
-            )
-        }
-        ring.forEachIndexed { index, p ->
-            val angle = -kotlin.math.PI / 2 + index * 2 * kotlin.math.PI / ringCount
-            val xOff = radius * kotlin.math.cos(angle).toFloat()
-            val yOff = radius * kotlin.math.sin(angle).toFloat()
+        shown.forEachIndexed { index, p ->
             ContactAvatar(
                 photoUri = p.photoUri,
                 name = p.displayName.ifBlank { p.address },
@@ -529,11 +516,62 @@ private fun HexAvatarField(
                 shapeKey = p.address,
                 textStyle = MaterialTheme.typography.titleSmall,
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .offset(x = xOff, y = yOff),
+                    .offset(x = step * index)
+                    .zIndex((shown.size - index).toFloat()),
             )
         }
+        if (remaining > 0) {
+            Box(
+                modifier = Modifier
+                    .offset(x = step * shown.size)
+                    .zIndex(0f)
+                    .size(avatarSize)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "+$remaining",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
+}
+
+/**
+ * Google Messages-style inline transport notice ("RCS chat with {name}",
+ * "Texting with {number} (SMS/MMS)"): centered small text at its timeline
+ * position, marking the transport switch point. Never a bubble, never
+ * attributed to a sender.
+ */
+@Composable
+private fun SystemNotice(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp, horizontal = 32.dp),
+    )
+}
+
+/**
+ * Nearest timeline entry that is NOT a system notice — notices sit inline
+ * but must not break bubble grouping.
+ */
+private fun nearestNonNotice(messages: List<Message>, index: Int, dir: Int): Message? {
+    var i = index + dir
+    while (i in messages.indices) {
+        val m = messages[i]
+        if (!isTransportSystemNotice(m.body)) return m
+        i += dir
+    }
+    return null
 }
 
 /**

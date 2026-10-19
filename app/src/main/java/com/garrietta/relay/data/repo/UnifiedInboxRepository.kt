@@ -251,14 +251,39 @@ class UnifiedInboxRepository(
     suspend fun rcsConversationFor(number: String): String =
         rcsTransport.conversationForNumber(number)
 
-    private fun loadRcsConversations(): List<Conversation> {
+    private suspend fun loadRcsConversations(): List<Conversation> {
+        val selfNorm = runCatching { ownAddress() }.getOrNull()
         return rcsTransport.currentRcsConversations()
-            .map { mapRcsConversation(it) }
+            .map { mapRcsConversation(it, selfNorm) }
             .sortedByDescending { it.date }
     }
 
-    private fun mapRcsConversation(c: com.garrietta.relay.rcs.proto.RcsConversation): Conversation {
-        val others = c.participants.filter { !it.isMe }
+    /**
+     * RCS participant cleanup: the server's participant list can include
+     * self — sometimes twice, and not always flagged isMe ("Grace, Garrett,
+     * Garrett"). Drop every self entry via the isMe flag plus an ownAddress
+     * match, and collapse duplicates by normalized address. His name must
+     * never appear in a header unless the chat is to himself specifically.
+     */
+    private fun cleanRcsParticipants(
+        parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
+        selfNorm: String?,
+    ): List<com.garrietta.relay.rcs.proto.RcsParticipant> {
+        val seen = mutableSetOf<String>()
+        return parts.filter { p ->
+            if (p.isMe) return@filter false
+            val norm = normalizedAddress(p.number)
+            if (norm.isEmpty()) return@filter true
+            if (norm == selfNorm) return@filter false
+            seen.add(norm)
+        }
+    }
+
+    private fun mapRcsConversation(
+        c: com.garrietta.relay.rcs.proto.RcsConversation,
+        selfNorm: String?,
+    ): Conversation {
+        val others = cleanRcsParticipants(c.participants, selfNorm)
         val name = c.name.ifBlank {
             others.joinToString(", ") {
                 it.fullName.ifBlank { it.firstName }.ifBlank { it.number }
@@ -273,7 +298,9 @@ class UnifiedInboxRepository(
             date = c.timestampMs,
             unread = c.unread,
             messageCount = 0,
-            transportLabel = "RCS",
+            // The REAL per-conversation transport from the server
+            // (Conversation.type field 22: 1=SMS, 2=RCS) — never hardcoded.
+            transportLabel = c.transportLabel(),
             photoUri = contactLookup.photoUri(address),
             threadIds = emptyList(),
             rcsConversationId = c.id,
@@ -284,9 +311,10 @@ class UnifiedInboxRepository(
     private val rcsServerMessages = mutableMapOf<String, List<com.garrietta.relay.rcs.proto.RcsMessage>>()
 
     /**
-     * Server message history for an RCS conversation, oldest first — the
-     * same shape as the Telephony loader so the thread screen stays
-     * transport-blind.
+     * Server message history for an RCS conversation, NEWEST FIRST — the
+     * thread list is reverseLayout, so index 0 (newest) renders at the
+     * bottom and the oldest sits at the top, matching Google Messages.
+     * (Ascending here rendered every chat upside down; diagnosed 2026-10-18.)
      */
     suspend fun rcsMessages(conversationId: String): List<Message> = withContext(Dispatchers.IO) {
         val conv = rcsTransport.currentRcsConversations().firstOrNull { it.id == conversationId }
@@ -308,22 +336,50 @@ class UnifiedInboxRepository(
                 read = true,
                 tmpId = m.tmpId.ifBlank { null },
             )
-        }.sortedBy { it.date }
+        }.sortedByDescending { it.date }
     }
 
-    /** Server participants for an RCS conversation, with self flagged. */
+    /** The server's transport type for one conversation (1=SMS, 2=RCS, 0=unknown). */
+    fun rcsConversationType(conversationId: String): Int =
+        rcsTransport.currentRcsConversations().firstOrNull { it.id == conversationId }?.type ?: 0
+
+    /** Server participants for an RCS conversation, deduped by normalized address (self kept). */
     suspend fun getRcsParticipants(conversationId: String): List<Participant> =
         withContext(Dispatchers.IO) {
             val conv = rcsTransport.currentRcsConversations()
                 .firstOrNull { it.id == conversationId }
                 ?: return@withContext emptyList()
-            conv.participants.map { p ->
+            val seen = mutableSetOf<String>()
+            conv.participants.filter { p ->
+                val norm = normalizedAddress(p.number)
+                if (norm.isEmpty()) true else seen.add(norm)
+            }.map { p ->
                 Participant(
                     address = p.number,
                     displayName = p.fullName.ifBlank { p.firstName }.ifBlank { p.number },
                     photoUri = contactLookup.photoUri(p.number),
                     isSelf = p.isMe,
                 )
+            }
+        }
+
+    /**
+     * Header-ready others for an RCS conversation: self removed (isMe flag
+     * plus ownAddress fallback — the server doesn't always flag every self
+     * entry) and deduped by normalized address.
+     */
+    suspend fun rcsOthers(conversationId: String): List<Participant> =
+        withContext(Dispatchers.IO) {
+            val selfNorm = runCatching { ownAddress() }.getOrNull()
+            val seen = mutableSetOf<String>()
+            getRcsParticipants(conversationId).filter { p ->
+                if (p.isSelf) false
+                else {
+                    val norm = normalizedAddress(p.address)
+                    if (norm.isEmpty()) true
+                    else if (norm == selfNorm) false
+                    else seen.add(norm)
+                }
             }
         }
 
@@ -527,7 +583,9 @@ class UnifiedInboxRepository(
             }
         } catch (_: SecurityException) {
         } catch (_: Exception) { /* best effort */ }
-        out.sortedBy { it.date }
+        // NEWEST FIRST: the thread list is reverseLayout (index 0 renders at
+        // the bottom), so descending puts the oldest at the top.
+        out.sortedByDescending { it.date }
     }
 
     /** Single-thread convenience; delegates to the merged loader. */

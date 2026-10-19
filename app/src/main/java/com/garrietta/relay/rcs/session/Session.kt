@@ -35,6 +35,7 @@ import com.garrietta.relay.rcs.proto.encodeMessageReadRequest
 import com.garrietta.relay.rcs.proto.encodeOutgoingRpcData
 import com.garrietta.relay.rcs.proto.encodeReceiveMessagesRequest
 import com.garrietta.relay.rcs.proto.encodeSendMessageRequest
+import com.garrietta.relay.rcs.proto.isWeirdPreResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -504,32 +505,45 @@ class RcsSession(context: Context) {
                         // Queue for ack FIRST (acking is load-bearing).
                         ackQueue.trySend(msg.responseId to mobile)
                         val rpcData = decodeRpcMessageData(msg.messageData)
-                        val innerBytes = rpcData.encryptedData?.let {
-                            runCatching { RcsCrypto.open(a.aesKey, a.hmacKey, it) }.getOrNull()
-                        } ?: rpcData.unencryptedData
-                        if (innerBytes == null) return
-                        // Correlate responses: normal RPC responses echo our
-                        // requestID in IncomingRPCMessage.responseID; the Gaia
-                        // pairing server echoes it in RPCMessageData.sessionID
-                        // (documented assumption — log both keys so the device
-                        // test shows which one fires).
-                        val waiter = waiters.remove(msg.responseId)
-                            ?: waiters.remove(rpcData.sessionId)
-                        if (waiter != null) {
-                            Log.d(TAG, "response correlated: responseId=${msg.responseId} " +
-                                    "rpcSessionId=${rpcData.sessionId}")
-                            waiter.complete(innerBytes)
-                            return
+                        // Reference (session_handler.go receiveResponse): in
+                        // Gaia/cookie mode the server emits unencrypted-only
+                        // "weird messages" BEFORE real action responses. They
+                        // must never satisfy an RPC waiter — their binary
+                        // protobuf payload is not pblite JSON and would hit
+                        // the JSON parser ("Couldn't open chat" bug, 2026-10-18).
+                        // Pairing actions are exempt (unencrypted by design).
+                        if (!isWeirdPreResponse(rpcData, hasCookies = gaiaCookies != null)) {
+                            val innerBytes = rpcData.encryptedData?.let {
+                                runCatching { RcsCrypto.open(a.aesKey, a.hmacKey, it) }.getOrNull()
+                            } ?: rpcData.unencryptedData
+                            if (innerBytes != null) {
+                                // Correlate responses: normal RPC responses echo our
+                                // requestID in IncomingRPCMessage.responseID; the Gaia
+                                // pairing server echoes it in RPCMessageData.sessionID
+                                // (documented assumption — log both keys so the device
+                                // test shows which one fires).
+                                val waiter = waiters.remove(msg.responseId)
+                                    ?: waiters.remove(rpcData.sessionId)
+                                if (waiter != null) {
+                                    Log.d(TAG, "response correlated: responseId=${msg.responseId} " +
+                                            "rpcSessionId=${rpcData.sessionId}")
+                                    waiter.complete(innerBytes)
+                                    return
+                                }
+                                // Otherwise: push event (UpdateEvents).
+                                val inner = innerBytes.toString(Charsets.UTF_8)
+                                val update = runCatching { decodeUpdateEvents(decodePbliteMap(inner)) }.getOrNull()
+                                when (update) {
+                                    is UpdateEvent.Messages -> update.messages.forEach { _incoming.emit(it) }
+                                    is UpdateEvent.Conversations -> _events.emit(SessionEvent.ConversationsChanged(update.conversations))
+                                    is UpdateEvent.Typing -> _events.emit(SessionEvent.Typing(update.conversationId, update.typing))
+                                    else -> Unit
+                                }
+                            }
                         }
-                        // Otherwise: push event (UpdateEvents).
-                        val inner = innerBytes.toString(Charsets.UTF_8)
-                        val update = runCatching { decodeUpdateEvents(decodePbliteMap(inner)) }.getOrNull()
-                        when (update) {
-                            is UpdateEvent.Messages -> update.messages.forEach { _incoming.emit(it) }
-                            is UpdateEvent.Conversations -> _events.emit(SessionEvent.ConversationsChanged(update.conversations))
-                            is UpdateEvent.Typing -> _events.emit(SessionEvent.Typing(update.conversationId, update.typing))
-                            else -> Unit
-                        }
+                        // Weird pre-response messages (and undecryptable
+                        // payloads) are safely ignored — the real response
+                        // arrives next and correlates normally.
                     }
                     else -> Unit
                 }

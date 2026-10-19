@@ -112,12 +112,27 @@ class UnifiedInboxRepository(
         scope.launch { refresh() }
     }
 
+    /** Last LIST_CONVERSATIONS pull (paired mode) — bounds recovery refreshes. */
+    private var lastRcsSyncMs = 0L
+
     fun refresh() {
         scope.launch {
             // A failed load must NEVER clobber the last good list — that
             // single defect is what wiped the inbox on reopen. Null means
             // "load failed"; only a real result replaces the state.
             refreshMutex.withLock {
+                // Paired: make sure the server list is fresh before mapping.
+                // The pull at session start may have failed (or been stolen
+                // by a pre-response message); an empty/stale list recovers
+                // here instead of showing "No conversations yet" forever.
+                // Failures surface verbatim via rcsSyncErrors (snackbar).
+                if (rcsTransport.isPairedNow) {
+                    val now = System.currentTimeMillis()
+                    if (rcsTransport.currentRcsConversations().isEmpty() || now - lastRcsSyncMs > 60_000) {
+                        rcsTransport.refreshConversations()
+                        lastRcsSyncMs = now
+                    }
+                }
                 val loaded = loadConversations()
                 if (loaded == null) {
                     Log.w(TAG, "refresh: conversation load failed; keeping last-good list")

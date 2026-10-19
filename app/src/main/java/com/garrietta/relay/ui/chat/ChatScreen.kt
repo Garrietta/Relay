@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
@@ -763,7 +764,9 @@ private fun Composer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        // Large tall text-box bubble.
+        // Compact text-box bubble: single-line height, grows to maxLines.
+        // The button row below holds a FIXED size — the text field takes
+        // the flexible space, buttons never shrink (typing or not).
         TextField(
             value = text,
             onValueChange = { text = it },
@@ -782,9 +785,9 @@ private fun Composer(
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 104.dp),
-            minLines = 3,
-            maxLines = 6,
+                .heightIn(min = 56.dp),
+            minLines = 1,
+            maxLines = 5,
         )
         Spacer(Modifier.height(8.dp))
         // Attached attachment bar: persistent row of expressive buttons
@@ -823,7 +826,11 @@ private fun Composer(
             ),
         )
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                // Fixed row height: the button sizes below are required, so
+                // the row can never collapse and shrink them (typing or not).
+                .height(64.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -839,6 +846,7 @@ private fun Composer(
             }
             Spacer(Modifier.weight(1f))
             // Large circular send button — the densest color in the scheme.
+            // requiredSize: never coerced smaller by tight parent constraints.
             IconButton(
                 onClick = ::submit,
                 enabled = canSend,
@@ -849,7 +857,7 @@ private fun Composer(
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 modifier = Modifier
-                    .size(64.dp)
+                    .requiredSize(64.dp)
                     .clip(CircleShape)
                     .graphicsLayer {
                         scaleX = sendPop.value
@@ -910,7 +918,9 @@ private fun AttachmentBarButton(
         color = containerColor,
         tonalElevation = 1.dp,
         modifier = Modifier
-            .size(52.dp)
+            // requiredSize: the button holds 52dp in every state — typing,
+            // keyboard open, or not. Never coerced smaller by the parent.
+            .requiredSize(52.dp)
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale

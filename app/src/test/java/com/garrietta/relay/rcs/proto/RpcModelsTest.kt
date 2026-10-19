@@ -174,4 +174,57 @@ class RpcModelsTest {
         assertEquals("p-alice", decoded.participantId)
         assertEquals(4, decoded.msgTransportType)
     }
+
+    // Regression: 2026-10-18 "Couldn't open chat" — in Gaia/cookie mode the
+    // server emits unencrypted-only binary messages BEFORE real action
+    // responses. They must never satisfy an RPC waiter (their bytes are not
+    // pblite JSON). Mirrors the reference's receiveResponse guard.
+    @Test fun `weird pre-response suppressed in Gaia mode`() {
+        val weird = RpcMessageData(
+            sessionId = "req-123",
+            timestamp = 0L,
+            action = Rpc.ACTION_GET_OR_CREATE_CONVERSATION,
+            unencryptedData = byteArrayOf(0x0A, 0x02, 0x08, 0x01),
+            encryptedData = null,
+        )
+        assertTrue(isWeirdPreResponse(weird, hasCookies = true))
+    }
+
+    @Test fun `weird pre-response not suppressed without cookies`() {
+        val weird = RpcMessageData(
+            sessionId = "req-123",
+            timestamp = 0L,
+            action = Rpc.ACTION_GET_OR_CREATE_CONVERSATION,
+            unencryptedData = byteArrayOf(0x0A),
+            encryptedData = null,
+        )
+        assertTrue(!isWeirdPreResponse(weird, hasCookies = false))
+    }
+
+    @Test fun `pairing actions exempt from weird-message suppression`() {
+        for (action in listOf(
+            Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT,
+            Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED,
+        )) {
+            val pairing = RpcMessageData(
+                sessionId = "req-123",
+                timestamp = 0L,
+                action = action,
+                unencryptedData = byteArrayOf(0x0A),
+                encryptedData = null,
+            )
+            assertTrue(!isWeirdPreResponse(pairing, hasCookies = true))
+        }
+    }
+
+    @Test fun `encrypted responses never suppressed`() {
+        val real = RpcMessageData(
+            sessionId = "req-123",
+            timestamp = 0L,
+            action = Rpc.ACTION_GET_OR_CREATE_CONVERSATION,
+            unencryptedData = null,
+            encryptedData = byteArrayOf(0x01, 0x02, 0x03),
+        )
+        assertTrue(!isWeirdPreResponse(real, hasCookies = true))
+    }
 }

@@ -418,6 +418,21 @@ fun decodeRpcMessageData(bytes: ByteArray): RpcMessageData {
     )
 }
 
+/**
+ * Reference (session_handler.go receiveResponse): when the client is
+ * cookie-authenticated (Gaia mode), the server emits unencrypted-only
+ * messages BEFORE real action responses — "very hacky way to ignore weird
+ * messages that come before real responses". These must never satisfy an
+ * RPC waiter: their binary protobuf payload is not pblite JSON. The Gaia
+ * pairing actions (44/45) are exempt — unencrypted by design.
+ */
+fun isWeirdPreResponse(rpcData: RpcMessageData, hasCookies: Boolean): Boolean =
+    hasCookies &&
+        rpcData.action != Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT &&
+        rpcData.action != Rpc.ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED &&
+        rpcData.encryptedData == null &&
+        rpcData.unencryptedData != null
+
 // ---------- conversations & messages (decode) ----------
 
 private fun decodeMessageInfo(m: Map<Int, PValue>): String? {

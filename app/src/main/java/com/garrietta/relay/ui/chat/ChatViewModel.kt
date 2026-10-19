@@ -249,8 +249,18 @@ class ChatViewModel(
         if (body.isBlank() || _sending.value) return
         _sending.value = true
         _sendError.value = null
-        val convId = rcsConversationId
         viewModelScope.launch {
+            // Resolve the RCS conversation on demand: init's async
+            // resolution (rcsConversationFor) may still be in flight when
+            // the user hits send immediately after opening the chat.
+            // session.conversationFor caches, so a redundant call is cheap.
+            val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
+                runCatching { repository.rcsConversationFor(address) }
+                    .onFailure { e ->
+                        Log.w(TAG, "send: on-demand RCS resolve failed", e)
+                    }
+                    .getOrNull()?.also { rcsConversationId = it }
+            } else null
             if (convId != null) {
                 sendRcs(convId, body)
             } else {

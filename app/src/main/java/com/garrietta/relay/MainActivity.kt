@@ -390,7 +390,10 @@ class MainActivity : ComponentActivity() {
                         date = System.currentTimeMillis(),
                         unread = false,
                         messageCount = 0,
-                        transportLabel = "SMS",
+                        // Paired: the new conversation resolves to an RCS
+                        // thread (ChatViewModel.rcsConversationFor) — label it
+                        // RCS so the header and send path agree from the start.
+                        transportLabel = if (app.rcsTransport.isPairedNow) "RCS" else "SMS",
                         photoUri = null,
                     )
                 },

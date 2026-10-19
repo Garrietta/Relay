@@ -352,6 +352,11 @@ class ChatViewModel(
         }
     }
 
+    /** Downloads + decrypts an RCS media attachment for bubble rendering. */
+    suspend fun mediaBytes(
+        att: com.garrietta.relay.rcs.proto.RcsMediaAttachment,
+    ): ByteArray = repository.mediaBytes(att)
+
     fun clearError() {
         _sendError.value = null
     }

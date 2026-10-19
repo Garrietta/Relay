@@ -43,6 +43,12 @@ import coil.compose.AsyncImagePainter
  *
  * When a photo IS present, it also feeds the per-contact Palette theming
  * (see ChatViewModel.loadContactTheme) — photo and color identity stay one.
+ *
+ * STANDING RULE (1:1 square): every avatar shape is scaled to fit inside a
+ * 1:1 square bounding box ([size] x [size]), so all avatar shapes have
+ * consistent sizing regardless of the polygon's aspect ratio. The photo
+ * center-crops to fill the shape; the shape itself is never distorted
+ * (uniform scale only).
  */
 @Composable
 fun ContactAvatar(
@@ -62,14 +68,20 @@ fun ContactAvatar(
         null
     }
     val resolvedShape = namedShape?.shape ?: shape
-    // Same height for every shape; width follows the shape's nature —
-    // HARD RATIO LOCK: the shape is always drawn at its full natural size
-    // (uniform scale, exact designed aspect — never distorted), and any
-    // width beyond 1.25x the height is center-CROPPED, so genuinely wide
-    // shapes (Pill, Clamshell) can't become lozenges.
+    // 1:1 SQUARE RULE: the shape is uniformly scaled to fit inside a
+    // size×size square — wide shapes shrink vertically, tall shapes shrink
+    // horizontally, square shapes fill it. HARD RATIO LOCK holds: uniform
+    // scale only, exact designed aspect, never distorted.
     val aspect = namedShape?.aspectRatio ?: 1f
-    val fullWidth = size * aspect
-    val visibleWidth = minOf(fullWidth, size * MAX_AVATAR_ASPECT)
+    val shapeWidth: Dp
+    val shapeHeight: Dp
+    if (aspect >= 1f) {
+        shapeWidth = size
+        shapeHeight = size / aspect
+    } else {
+        shapeWidth = size * aspect
+        shapeHeight = size
+    }
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(
@@ -79,20 +91,20 @@ fun ContactAvatar(
         )
         palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
     }
-    // Outer box = the visible slot (cropped to the max width); inner box =
-    // the shape's full natural size. The caller's modifier (shared-element,
-    // press scale, cluster offsets) lands on the visible slot.
+    // Outer box = the 1:1 square slot; inner box = the shape at its
+    // aspect-correct fit-inside-square size, centered. The caller's modifier
+    // (shared-element, press scale, cluster offsets, rotations) lands on
+    // the square slot.
     Box(
         modifier = modifier
-            .height(size)
-            .width(visibleWidth)
+            .size(size)
             .clipToBounds(),
         contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
-                .height(size)
-                .width(fullWidth)
+                .width(shapeWidth)
+                .height(shapeHeight)
                 .clip(resolvedShape)
                 .background(bg),
             contentAlignment = Alignment.Center,
@@ -128,6 +140,4 @@ fun ContactAvatar(
     }
 }
 
-/** Avatars are never wider than 1.25x their height — wider shapes center-crop. */
-private const val MAX_AVATAR_ASPECT = 1.25f
 

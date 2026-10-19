@@ -43,6 +43,11 @@ data class Conversation(
      * Telephony provider.
      */
     val rcsConversationId: String? = null,
+    /**
+     * Group members (self excluded) for group conversations. Drives the
+     * per-group avatar cluster in inbox rows. Empty for 1:1 rows.
+     */
+    val participants: List<Participant> = emptyList(),
 )
 
 /** A single message inside a conversation. */
@@ -61,6 +66,8 @@ data class Message(
      * Null for Telephony messages.
      */
     val tmpId: String? = null,
+    /** RCS media attachment (image/file); null for text messages. */
+    val media: com.garrietta.relay.rcs.proto.RcsMediaAttachment? = null,
 )
 
 /** Theme preference persisted in SharedPreferences. */

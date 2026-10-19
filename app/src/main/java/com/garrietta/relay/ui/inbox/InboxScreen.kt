@@ -69,7 +69,9 @@ import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.CloverShape
+import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
+import com.garrietta.relay.ui.theme.GroupAvatarCluster
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
@@ -525,22 +527,43 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
     // The avatar sits centered in a uniform-width slot so the column
     // forms a straight edge regardless of each shape's width.
     AvatarSlot {
-        ContactAvatar(
-            photoUri = conversation.photoUri,
-            name = conversation.displayName,
-            shapeKey = conversation.address.ifBlank { conversation.displayName },
-            modifier = Modifier
-                .motionSharedAvatar(
-                    SharedElementKeys.avatar(conversation.threadId),
-                    shape = WavyBlobShape,
-                )
-                .graphicsLayer {
+        if (conversation.participants.size > 1) {
+            // Group row: the group's unique avatar cluster (spiral / grid /
+            // zigzag, deterministic per conversation) instead of one avatar.
+            GroupAvatarCluster(
+                members = conversation.participants.map {
+                    ClusterMember(
+                        photoUri = it.photoUri,
+                        name = it.displayName.ifBlank { it.address },
+                        address = it.address,
+                    )
+                },
+                conversationKey = conversation.rcsConversationId
+                    ?: "tel:${conversation.threadId}",
+                boxSize = 60.dp,
+                modifier = Modifier.graphicsLayer {
                     scaleX = pressScale
                     scaleY = pressScale
                 },
-            size = 56.dp,
-            shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
-        )
+            )
+        } else {
+            ContactAvatar(
+                photoUri = conversation.photoUri,
+                name = conversation.displayName,
+                shapeKey = conversation.address.ifBlank { conversation.displayName },
+                modifier = Modifier
+                    .motionSharedAvatar(
+                        SharedElementKeys.avatar(conversation.threadId),
+                        shape = WavyBlobShape,
+                    )
+                    .graphicsLayer {
+                        scaleX = pressScale
+                        scaleY = pressScale
+                    },
+                size = 56.dp,
+                shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
+            )
+        }
     }
 }
 

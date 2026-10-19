@@ -54,14 +54,18 @@ data class AuthMessage(
     val configVersion: ConfigVersion = ConfigVersion.CURRENT,
 )
 
-fun encodeAuthMessage(a: AuthMessage): ByteArray {
+fun encodeAuthMessage(a: AuthMessage): ByteArray =
+    ProtoCodec.encode(authMessageFields(a))
+
+/** AuthMessage as a field map, for embedding in other requests. */
+fun authMessageFields(a: AuthMessage): Map<Int, FieldVal> {
     val fields = mutableMapOf<Int, FieldVal>(
         1 to FieldVal.Str(a.requestId),
         7 to FieldVal.Msg(encodeConfigVersionFields(a.configVersion)),
     )
     if (a.network.isNotEmpty()) fields[3] = FieldVal.Str(a.network)
     if (a.tachyonToken.isNotEmpty()) fields[6] = FieldVal.Bytes(a.tachyonToken)
-    return ProtoCodec.encode(fields)
+    return fields
 }
 
 private fun encodeConfigVersionFields(c: ConfigVersion): Map<Int, FieldVal> = mapOf(

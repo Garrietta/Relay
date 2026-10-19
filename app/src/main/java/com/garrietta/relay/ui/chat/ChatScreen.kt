@@ -10,9 +10,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -23,11 +22,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
@@ -53,6 +52,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -73,9 +73,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shape
+import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -83,19 +86,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isTransportSystemNotice
+import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
+import com.garrietta.relay.ui.theme.GroupAvatarCluster
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
-import com.garrietta.relay.ui.theme.SquircleShape
 import com.garrietta.relay.ui.theme.WavyBlobShape
-import com.garrietta.relay.ui.theme.expressiveShape
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import com.garrietta.relay.ui.theme.senderBubbleColors
 import java.text.SimpleDateFormat
@@ -132,12 +135,33 @@ fun ChatScreen(
     // Per-sender bubble theming applies to groups.
     val headerMode = if (others.size <= 1) HeaderMode.OneToOne else HeaderMode.Group
     val isGroup = headerMode == HeaderMode.Group
+    // Stable per-conversation key for the group avatar pattern: the same
+    // group always gets the same cluster arrangement (spiral/grid/zigzag).
+    val patternKey = rcsConversationId ?: "tel:$threadId"
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    // Any scroll collapses the 1:1 header to top-bar height and drops the
-    // group avatar stack. Boolean-driven (never a spring retargeted every
-    // scroll frame — the #102 lesson); RelaySprings animate the change.
-    val scrolled = listState.firstVisibleItemIndex > 0 ||
-        listState.firstVisibleItemScrollOffset > 0
+    // Sticky collapse with hysteresis, gated on real scrollability. The old
+    // "any offset > 0" flapped: a short thread's overscroll bounce would
+    // start the minimize and snap it straight back to full size. Now the
+    // header only minimizes past a threshold when the list can actually
+    // scroll, and stays minimized until the user returns to the very top.
+    // Boolean-driven (never a spring retargeted every scroll frame — the
+    // #102 lesson); RelaySprings animate the change.
+    var headerCollapsed by remember { mutableStateOf(false) }
+    val collapseThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
+    LaunchedEffect(
+        listState.firstVisibleItemIndex,
+        listState.firstVisibleItemScrollOffset,
+    ) {
+        val idx = listState.firstVisibleItemIndex
+        val off = listState.firstVisibleItemScrollOffset
+        val scrollable = listState.canScrollForward || listState.canScrollBackward
+        headerCollapsed = if (!headerCollapsed) {
+            scrollable && (idx > 0 || off > collapseThresholdPx)
+        } else {
+            !(idx == 0 && off == 0)
+        }
+    }
+    val scrolled = headerCollapsed
     // The REAL transport label: the ViewModel refreshes it from the
     // server's Conversation.type for RCS rows (never hardcoded).
     val liveTransportLabel by viewModel.transportLabel.collectAsState()
@@ -173,6 +197,7 @@ fun ChatScreen(
                     threadId = threadId,
                     transportLabel = liveTransportLabel,
                     scrolled = scrolled,
+                    patternKey = patternKey,
                     onBack = onBack,
                 )
             },
@@ -221,6 +246,19 @@ fun ChatScreen(
                             // inline text — never bubbles, never attributed.
                             if (isTransportSystemNotice(message.body)) {
                                 SystemNotice(text = message.body.trim())
+                                return@itemsIndexed
+                            }
+                            // RCS media: image/file bubble (downloaded +
+                            // decrypted on first compose), never an empty
+                            // placeholder.
+                            val media = message.media
+                            if (media != null) {
+                                MediaBubble(
+                                    message = message,
+                                    media = media,
+                                    loadMedia = { att -> viewModel.mediaBytes(att) },
+                                    maxBubbleWidth = maxBubbleWidth,
+                                )
                                 return@itemsIndexed
                             }
                             // reverseLayout: index+1 is visually above, index-1 below.
@@ -274,11 +312,12 @@ private enum class HeaderMode { OneToOne, Group }
 
 /**
  * Chat header dispatch. 1:1 = their face centered at the top with their
- * name directly under; on scroll it collapses (RelaySprings) to the height
- * of the top bar. Group = a static inline row: back arrow, contact photos
- * stacked with 50% overlap (max five, then a "+N" circle), comma-separated
- * member names with ellipsis; on scroll the photos drop away and only the
- * names remain. Background matches the thread container — no seam.
+ * name directly under (compact: ~half the old footprint); on scroll it
+ * collapses (RelaySprings) to the height of the top bar. Group = a static
+ * inline row: back arrow, the group's unique avatar cluster (spiral / grid
+ * / zigzag, max five, then a "+N" circle), comma-separated member names
+ * with ellipsis; on scroll the photos drop away and only the names remain.
+ * Background matches the thread container — no seam.
  */
 @Composable
 private fun ChatHeader(
@@ -291,6 +330,7 @@ private fun ChatHeader(
     threadId: Long,
     transportLabel: String,
     scrolled: Boolean,
+    patternKey: String,
     onBack: () -> Unit,
 ) {
     Column(
@@ -319,6 +359,7 @@ private fun ChatHeader(
                 others = others,
                 transportLabel = transportLabel,
                 scrolled = scrolled,
+                patternKey = patternKey,
                 onBack = onBack,
             )
         }
@@ -385,41 +426,42 @@ private fun OneToOneHeader(
                 }
             }
         } else {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
+            // Compact expanded header (~half the old footprint): the back
+            // arrow overlays the top-start corner instead of consuming a
+            // full row; 48dp avatar, tighter type and spacing.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.align(Alignment.TopStart),
                 ) {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                 }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp),
+                        .padding(top = 2.dp, bottom = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     ContactAvatar(
                         photoUri = photoUri,
                         name = name,
-                        size = 72.dp,
+                        size = 48.dp,
                         shapeKey = shapeKey,
-                        textStyle = MaterialTheme.typography.headlineSmall,
+                        textStyle = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.motionSharedAvatar(
                             SharedElementKeys.avatar(threadId),
                             shape = WavyBlobShape,
                         ),
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         text = name,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 24.dp),
+                        modifier = Modifier.padding(horizontal = 56.dp),
                     )
                     Text(
                         text = transportLabel,
@@ -434,18 +476,19 @@ private fun OneToOneHeader(
 }
 
 /**
- * Group header: a static inline row — back arrow, contact photos STACKED
- * with 50% overlap (first fully visible on top, each next half-obscured by
- * the previous; max five, then a "+N" circle tucked under the fifth for the
- * remainder), then the comma-separated member names, ellipsized before the
- * right edge. No scroll-driven avatar animation: the stack stays in line
- * from the start; on scroll the photos drop away and only the names remain.
+ * Group header: a static inline row — back arrow, the group's UNIQUE avatar
+ * cluster (spiral / grid / zigzag, deterministic per conversation: different
+ * sizes, shapes and rotations, overlapping), then the comma-separated member
+ * names, ellipsized before the right edge. No scroll-driven avatar
+ * animation: the cluster stays in line from the start; on scroll the photos
+ * drop away and only the names remain.
  */
 @Composable
 private fun GroupHeader(
     others: List<Participant>,
     transportLabel: String,
     scrolled: Boolean,
+    patternKey: String,
     onBack: () -> Unit,
 ) {
     val names = remember(others) {
@@ -468,7 +511,17 @@ private fun GroupHeader(
             exit = fadeOut(RelaySprings.gentle()) + shrinkHorizontally(RelaySprings.gentle()),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                AvatarStack(others = others)
+                GroupAvatarCluster(
+                    members = others.map {
+                        ClusterMember(
+                            photoUri = it.photoUri,
+                            name = it.displayName.ifBlank { it.address },
+                            address = it.address,
+                        )
+                    },
+                    conversationKey = patternKey,
+                    boxSize = 76.dp,
+                )
                 Spacer(Modifier.width(10.dp))
             }
         }
@@ -490,58 +543,6 @@ private fun GroupHeader(
 }
 
 /**
- * Stacked group avatars: each avatar overlaps the previous by 50% of its
- * size, the first drawn on top so it stays fully visible. Max five visible;
- * beyond five a "+N" circle for the remaining count, tucked under the fifth
- * with the same 50% overlap.
- */
-@Composable
-private fun AvatarStack(others: List<Participant>) {
-    val avatarSize = 40.dp
-    val step = avatarSize / 2
-    val shown = others.take(5)
-    val remaining = others.size - shown.size
-    val totalWidth = avatarSize + step * (shown.size - 1).coerceAtLeast(0) +
-        if (remaining > 0) step else 0.dp
-    Box(
-        modifier = Modifier
-            .width(totalWidth)
-            .height(avatarSize),
-    ) {
-        shown.forEachIndexed { index, p ->
-            ContactAvatar(
-                photoUri = p.photoUri,
-                name = p.displayName.ifBlank { p.address },
-                size = avatarSize,
-                shapeKey = p.address,
-                textStyle = MaterialTheme.typography.titleSmall,
-                modifier = Modifier
-                    .offset(x = step * index)
-                    .zIndex((shown.size - index).toFloat()),
-            )
-        }
-        if (remaining > 0) {
-            Box(
-                modifier = Modifier
-                    .offset(x = step * shown.size)
-                    .zIndex(0f)
-                    .size(avatarSize)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "+$remaining",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/**
  * Google Messages-style inline transport notice ("RCS chat with {name}",
  * "Texting with {number} (SMS/MMS)"): centered small text at its timeline
  * position, marking the transport switch point. Never a bubble, never
@@ -558,6 +559,159 @@ private fun SystemNotice(text: String) {
             .fillMaxWidth()
             .padding(vertical = 10.dp, horizontal = 32.dp),
     )
+}
+
+/**
+ * RCS media bubble: downloads + decrypts the attachment on first compose
+ * (disk-cached in the transport), renders images with an expressive clip,
+ * tap to view fullscreen. Failures surface VERBATIM ("Media unavailable:
+ * <reason>") instead of the old empty placeholder bubble.
+ */
+@Composable
+private fun MediaBubble(
+    message: Message,
+    media: RcsMediaAttachment,
+    loadMedia: suspend (RcsMediaAttachment) -> ByteArray,
+    maxBubbleWidth: Dp,
+) {
+    var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
+    var error by remember(message.id) { mutableStateOf<String?>(null) }
+    var zoomed by remember(message.id) { mutableStateOf(false) }
+
+    LaunchedEffect(message.id) {
+        if (bytes == null && error == null) {
+            try {
+                bytes = loadMedia(media)
+            } catch (e: Exception) {
+                error = e.message ?: e.javaClass.simpleName
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = maxBubbleWidth)
+                .clip(RoundedCornerShape(20.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .combinedClickable(
+                    onClick = { if (bytes != null && media.isImage) zoomed = true },
+                    onLongClick = { },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            val b = bytes
+            val err = error
+            when {
+                err != null -> Text(
+                    text = "Media unavailable: $err",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+                b != null && media.isImage -> {
+                    val aspect = if (media.width > 0 && media.height > 0) {
+                        (media.width.toFloat() / media.height.toFloat()).coerceIn(0.5f, 2.2f)
+                    } else {
+                        null
+                    }
+                    AsyncImage(
+                        model = b,
+                        contentDescription = "Shared image",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .widthIn(max = maxBubbleWidth)
+                            .then(
+                                if (aspect != null) Modifier.aspectRatio(aspect)
+                                else Modifier.heightIn(min = 120.dp, max = 340.dp),
+                            ),
+                    )
+                }
+                b != null -> {
+                    // Non-image file: labeled tile.
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.AttachFile,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = media.mimeType.ifBlank { "File" },
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            if (media.size > 0) {
+                                Text(
+                                    text = formatBytes(media.size),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                else -> Box(
+                    modifier = Modifier.size(width = 220.dp, height = 150.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    SevenShapeLoadingIndicator(
+                        diameter = 40.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+        if (message.body.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            // Caption as a compact bubble under the media.
+            Box(
+                modifier = Modifier
+                    .widthIn(max = maxBubbleWidth)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(
+                        if (message.isOutgoing) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    )
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Text(
+                    message.body,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+
+    if (zoomed) {
+        val b = bytes
+        if (b != null) {
+            Dialog(onDismissRequest = { zoomed = false }) {
+                AsyncImage(
+                    model = b,
+                    contentDescription = "Shared image fullscreen",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+private fun formatBytes(n: Long): String = when {
+    n < 1024 -> "$n B"
+    n < 1024 * 1024 -> "${n / 1024} KB"
+    else -> "${n / (1024 * 1024)} MB"
 }
 
 /**
@@ -769,11 +923,13 @@ private fun lerpBubbleShape(
 }
 
 /**
- * M3 Expressive composer: a LARGE tall text-box bubble with a PERSISTENT
- * attached attachment bar beneath it (Garrett's call: no toggles, no
- * pop-ups) — rounded-square attachment buttons in a row, and the LARGE
- * circular send button at the row's right end with a spring pop on send.
+ * M3 Expressive one-pill composer: [paperclip] [text entry] [send] in a
+ * single pill. The paperclip opens the attachment sheet (Gallery, Camera,
+ * GIF, Files); the text field flexes in the middle; send sits at the right
+ * end with a spring pop on send. Buttons hold fixed sizes typing or not
+ * (the #110 no-shrink rule).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Composer(
     sending: Boolean,
@@ -781,6 +937,7 @@ private fun Composer(
     onAttachmentSoon: () -> Unit,
 ) {
     var text by remember { mutableStateOf("") }
+    var showAttachSheet by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
@@ -796,94 +953,58 @@ private fun Composer(
         }
     }
 
-    Column(
+    Surface(
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        // Compact text-box bubble: single-line height, grows to maxLines.
-        // The button row below holds a FIXED size — the text field takes
-        // the flexible space, buttons never shrink (typing or not).
-        TextField(
-            value = text,
-            onValueChange = { text = it },
-            placeholder = { Text("Message") },
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.Sentences,
-                imeAction = ImeAction.Send,
-            ),
-            keyboardActions = KeyboardActions(onSend = { submit() }),
-            shape = RoundedCornerShape(28.dp),
-            colors = TextFieldDefaults.colors(
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp),
-            minLines = 1,
-            maxLines = 5,
-        )
-        Spacer(Modifier.height(8.dp))
-        // Attached attachment bar: persistent row of expressive buttons
-        // beneath the text box; send sits at the row's right end. Each
-        // attachment button takes a DIFFERENT shape and tonal color from the
-        // vocabulary (one family, varied members); the send button keeps the
-        // densest color in the scheme.
-        val attachStyles = listOf(
-            AttachSpec(
-                icon = Icons.Filled.Image,
-                label = "Gallery",
-                shape = expressiveShape("Cookie6"),
-                container = MaterialTheme.colorScheme.secondaryContainer,
-                content = MaterialTheme.colorScheme.onSecondaryContainer,
-            ),
-            AttachSpec(
-                icon = Icons.Filled.PhotoCamera,
-                label = "Camera",
-                shape = expressiveShape("Sunny"),
-                container = MaterialTheme.colorScheme.tertiaryContainer,
-                content = MaterialTheme.colorScheme.onTertiaryContainer,
-            ),
-            AttachSpec(
-                icon = Icons.Filled.Gif,
-                label = "GIF",
-                shape = expressiveShape("Gem"),
-                container = MaterialTheme.colorScheme.secondaryContainer,
-                content = MaterialTheme.colorScheme.onSecondaryContainer,
-            ),
-            AttachSpec(
-                icon = Icons.Filled.AttachFile,
-                label = "Files",
-                shape = expressiveShape("Pill"),
-                container = MaterialTheme.colorScheme.tertiaryContainer,
-                content = MaterialTheme.colorScheme.onTertiaryContainer,
-            ),
-        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                // Fixed row height: the button sizes below are required, so
-                // the row can never collapse and shrink them (typing or not).
-                .height(64.dp),
+                .heightIn(min = 64.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            for (spec in attachStyles) {
-                AttachmentBarButton(
-                    icon = spec.icon,
-                    label = spec.label,
-                    shape = spec.shape,
-                    containerColor = spec.container,
-                    contentColor = spec.content,
-                    onClick = onAttachmentSoon,
+            // Paperclip: opens the attachment sheet. Fixed size, like send.
+            IconButton(
+                onClick = { showAttachSheet = true },
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .requiredSize(48.dp),
+            ) {
+                Icon(
+                    Icons.Filled.AttachFile,
+                    contentDescription = "Attachments",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
                 )
             }
-            Spacer(Modifier.weight(1f))
-            // Large circular send button — the densest color in the scheme.
+            TextField(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = { Text("Message") },
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    imeAction = ImeAction.Send,
+                ),
+                keyboardActions = KeyboardActions(onSend = { submit() }),
+                shape = RoundedCornerShape(24.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent,
+                ),
+                modifier = Modifier.weight(1f),
+                minLines = 1,
+                maxLines = 5,
+            )
+            // Send at the pill's right end — the densest color in the scheme.
             // requiredSize: never coerced smaller by tight parent constraints.
             IconButton(
                 onClick = ::submit,
@@ -891,11 +1012,12 @@ private fun Composer(
                 colors = IconButtonDefaults.iconButtonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    disabledContainerColor = Color.Transparent,
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 modifier = Modifier
-                    .requiredSize(64.dp)
+                    .padding(end = 6.dp)
+                    .requiredSize(52.dp)
                     .clip(CircleShape)
                     .graphicsLayer {
                         scaleX = sendPop.value
@@ -905,14 +1027,73 @@ private fun Composer(
                 if (sending) {
                     // Expressive sending state: the seven-shape loop.
                     SevenShapeLoadingIndicator(
-                        diameter = 26.dp,
-                        color = MaterialTheme.colorScheme.primary,
+                        diameter = 24.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
                     Icon(
                         Icons.Filled.Send,
                         contentDescription = "Send",
-                        modifier = Modifier.size(28.dp),
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+        }
+    }
+
+    if (showAttachSheet) {
+        AttachmentSheet(
+            onDismiss = { showAttachSheet = false },
+            onPick = {
+                showAttachSheet = false
+                onAttachmentSoon()
+            },
+        )
+    }
+}
+
+/**
+ * Attachment picker sheet: Gallery, Camera, GIF, Files. Picks are still
+ * stubbed ("coming soon") — the sheet is the entry point for sends later.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AttachmentSheet(
+    onDismiss: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(bottom = 28.dp)) {
+            Text(
+                text = "Attachments",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+            val options = listOf(
+                Icons.Filled.Image to "Gallery",
+                Icons.Filled.PhotoCamera to "Camera",
+                Icons.Filled.Gif to "GIF",
+                Icons.Filled.AttachFile to "Files",
+            )
+            for ((icon, label) in options) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(label) }
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        icon,
+                        contentDescription = label,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodyLarge,
                     )
                 }
             }
@@ -920,60 +1101,6 @@ private fun Composer(
     }
 }
 
-/**
- * One persistent attachment button: an expressive shape + tonal color from
- * the vocabulary (not all squircles), no toggle behavior. Presses bounce —
- * shape-as-state via press scale. Picks are stubbed ("coming soon").
- */
-private data class AttachSpec(
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val label: String,
-    val shape: Shape,
-    val container: Color,
-    val content: Color,
-)
-
-@Composable
-private fun AttachmentBarButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit,
-    shape: Shape = SquircleShape,
-    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
-    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.88f else 1f,
-        animationSpec = RelaySprings.bouncy(),
-        label = "attachPress",
-    )
-    Surface(
-        onClick = onClick,
-        interactionSource = interactionSource,
-        shape = shape,
-        color = containerColor,
-        tonalElevation = 1.dp,
-        modifier = Modifier
-            // requiredSize: the button holds 52dp in every state — typing,
-            // keyboard open, or not. Never coerced smaller by the parent.
-            .requiredSize(52.dp)
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            },
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                icon,
-                contentDescription = label,
-                tint = contentColor,
-                modifier = Modifier.size(24.dp),
-            )
-        }
-    }
-}
 
 /** Position of a bubble within a sender group (segmented corners). */
 private enum class ItemPosition { SINGLE, FIRST, MIDDLE, LAST }

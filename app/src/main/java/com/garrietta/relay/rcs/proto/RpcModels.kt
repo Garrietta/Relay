@@ -131,6 +131,68 @@ data class RcsMessage(
     val participantId: String = "",
     /** conversations.Message.type (field 11): 1=sms, 2/3=mms, 4=rcs. */
     val msgTransportType: Int = 0,
+    /** Media attachment when the message carries one (MessageInfo field 3). */
+    val media: RcsMediaAttachment? = null,
+)
+
+/**
+ * conversations.MediaContent (MessageInfo field 3): format=1, mediaID=2,
+ * mediaName=4, size=5, dimensions=6{1:width, 2:height}, mediaData=7,
+ * thumbnailMediaID=9, decryptionKey=11, thumbnailDecryptionKey=12,
+ * mimeType=14.
+ */
+data class RcsMediaAttachment(
+    val mediaId: String,
+    val mimeType: String,
+    val decryptionKey: ByteArray,
+    val width: Long = 0,
+    val height: Long = 0,
+    val size: Long = 0,
+    /**
+     * Small media can arrive inline in the message itself; when present no
+     * download is needed.
+     */
+    val inlineData: ByteArray? = null,
+) {
+    /** True for image/* content types (renderable in a bubble). */
+    val isImage: Boolean get() = mimeType.startsWith("image/")
+}
+
+/** Decodes conversations.MediaContent from a MessageInfo field-3 map. */
+fun decodeMediaContent(m: Map<Int, List<FieldVal>>): RcsMediaAttachment? {
+    val mediaId = m.firstStr(2).orEmpty()
+    val inline = m.firstBytes(7)
+    if (mediaId.isEmpty() && inline == null) return null
+    val dims = m.firstMsg(6)
+    return RcsMediaAttachment(
+        mediaId = mediaId,
+        mimeType = m.firstStr(14).orEmpty(),
+        decryptionKey = m.firstBytes(11) ?: byteArrayOf(),
+        width = dims?.firstVarint(1) ?: 0L,
+        height = dims?.firstVarint(2) ?: 0L,
+        size = m.firstVarint(5) ?: 0L,
+        inlineData = inline,
+    )
+}
+
+/**
+ * client.DownloadAttachmentRequest{1:AttachmentInfo{1:attachmentID,
+ * 2:encrypted}, 2:AuthMessage} as binary protobuf. The base64 of this goes
+ * in the x-goog-download-metadata header of GET .../upload.
+ */
+fun encodeDownloadAttachmentRequest(
+    auth: AuthMessage,
+    mediaId: String,
+): ByteArray = ProtoCodec.encode(
+    mapOf(
+        1 to FieldVal.Msg(
+            mapOf(
+                1 to FieldVal.Str(mediaId),
+                2 to FieldVal.Varint(1L),
+            ),
+        ),
+        2 to FieldVal.Msg(authMessageFields(auth)),
+    ),
 )
 
 // ---------- outgoing envelope ----------
@@ -526,17 +588,19 @@ fun decodeRcsMessage(
     participants: List<RcsParticipant> = emptyList(),
     fallbackFromMe: Boolean = false,
 ): RcsMessage {
-    val infos = m.repMsgs(10).mapNotNull(::decodeMessageInfo)
+    val infos = m.repMsgs(10)
+    val media = infos.mapNotNull { it.firstMsg(3)?.let(::decodeMediaContent) }.firstOrNull()
     return RcsMessage(
         id = m.firstStr(1).orEmpty(),
         conversationId = m.firstStr(7).orEmpty(),
-        body = infos.firstOrNull().orEmpty(),
+        body = infos.mapNotNull(::decodeMessageInfo).firstOrNull().orEmpty(),
         timestampMs = normalizeServerTimestamp(m.firstVarint(5) ?: 0L),
         fromMe = resolveFromMe(m, participants, fallbackFromMe),
         status = m.firstMsg(4)?.firstVarint(2)?.toInt() ?: 0,
         tmpId = m.firstStr(12).orEmpty(),
         participantId = m.firstStr(9).orEmpty(),
         msgTransportType = m.firstVarint(11)?.toInt() ?: 0,
+        media = media,
     )
 }
 

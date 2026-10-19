@@ -11,9 +11,13 @@ import com.garrietta.relay.rcs.pairing.GaiaPairing
 import com.garrietta.relay.rcs.proto.DeviceInfo
 import com.garrietta.relay.rcs.proto.RcsConversation
 import com.garrietta.relay.rcs.proto.RcsMessage
+import com.garrietta.relay.rcs.proto.AuthMessage
+import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.rcs.proto.RcsParticipant
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.encodeDevice
+import com.garrietta.relay.rcs.proto.encodeDownloadAttachmentRequest
+import com.garrietta.relay.rcs.media.aesGcmDecryptChunked
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
 import com.garrietta.relay.rcs.session.RcsSession
@@ -622,6 +626,58 @@ class RcsTransport(context: Context) : Transport {
         else -> "Pairing failed (phone error ${f.finishErrorType}/${f.finishErrorCode})"
     }
 
+    /**
+     * Downloads and AES-GCM-decrypts an RCS media attachment, cached on disk
+     * by mediaID. Throws with a verbatim reason when unavailable — the UI
+     * surfaces it instead of rendering an empty bubble.
+     *
+     * Clean-room from the protocol's media flow: DownloadAttachmentRequest
+     * (base64) in the x-goog-download-metadata header of GET .../upload,
+     * then AES-GCM chunked stream decrypt with the message's decryption key.
+     */
+    suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
+        withContext(Dispatchers.IO) {
+            att.inlineData?.let { return@withContext it }
+            require(att.mediaId.isNotEmpty()) { "media unavailable: no attachment id" }
+            require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
+            val cacheFile = java.io.File(java.io.File(appContext.cacheDir, "rcs_media"), att.mediaId)
+            if (cacheFile.exists()) return@withContext cacheFile.readBytes()
+            val token = session.currentAuth()?.tachyonToken
+                ?: throw IllegalStateException("media unavailable: not paired")
+            val meta = java.util.Base64.getEncoder().encodeToString(
+                encodeDownloadAttachmentRequest(
+                    AuthMessage(
+                        requestId = java.util.UUID.randomUUID().toString(),
+                        network = "GDitto",
+                        tachyonToken = token,
+                    ),
+                    att.mediaId,
+                ),
+            )
+            val req = okhttp3.Request.Builder()
+                .url(UPLOAD_URL)
+                .get()
+                .header("x-goog-download-metadata", meta)
+                .header("User-Agent", MEDIA_UA)
+                .header("accept", "*/*")
+                .header("origin", "https://messages.google.com")
+                .header("referer", "https://messages.google.com/")
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "cors")
+                .header("sec-fetch-dest", "empty")
+                .build()
+            val encrypted = RelayApi.client().newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException("media unavailable: download HTTP ${resp.code}")
+                }
+                resp.body!!.bytes()
+            }
+            val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
+            cacheFile.parentFile?.mkdirs()
+            cacheFile.writeBytes(plain)
+            plain
+        }
+
     /** Saved Google session cookies, if a Gaia sign-in was captured. */
     fun loadGaiaCookies(): String? =
         com.garrietta.relay.rcs.session.AuthStore(appContext).loadCookies()
@@ -635,6 +691,10 @@ class RcsTransport(context: Context) : Transport {
 
     companion object {
         private const val TAG = "RcsTransport"
+        private const val UPLOAD_URL = "https://instantmessaging-pa.googleapis.com/upload"
+        /** Browser UA for the media download, mirroring the web client. */
+        private const val MEDIA_UA =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         /** Whole pairing attempt bound: 5 minutes, then back to idle. */
         private const val PAIRING_TIMEOUT_MS = 5 * 60 * 1000L
         /**

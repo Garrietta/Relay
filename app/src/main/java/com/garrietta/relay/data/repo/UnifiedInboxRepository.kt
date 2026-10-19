@@ -289,7 +289,13 @@ class UnifiedInboxRepository(
                 it.fullName.ifBlank { it.firstName }.ifBlank { it.number }
             }
         }.ifBlank { c.id }
-        val address = others.firstOrNull()?.number ?: name
+        // Self-chat (no others): address on the self number so the photo
+        // lookup and the avatar shape key match the chat header's. Falling
+        // back to the display name here showed an initial in the inbox
+        // while the chat showed the photo (and a different shape).
+        val address = others.firstOrNull()?.number?.ifBlank { null }
+            ?: selfNorm?.ifBlank { null }
+            ?: name
         return Conversation(
             threadId = ("rcs:" + c.id).hashCode().toLong(),
             address = address,
@@ -304,6 +310,15 @@ class UnifiedInboxRepository(
             photoUri = contactLookup.photoUri(address),
             threadIds = emptyList(),
             rcsConversationId = c.id,
+            // Group members (self already excluded) for the inbox avatar
+            // cluster and its per-group pattern.
+            participants = others.map {
+                Participant(
+                    address = it.number,
+                    displayName = it.fullName.ifBlank { it.firstName }.ifBlank { it.number },
+                    photoUri = contactLookup.photoUri(it.number),
+                )
+            },
         )
     }
 
@@ -335,9 +350,14 @@ class UnifiedInboxRepository(
                 isMms = false,
                 read = true,
                 tmpId = m.tmpId.ifBlank { null },
+                media = m.media,
             )
         }.sortedByDescending { it.date }
     }
+
+    /** Downloads + decrypts an RCS media attachment (disk-cached in transport). */
+    suspend fun mediaBytes(att: com.garrietta.relay.rcs.proto.RcsMediaAttachment): ByteArray =
+        rcsTransport.downloadMedia(att)
 
     /** The server's transport type for one conversation (1=SMS, 2=RCS, 0=unknown). */
     fun rcsConversationType(conversationId: String): Int =
@@ -423,7 +443,7 @@ class UnifiedInboxRepository(
      * legs by address format. Group threads and short codes never merge, and
      * two different contact IDs never merge.
      */
-    private fun mergeThreads(raw: List<RawThread>): List<Conversation> {
+    private suspend fun mergeThreads(raw: List<RawThread>): List<Conversation> {
         val candidates = raw.map { t ->
             MergeCandidate(
                 threadId = t.threadId,
@@ -448,7 +468,43 @@ class UnifiedInboxRepository(
         if (merged.size < candidates.size) {
             Log.d(TAG, "mergeThreads: ${candidates.size - merged.size} thread(s) merged away or hidden as provider noise")
         }
-        return merged
+        // Group rows get their members (self excluded) for the inbox avatar
+        // cluster. Groups never merge, so each group row maps to exactly
+        // one candidate's recipient set.
+        val selfNorm = runCatching { ownAddress() }.getOrNull()
+        val byThread = candidates.associateBy { it.threadId }
+        return merged.map { conv ->
+            val recipients = conv.threadIds
+                .mapNotNull { byThread[it]?.recipients }
+                .flatten().toSet()
+            if (recipients.size > 1) {
+                val others = recipients.filterNot { isSelfAddress(it, selfNorm) }
+                conv.copy(
+                    participants = others.map { addr ->
+                        Participant(
+                            address = addr,
+                            displayName = contactLookup.displayName(addr),
+                            photoUri = contactLookup.photoUri(addr),
+                        )
+                    },
+                )
+            } else {
+                conv
+            }
+        }
+    }
+
+    /**
+     * Self-address match tolerant of country-code formatting differences
+     * ("+17653419588" vs "7653419588"): digits must match, comparing the
+     * last 10 when lengths differ.
+     */
+    private fun isSelfAddress(addr: String, selfNorm: String?): Boolean {
+        if (selfNorm.isNullOrEmpty()) return false
+        val a = normalizeAddress(addr)
+        if (a == selfNorm) return true
+        return a.length >= 10 && selfNorm.length >= 10 &&
+            a.takeLast(10) == selfNorm.takeLast(10)
     }
 
     /** Digits-only normalization used for recipient-set comparison. */

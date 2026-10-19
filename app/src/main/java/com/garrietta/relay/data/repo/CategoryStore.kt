@@ -5,8 +5,6 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONArray
-import org.json.JSONObject
 import java.util.UUID
 
 /**
@@ -123,30 +121,131 @@ class CategoryStore(context: Context) {
             rcsConversationId ?: "tel:$threadId"
 
         // ---- Pure (unit-tested) serialization ----
+        // Hand-rolled JSON codec: org.json is an Android-framework stub in
+        // plain JVM unit tests and throws "Stub!" there. The shapes are
+        // simple (flat string objects / arrays of them), so a tiny
+        // recursive-descent reader is enough and keeps the tests honest.
+
+        private fun escape(s: String): String = buildString {
+            for (c in s) when (c) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(c)
+            }
+        }
+
+        private class JsonReader(private val s: String) {
+            var i = 0
+            fun ws() {
+                while (i < s.length && s[i].isWhitespace()) i++
+            }
+
+            fun atEnd(): Boolean {
+                ws()
+                return i >= s.length
+            }
+
+            fun expect(c: Char): Boolean {
+                ws()
+                if (i < s.length && s[i] == c) {
+                    i++
+                    return true
+                }
+                return false
+            }
+
+            fun str(): String? {
+                ws()
+                if (i >= s.length || s[i] != '"') return null
+                i++
+                val sb = StringBuilder()
+                while (i < s.length) {
+                    val c = s[i++]
+                    when {
+                        c == '"' -> return sb.toString()
+                        c == '\\' && i < s.length -> when (val e = s[i++]) {
+                            'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
+                            't' -> sb.append('\t')
+                            'u' -> {
+                                val hex = s.substring(i, minOf(i + 4, s.length))
+                                if (hex.length == 4) {
+                                    sb.append(hex.toIntOrNull(16)?.toChar() ?: '?')
+                                    i += 4
+                                }
+                            }
+                            else -> sb.append(e)
+                        }
+                        else -> sb.append(c)
+                    }
+                }
+                return null // unterminated string
+            }
+
+            /** Reads a flat {"k":"v",...} object; null when malformed. */
+            fun flatObject(): Map<String, String>? {
+                if (!expect('{')) return null
+                val m = mutableMapOf<String, String>()
+                if (expect('}')) return m
+                while (true) {
+                    val k = str() ?: return null
+                    if (!expect(':')) return null
+                    val v = str() ?: return null
+                    m[k] = v
+                    if (expect('}')) return m
+                    if (!expect(',')) return null
+                }
+            }
+        }
 
         fun serializeCategories(cats: List<ChatCategory>): String =
-            JSONArray().apply {
-                cats.forEach { put(JSONObject().put("id", it.id).put("name", it.name)) }
-            }.toString()
+            cats.joinToString(",", "[", "]") {
+                "{\"id\":\"${escape(it.id)}\",\"name\":\"${escape(it.name)}\"}"
+            }
 
-        fun deserializeCategories(json: String): List<ChatCategory> =
-            runCatching {
-                val arr = JSONArray(json)
-                List(arr.length()) { i ->
-                    val o = arr.getJSONObject(i)
-                    ChatCategory(o.getString("id"), o.getString("name"))
-                }.filter { it.id.isNotBlank() && it.name.isNotBlank() }
-            }.getOrDefault(emptyList())
+        fun deserializeCategories(json: String): List<ChatCategory> {
+            return try {
+                val r = JsonReader(json)
+                if (!r.expect('[')) return emptyList()
+                val out = mutableListOf<ChatCategory>()
+                var first = true
+                while (true) {
+                    r.ws()
+                    if (r.expect(']')) break
+                    if (!first && !r.expect(',')) return emptyList()
+                    val obj = r.flatObject() ?: return emptyList()
+                    first = false
+                    val id = obj["id"].orEmpty()
+                    val name = obj["name"].orEmpty()
+                    if (id.isNotBlank() && name.isNotBlank()) {
+                        out.add(ChatCategory(id, name))
+                    }
+                }
+                if (!r.atEnd()) return emptyList()
+                out
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
 
         fun serializeAssignments(map: Map<String, String>): String =
-            JSONObject(map as Map<*, *>).toString()
+            map.entries.joinToString(",", "{", "}") {
+                "\"${escape(it.key)}\":\"${escape(it.value)}\""
+            }
 
-        fun deserializeAssignments(json: String): Map<String, String> =
-            runCatching {
-                val o = JSONObject(json)
-                o.keys().asSequence().associateWith { o.getString(it) }
-                    .filterValues { it.isNotBlank() }
-            }.getOrDefault(emptyMap())
+        fun deserializeAssignments(json: String): Map<String, String> {
+            return try {
+                val r = JsonReader(json)
+                val m = r.flatObject() ?: return emptyMap()
+                if (!r.atEnd()) return emptyMap()
+                m
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
 
         private fun loadCategories(prefs: SharedPreferences): List<ChatCategory> =
             deserializeCategories(prefs.getString(KEY_CATEGORIES, "[]") ?: "[]")

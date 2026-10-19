@@ -302,9 +302,10 @@ class RcsSession(context: Context) {
             try {
                 return withTimeout(60_000) { waiter.await() }
             } catch (e: TimeoutCancellationException) {
-                throw TimeoutCancellationException(
-                    "Timed out waiting for 60000 ms (${diagnostics()})",
-                ).also { it.initCause(e) }
+                // Rethrow as a plain RcsException (TimeoutCancellationException
+                // has no public constructor): the message carries the live
+                // transport diagnostics for the device.
+                throw RcsException("Timed out waiting for 60000 ms (${diagnostics()})")
             }
         } finally {
             waiters.remove(requestId)

@@ -733,32 +733,30 @@ class RcsTransport(context: Context) : Transport {
             }
             // Inline-only: no downloadable rendition at all.
             noDownloadIdImages.incrementAndGet()
-            if (att.mediaId.isEmpty()) {
-                // No server copy — the inline bytes are the only bytes.
-                // They may be a small full image or just a thumbnail; either
-                // way the UI renders them at natural size, never upscaled.
-                // Strict gates: magic + trailer + sane dimensions + full
-                // decode. There is no size reference for inline bytes, and
-                // BitmapFactory is lenient (partial decodes return non-null),
-                // so the trailer check is what catches truncated thumbnails.
-                val inline = att.inlineData
-                    ?: throw IllegalStateException("media unavailable: no attachment id or data")
-                if (att.isImage) {
-                    if (!isValidImageBytes(inline)) {
-                        throw IllegalStateException("media unavailable: inline bytes are not a valid image")
-                    }
-                    if (!hasIntactImageTrailer(inline)) {
-                        throw IllegalStateException("media unavailable: inline image is truncated")
-                    }
-                    if (!hasSaneImageDimensions(inline)) {
-                        throw IllegalStateException("media unavailable: inline image dimensions unusable")
-                    }
-                    if (!decodesAsImage(inline)) {
-                        throw IllegalStateException("media unavailable: inline bytes do not decode as an image")
-                    }
+            // No server copy — the inline bytes are the only bytes.
+            // They may be a small full image or just a thumbnail; either
+            // way the UI renders them at natural size, never upscaled.
+            // Strict gates: magic + trailer + sane dimensions + full
+            // decode. There is no size reference for inline bytes, and
+            // BitmapFactory is lenient (partial decodes return non-null),
+            // so the trailer check is what catches truncated thumbnails.
+            val inline = att.inlineData
+                ?: throw IllegalStateException("media unavailable: no attachment id or data")
+            if (att.isImage) {
+                if (!isValidImageBytes(inline)) {
+                    throw IllegalStateException("media unavailable: inline bytes are not a valid image")
                 }
-                return@withContext inline
+                if (!hasIntactImageTrailer(inline)) {
+                    throw IllegalStateException("media unavailable: inline image is truncated")
+                }
+                if (!hasSaneImageDimensions(inline)) {
+                    throw IllegalStateException("media unavailable: inline image dimensions unusable")
+                }
+                if (!decodesAsImage(inline)) {
+                    throw IllegalStateException("media unavailable: inline bytes do not decode as an image")
+                }
             }
+            return@withContext inline
         } // closes downloadMedia's withContext
 
     /**

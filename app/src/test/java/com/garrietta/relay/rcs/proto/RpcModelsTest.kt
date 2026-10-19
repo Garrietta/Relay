@@ -291,7 +291,6 @@ class RpcModelsTest {
         )
         assertTrue(!isWeirdPreResponse(real, hasCookies = true))
     }
-}
 
     // ---------- participant cleaning (GIRTH ghost) ----------
 
@@ -354,3 +353,4 @@ class RpcModelsTest {
         assertEquals("15551234567", part("15551234567").displayNameOrNumber())
         assertEquals("Alec", part("15551234567", fullName = "Alec").displayNameOrNumber())
     }
+}

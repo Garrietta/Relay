@@ -41,14 +41,14 @@ import kotlin.math.roundToInt
 
 /**
  * The inbox category bar — Garrett's 2026-10-19 directive, refined 2026-10-19
- * evening: SEPARATE chips with significant spacing between them (his
- * music-app reference), each morphing WITHIN its own padded slot so the
- * selected oval can never overlap its neighbors. The end chips (All first,
- * Unknown last) are ALWAYS half-oval outward with a slight radius on the
- * inward edge — whether selected or not. Middle chips are rounded
- * rectangles with a slight (18dp) radius, matching the reference. When a
- * chip is SELECTED it morphs into a full oval and pops (scale + z-order),
- * bouncy.
+ * evening: SEPARATE chips with spacing between them (his music-app
+ * reference), each morphing WITHIN its own padded slot so the selected oval
+ * can never overlap its neighbors. The end chips (All first, Unknown last)
+ * are ALWAYS half-oval outward (20dp = h/2) with the middle-chip radius on
+ * the inward edge — whether selected or not. Middle chips are rounded
+ * rectangles with the reference radius (10dp = 0.25h, measured pixel-to-pixel
+ * on his music-app screenshots). When a chip is SELECTED it morphs into a
+ * full 20dp stadium oval and pops (scale + z-order), bouncy.
  *
  * Unselected, the chips sit as the spaced strip; selected, the tapped chip
  * blooms into the floating oval inside its own slot. The morph fires the
@@ -106,14 +106,15 @@ fun CategoryPillBar(
             }
         }
 
-        // Separate chips with significant spacing (Garrett 2026-10-19
-        // evening): each chip morphs WITHIN its own slot, so the selected
-        // oval's pop-out scale can never reach its neighbors.
+        // Tighter inter-chip gaps (music-app reference, Garrett 2026-10-19
+        // evening): 8dp, not 10dp. Each chip still morphs WITHIN its own
+        // slot, so the selected oval's pop-out scale can never reach its
+        // neighbors.
         Row(
             modifier = if (fillMode) Modifier.fillMaxSize()
             else Modifier.fillMaxSize().horizontalScroll(scrollState),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             segmentIds.forEachIndexed { index, id ->
                 val isFirst = index == 0
@@ -164,14 +165,15 @@ private fun RowScope.ChocolateSegment(
     // "Corner size in Px can't be negative"): the bouncy spring overshoots
     // below 0 / above 1 mid-animation. Clamp the morph factor so no animated
     // corner radius can ever go negative.
-    // Unselected middle chips are rounded rectangles with a slight radius
-    // (music-app reference, Garrett 2026-10-19 evening) — 14dp at the
-    // reduced 40dp bar height, not sharp. End caps keep the half-oval
-    // outward edge and take the same slight radius on the inward edge.
-    // Selection morphs everything to the full 20dp stadium oval.
+    // Unselected middle chips are rounded rectangles with the reference
+    // radius (music-app screenshots, Garrett 2026-10-19 evening): measured
+    // 0.21-0.27 of chip height pixel-to-pixel -> 10dp at the 40dp bar height.
+    // End caps keep the half-oval outward edge (20dp = h/2) and take the same
+    // 10dp radius on the inward edge. Selection morphs everything to the full
+    // 20dp stadium oval.
     val selC = sel.coerceIn(0f, 1f)
     fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
-        val base = if (outwardRounded) 20f else 14f
+        val base = if (outwardRounded) 20f else 10f
         return (base + (20f - base) * selC).dp.coerceAtLeast(0.dp)
     }
     val shape = RoundedCornerShape(
@@ -223,7 +225,17 @@ private fun RowScope.ChocolateSegment(
                 MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = if (compact) 4.dp else 8.dp),
+            // Snugger horizontal padding (music-app reference, Garrett
+            // 2026-10-19 evening): the selected stadium hugs its text
+            // (measured 0.15h -> 6dp); unselected keeps 8dp (4dp when
+            // squeezing 4-5 chips).
+            modifier = Modifier.padding(
+                horizontal = when {
+                    selected -> 6.dp
+                    compact -> 4.dp
+                    else -> 8.dp
+                },
+            ),
         )
     }
 }

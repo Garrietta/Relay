@@ -13,6 +13,7 @@ import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -116,35 +117,125 @@ class RelayApp : Application() {
      * the activity, which is why notifications never arrived once the app
      * was swiped away. Every decision is recorded in
      * [MessageNotifications.diagnostics] for Settings → Diagnostics.
+     *
+     * TWO feeds drive the single [handleIncomingRcsMessage] decision point:
+     * 1. the long-poll push flow (session.incoming), and
+     * 2. a 45s poll fallback (Garrett 2026-10-19 evening: Diagnostics showed
+     *    lastIncoming=never — the push flow never emits on his device while
+     *    the inbox works fine via refresh polling, so the push path alone
+     *    can never notify). The poll detects newly-arrived incoming messages
+     *    from conversation timestamps. Exactly-once via [notifiedMessageIds].
      */
     private fun startIncomingMessageNotifications() {
+        // Push path: fires when the long-poll delivers UpdateEvent.Messages.
         appScope.launch {
             repository.observeRcsMessages().collect { msg ->
+                handleIncomingRcsMessage(msg)
+            }
+        }
+        // Poll fallback: the push flow is silent on Garrett's device, so
+        // detect arrivals from the conversation list instead. Baseline first
+        // (no notifications for pre-existing messages), then poll.
+        appScope.launch {
+            baselineNotificationState()
+            while (true) {
+                delay(45_000)
+                runCatching { pollForIncomingNotifications() }
+            }
+        }
+    }
+
+    /** Message IDs already passed through the notifier (push + poll dedupe). */
+    private val notifiedMessageIds = mutableSetOf<String>()
+
+    /** Per-conversation latest timestamp seen by the poll fallback. */
+    private val notifierSeenTs = mutableMapOf<String, Long>()
+
+    /**
+     * Shared per-message notification decision + posting. Both the push flow
+     * and the poll fallback feed this; [notifiedMessageIds] keeps it
+     * exactly-once. [MessageNotifications.recordIncomingObserved] fires for
+     * every observed incoming (even skipped/dupes) so Diagnostics shows
+     * traffic.
+     */
+    private suspend fun handleIncomingRcsMessage(
+        msg: com.garrietta.relay.rcs.proto.RcsMessage,
+    ) {
+        MessageNotifications.recordIncomingObserved()
+        if (!notifiedMessageIds.add(msg.id)) return
+        if (notifiedMessageIds.size > 500) {
+            // Bound the dedupe set: drop the oldest half.
+            notifiedMessageIds.drop(250).forEach { notifiedMessageIds.remove(it) }
+        }
+        if (msg.fromMe) {
+            MessageNotifications.recordSkipped("own outgoing/echo")
+            return
+        }
+        if (!rcsTransport.isPairedNow) {
+            MessageNotifications.recordSkipped("not paired")
+            return
+        }
+        if (!areMessageNotificationsEnabled()) {
+            MessageNotifications.recordSkipped("toggle off in Settings")
+            return
+        }
+        val open = repository.openRcsConversation.value
+        if (open != null && open == msg.conversationId) {
+            MessageNotifications.recordSkipped("chat open on screen")
+            return
+        }
+        val name = repository.conversations.value
+            .firstOrNull { it.rcsConversationId == msg.conversationId }
+            ?.displayName?.ifBlank { null } ?: "New message"
+        val body = msg.body.ifBlank {
+            if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
+        }
+        MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs)
+    }
+
+    /** First poll baseline: everything currently on the server is "seen". */
+    private suspend fun baselineNotificationState() {
+        if (!rcsTransport.isPairedNow) return
+        rcsTransport.refreshConversations()
+        for (conv in rcsTransport.currentRcsConversations()) {
+            notifierSeenTs[conv.id] = conv.timestampMs
+        }
+    }
+
+    /**
+     * Poll fallback: detect newly-arrived INCOMING messages from conversation
+     * timestamps and route them through [handleIncomingRcsMessage]. A
+     * timestamp advance alone isn't enough (our own outgoing messages advance
+     * it too) — the latest message is loaded and checked with [fromMe].
+     */
+    private suspend fun pollForIncomingNotifications() {
+        if (!rcsTransport.isPairedNow) return
+        rcsTransport.refreshConversations()
+        for (conv in rcsTransport.currentRcsConversations()) {
+            val lastSeen = notifierSeenTs[conv.id]
+            if (lastSeen == null) {
+                // Conversation we haven't baselined (created while away) —
+                // baseline without notifying for its history.
+                notifierSeenTs[conv.id] = conv.timestampMs
+                continue
+            }
+            if (conv.timestampMs <= lastSeen) continue
+            notifierSeenTs[conv.id] = conv.timestampMs
+            // Latest activity — load recent messages and notify for every new
+            // INCOMING one (oldest first). A timestamp advance alone isn't
+            // enough: our own outgoing messages advance it too, and several
+            // messages can land between polls.
+            val recent = runCatching {
+                rcsTransport.rcsMessages(conv.id, conv.participants, 5)
+            }.getOrDefault(emptyList())
+            val newIncoming = recent
+                .filter { !it.fromMe && it.timestampMs > lastSeen }
+                .sortedBy { it.timestampMs }
+            if (newIncoming.isEmpty()) {
                 MessageNotifications.recordIncomingObserved()
-                if (msg.fromMe) {
-                    MessageNotifications.recordSkipped("own outgoing/echo")
-                    return@collect
-                }
-                if (!rcsTransport.isPairedNow) {
-                    MessageNotifications.recordSkipped("not paired")
-                    return@collect
-                }
-                if (!areMessageNotificationsEnabled()) {
-                    MessageNotifications.recordSkipped("toggle off in Settings")
-                    return@collect
-                }
-                val open = repository.openRcsConversation.value
-                if (open != null && open == msg.conversationId) {
-                    MessageNotifications.recordSkipped("chat open on screen")
-                    return@collect
-                }
-                val name = repository.conversations.value
-                    .firstOrNull { it.rcsConversationId == msg.conversationId }
-                    ?.displayName?.ifBlank { null } ?: "New message"
-                val body = msg.body.ifBlank {
-                    if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
-                }
-                MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs)
+                MessageNotifications.recordSkipped("own outgoing/echo")
+            } else {
+                newIncoming.forEach { handleIncomingRcsMessage(it) }
             }
         }
     }

@@ -11,6 +11,7 @@ import android.util.Log
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.isUnknownSenderGhostName
 import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -332,12 +333,15 @@ class UnifiedInboxRepository(
         // Never trust a server conversation name containing "unknown" — the
         // server auto-names groups from raw participants ("Alec, Trenton,
         // Unknown"); rebuild from the cleaned list instead. A genuine custom
-        // name (no "unknown" in it) is kept.
+        // name (no "unknown" in it) is kept. The UNKNOWN_SENDER! ghost is
+        // hidden from the joined name too (display layer only — Garrett
+        // 2026-10-19; the #118 header filter missed this join path).
         val name = c.name
             .takeIf { it.isNotBlank() && !it.contains("unknown", ignoreCase = true) }
-            ?: others.joinToString(", ") {
-                it.displayNameOrNumber()
-            }.ifBlank { c.id }
+            ?: others.filterNot { it.displayNameOrNumber().isUnknownSenderGhostName() }
+                .joinToString(", ") {
+                    it.displayNameOrNumber()
+                }.ifBlank { c.id }
         // Self-chat (no others): address on a self number so the photo
         // lookup and the avatar shape key match the chat header's. Falling
         // back to the display name here showed an initial in the inbox

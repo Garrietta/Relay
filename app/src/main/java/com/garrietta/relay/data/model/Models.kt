@@ -83,17 +83,39 @@ data class Participant(
 )
 
 /**
+ * String-level ghost predicate (Garrett 2026-10-19): the server wraps this
+ * remnant's name in quotes — straight, curly, or backtick, sometimes several
+ * layers — which is exactly why it renders quoted in the header
+ * ("Alec, Trenton, 'UNKNOWN_SENDER!'"). The #118 exact-match missed it
+ * because only ASCII quotes were stripped. Strip every quote flavor (plus
+ * zero-width/invisible chars) from both ends, then exact-match.
+ * Display-layer only; the underlying data is never touched.
+ */
+fun String.isUnknownSenderGhostName(): Boolean {
+    var s = trim()
+    val quotes = charArrayOf('"', '\'', '\u201C', '\u201D', '\u2018', '\u2019', '`')
+    val invisible = charArrayOf(' ', '\t', '\n', '\r', '\u200B', '\u200C', '\u200D', '\uFEFF')
+    var changed: Boolean
+    do {
+        changed = false
+        while (s.length >= 2 && s.first() in quotes && s.last() in quotes) {
+            s = s.substring(1, s.length - 1)
+            changed = true
+        }
+        val t = s.trim(*quotes, *invisible)
+        if (t != s) {
+            s = t
+            changed = true
+        }
+    } while (changed)
+    return s == "UNKNOWN_SENDER!"
+}
+
+/**
  * Display-layer ghost predicate (Garrett 2026-10-19): a participant whose
  * display name is literally "UNKNOWN_SENDER!" — a remnant (he suspects car
  * usage) — is HIDDEN from name lists and avatar stacks, never deleted.
  * The underlying data is untouched; call sites filter with
- * `filterNot { it.isUnknownSenderGhost() }`. Surrounding quotes are
- * stripped before the exact-match comparison, in case they're part of
- * the stored name.
+ * `filterNot { it.isUnknownSenderGhost() }`.
  */
-fun Participant.isUnknownSenderGhost(): Boolean {
-    val stripped = displayName.trim()
-        .removeSurrounding("\"")
-        .removeSurrounding("'")
-    return stripped == "UNKNOWN_SENDER!"
-}
+fun Participant.isUnknownSenderGhost(): Boolean = displayName.isUnknownSenderGhostName()

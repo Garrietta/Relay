@@ -576,9 +576,16 @@ private fun CollapsingMessagesHeader(
 /**
  * Floating "New conversation" bar — a plain full-width, slightly rounded
  * rectangle (18dp corners). Real elevation + shadow so it reads as floating
- * above the conversation list. Bouncy press-scale in the unified spring
+ * above the conversation list. Gentle press-scale in the unified spring
  * language; the densest color in the scheme, per the expressive contrast
  * rule.
+ *
+ * FIXED HEIGHT (Garrett 2026-10-19: the pill "keeps getting taller and
+ * taller"): the layout height is a constant 64.dp — no padding-driven
+ * intrinsic height that any state, recomposition, or animation can perturb.
+ * The press scale is deliberately the no-overshoot gentle spring: an
+ * underdamped bouncy scale can overshoot above 1.0 on release and read as
+ * the button growing.
  */
 @Composable
 private fun NewConversationPill(
@@ -589,7 +596,7 @@ private fun NewConversationPill(
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = RelaySprings.bouncy(),
+        animationSpec = RelaySprings.gentle(),
         label = "pillPress",
     )
     Surface(
@@ -603,13 +610,14 @@ private fun NewConversationPill(
         shadowElevation = 8.dp,
         modifier = modifier
             .fillMaxWidth()
+            .height(64.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             },
     ) {
         Row(
-            modifier = Modifier.padding(vertical = 18.dp),
+            modifier = Modifier.fillMaxSize(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {

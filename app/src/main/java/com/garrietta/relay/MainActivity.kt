@@ -17,11 +17,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -77,6 +79,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.ThemeMode
 import com.garrietta.relay.ui.NewConversationDialog
 import com.garrietta.relay.ui.Screen
+import com.garrietta.relay.ui.chat.ChatDetailsScreen
 import com.garrietta.relay.ui.chat.ChatScreen
 import com.garrietta.relay.ui.chat.ChatViewModel
 import com.garrietta.relay.ui.inbox.InboxScreen
@@ -85,6 +88,7 @@ import com.garrietta.relay.ui.motion.LocalAnimatedVisibilityScope
 import com.garrietta.relay.ui.motion.LocalNavForward
 import com.garrietta.relay.ui.motion.LocalSharedTransitionScope
 import com.garrietta.relay.ui.motion.MotionKind
+import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.rememberMotionTransforms
 import com.garrietta.relay.ui.settings.SettingsScreen
 import com.garrietta.relay.ui.settings.SettingsViewModel
@@ -224,6 +228,10 @@ class MainActivity : ComponentActivity() {
                         // NewConversationDialog) — the screen swap underneath
                         // is a plain quick fade so the two never fight.
                         fadeIn(tween(120)) togetherWith fadeOut(tween(120))
+                    } else if (incoming is Screen.ChatDetails || outgoing is Screen.ChatDetails) {
+                        // Same pattern: the details page slides itself up
+                        // (bouncy, like new-chat); the swap underneath fades.
+                        fadeIn(tween(120)) togetherWith fadeOut(tween(120))
                     } else {
                         motionTransforms[if (navForward) MotionKind.FORWARD else MotionKind.BACKWARD]
                     }
@@ -273,6 +281,40 @@ class MainActivity : ComponentActivity() {
                                 transportLabel = screen.transportLabel,
                                 rcsConversationId = screen.rcsConversationId,
                                 onBack = ::pop,
+                                // Header/avatar taps open the details page
+                                // (Garrett 2026-10-19).
+                                onOpenDetails = { focusAddress ->
+                                    push(
+                                        Screen.ChatDetails(
+                                            threadId = screen.threadId,
+                                            threadIds = screen.threadIds,
+                                            address = screen.address,
+                                            displayName = screen.displayName,
+                                            transportLabel = screen.transportLabel,
+                                            rcsConversationId = screen.rcsConversationId,
+                                            focusAddress = focusAddress,
+                                        )
+                                    )
+                                },
+                            )
+                        }
+                        is Screen.ChatDetails -> {
+                            // Same ViewModel key as the chat screen: the
+                            // details page reuses the live conversation data
+                            // (participants, messages, media).
+                            val detailsVm: ChatViewModel = viewModel(
+                                key = "chat_${screen.threadId}",
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
+                            )
+                            ChatDetailsScreen(
+                                viewModel = detailsVm,
+                                displayName = screen.displayName,
+                                recipient = screen.address,
+                                threadId = screen.threadId,
+                                transportLabel = screen.transportLabel,
+                                rcsConversationId = screen.rcsConversationId,
+                                focusAddress = screen.focusAddress,
+                                onBack = ::pop,
                             )
                         }
                         is Screen.Settings -> {
@@ -319,9 +361,17 @@ class MainActivity : ComponentActivity() {
         var showSettings by remember { mutableStateOf(false) }
         var showNewConversation by remember { mutableStateOf(false) }
         var showRcsPairing by remember { mutableStateOf(false) }
+        // Conversation details overlay (Garrett 2026-10-19): header/avatar
+        // taps in the chat pane open it over the detail pane. The last
+        // request is retained so the exit animation plays on content
+        // instead of a blank surface.
+        var detailsRequest by remember { mutableStateOf<Pair<Conversation, String?>?>(null) }
+        var shownRequest by remember { mutableStateOf<Pair<Conversation, String?>?>(null) }
+        if (detailsRequest != null) shownRequest = detailsRequest
         BackHandler(enabled = showSettings) { showSettings = false }
         BackHandler(enabled = !showSettings && showRcsPairing) { showRcsPairing = false }
-        BackHandler(enabled = !showSettings && selected != null) { selected = null }
+        BackHandler(enabled = !showSettings && detailsRequest != null) { detailsRequest = null }
+        BackHandler(enabled = !showSettings && detailsRequest == null && selected != null) { selected = null }
 
         SharedTransitionLayout {
             val motionTransforms = rememberMotionTransforms()
@@ -354,7 +404,10 @@ class MainActivity : ComponentActivity() {
                         InboxScreen(
                             viewModel = inboxVm,
                             userMessages = settingsVm.userMessages,
-                            onOpenChat = { selected = it },
+                            onOpenChat = {
+                                selected = it
+                                detailsRequest = null
+                            },
                             onOpenSettings = { showSettings = true },
                             onNewConversation = { showNewConversation = true },
                         )
@@ -419,6 +472,9 @@ class MainActivity : ComponentActivity() {
                                         transportLabel = convo.transportLabel,
                                         rcsConversationId = convo.rcsConversationId,
                                         onBack = { selected = null },
+                                        onOpenDetails = { focusAddress ->
+                                            detailsRequest = convo to focusAddress
+                                        },
                                     )
                                 }
                             }
@@ -426,6 +482,39 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 } // BoxWithConstraints (draggable split)
+            }
+        }
+
+        // Conversation details overlay for the two-pane detail pane
+        // (Garrett 2026-10-19). Slides up over the chat, bouncy.
+        AnimatedVisibility(
+            visible = detailsRequest != null,
+            enter = slideInVertically(RelaySprings.bouncy()) { it } +
+                fadeIn(RelaySprings.bouncy()),
+            exit = fadeOut(tween(180)),
+        ) {
+            val req = shownRequest
+            if (req != null) {
+                val (dc, focus) = req
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                ) {
+                    val detailsVm: ChatViewModel = viewModel(
+                        key = "chat_${dc.threadId}",
+                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, dc.threadId, dc.threadIds, dc.address, dc.rcsConversationId, dc.transportLabel),
+                    )
+                    ChatDetailsScreen(
+                        viewModel = detailsVm,
+                        displayName = dc.displayName,
+                        recipient = dc.address,
+                        threadId = dc.threadId,
+                        transportLabel = dc.transportLabel,
+                        rcsConversationId = dc.rcsConversationId,
+                        focusAddress = focus,
+                        onBack = { detailsRequest = null },
+                    )
+                }
             }
         }
 

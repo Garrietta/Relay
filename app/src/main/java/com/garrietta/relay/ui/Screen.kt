@@ -21,5 +21,21 @@ sealed interface Screen {
     data object Settings : Screen
     data object NewConversation : Screen
     data object RcsPairing : Screen
+    /**
+     * Conversation details (Garrett 2026-10-19): tapping any chat header
+     * opens it; tapping a sender's avatar next to their message opens it
+     * focused on that person. [focusAddress]: null = conversation mode
+     * (group member list / 1:1 peer); set = person mode for that
+     * participant. Reuses the Chat screen's ViewModel via the same key.
+     */
+    data class ChatDetails(
+        val threadId: Long,
+        val threadIds: List<Long>,
+        val address: String,
+        val displayName: String,
+        val transportLabel: String = "SMS",
+        val rcsConversationId: String? = null,
+        val focusAddress: String? = null,
+    ) : Screen
 }
 

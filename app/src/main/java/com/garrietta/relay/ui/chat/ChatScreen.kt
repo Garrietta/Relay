@@ -13,6 +13,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -132,6 +133,12 @@ fun ChatScreen(
     /** Server conversation id for RCS rows (paired mode); null = Telephony. */
     rcsConversationId: String? = null,
     onBack: () -> Unit,
+    /**
+     * Opens the conversation details page (Garrett 2026-10-19): tapping any
+     * chat header passes null (conversation mode); tapping a sender's
+     * avatar next to their message passes their address (person mode).
+     */
+    onOpenDetails: (focusAddress: String?) -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()
     val sending by viewModel.sending.collectAsState()
@@ -231,6 +238,7 @@ fun ChatScreen(
                     scrolled = scrolled,
                     patternKey = patternKey,
                     onBack = onBack,
+                    onOpenDetails = onOpenDetails,
                 )
             },
             // Seamless with the thread container below — the header
@@ -326,6 +334,7 @@ fun ChatScreen(
                                 threadBackground = threadBackground,
                                 darkTheme = darkTheme,
                                 maxBubbleWidth = maxBubbleWidth,
+                                onAvatarClick = { sender -> onOpenDetails(sender.address) },
                             )
                         }
                         }
@@ -370,6 +379,7 @@ private fun ChatHeader(
     scrolled: Boolean,
     patternKey: String,
     onBack: () -> Unit,
+    onOpenDetails: (focusAddress: String?) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -396,6 +406,8 @@ private fun ChatHeader(
                     transportLabel = transportLabel,
                     scrolled = scrolled,
                     onBack = onBack,
+                    // Tapping the header opens details for the peer.
+                    onOpenDetails = { onOpenDetails(peer?.address) },
                 )
             }
             HeaderMode.Group -> GroupHeader(
@@ -404,6 +416,9 @@ private fun ChatHeader(
                 scrolled = scrolled,
                 patternKey = patternKey,
                 onBack = onBack,
+                // Tapping the group header opens details in conversation
+                // (member list) mode.
+                onOpenDetails = { onOpenDetails(null) },
             )
         }
     }
@@ -425,6 +440,7 @@ private fun OneToOneHeader(
     transportLabel: String,
     scrolled: Boolean,
     onBack: () -> Unit,
+    onOpenDetails: () -> Unit,
 ) {
     AnimatedContent(
         targetState = scrolled,
@@ -451,9 +467,23 @@ private fun OneToOneHeader(
                     size = 40.dp,
                     shapeKey = shapeKey,
                     textStyle = MaterialTheme.typography.titleMedium,
+                    // Header tap opens the details page (Garrett 2026-10-19).
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onOpenDetails,
+                    ),
                 )
                 Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpenDetails,
+                        ),
+                ) {
                     Text(
                         text = name,
                         style = MaterialTheme.typography.titleMedium,
@@ -482,7 +512,14 @@ private fun OneToOneHeader(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 2.dp, bottom = 10.dp),
+                        .padding(top = 2.dp, bottom = 10.dp)
+                        // Header tap opens the details page (Garrett
+                        // 2026-10-19); the back button above stays separate.
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpenDetails,
+                        ),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     // Overlay clip matches the resolved per-contact shape (not
@@ -539,6 +576,7 @@ private fun GroupHeader(
     scrolled: Boolean,
     patternKey: String,
     onBack: () -> Unit,
+    onOpenDetails: () -> Unit,
 ) {
     // UNKNOWN_SENDER! ghosts are hidden from the name list AND the avatar
     // stack (Garrett 2026-10-19) — display layer only, data untouched.
@@ -564,6 +602,12 @@ private fun GroupHeader(
             visible = !scrolled,
             enter = fadeIn(RelaySprings.gentle()) + expandHorizontally(RelaySprings.gentle()),
             exit = fadeOut(RelaySprings.gentle()) + shrinkHorizontally(RelaySprings.gentle()),
+            // Header tap opens the details page (Garrett 2026-10-19).
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onOpenDetails,
+            ),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GroupAvatarCluster(
@@ -580,7 +624,16 @@ private fun GroupHeader(
                 Spacer(Modifier.width(10.dp))
             }
         }
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                // Header tap opens the details page (Garrett 2026-10-19).
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onOpenDetails,
+                ),
+        ) {
             Text(
                 text = names,
                 style = MaterialTheme.typography.titleMedium,
@@ -826,6 +879,8 @@ private fun MessageBubble(
     darkTheme: Boolean = false,
     /** Received bubbles keep an empty right margin; sent an empty left one. */
     maxBubbleWidth: Dp = Dp.Unspecified,
+    /** Tapping the sender's avatar opens their details page (Garrett 2026-10-19). */
+    onAvatarClick: (Participant) -> Unit = {},
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
@@ -867,6 +922,13 @@ private fun MessageBubble(
                     size = 28.dp,
                     shapeKey = sender.address,
                     textStyle = MaterialTheme.typography.labelMedium,
+                    // Avatar tap opens that person's details page
+                    // (Garrett 2026-10-19).
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onAvatarClick(sender) },
+                    ),
                 )
                 Spacer(Modifier.width(8.dp))
                 Column(

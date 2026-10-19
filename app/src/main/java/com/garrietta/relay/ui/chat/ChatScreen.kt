@@ -783,8 +783,10 @@ private fun MediaBubble(
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
     var zoomed by remember(message.id) { mutableStateOf(false) }
+    // Bumped on tap-to-retry so the loader below re-runs with a fresh key.
+    var retryNonce by remember(message.id) { mutableStateOf(0) }
 
-    LaunchedEffect(message.id) {
+    LaunchedEffect(message.id, retryNonce) {
         if (bytes == null && error == null) {
             try {
                 bytes = loadMedia(media)
@@ -815,7 +817,17 @@ private fun MediaBubble(
                 .clip(RoundedCornerShape(20.dp))
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                 .combinedClickable(
-                    onClick = { if (bytes != null && media.isImage) zoomed = true },
+                    onClick = {
+                        if (error != null) {
+                            // Tap-to-retry (Garrett 2026-10-19 evening):
+                            // clearing the error and bumping retryNonce
+                            // re-arms the LaunchedEffect above, which runs a
+                            // fresh download (the transport itself retries
+                            // truncations first).
+                            error = null
+                            retryNonce++
+                        } else if (bytes != null && media.isImage) zoomed = true
+                    },
                     onLongClick = { },
                 ),
             contentAlignment = Alignment.Center,
@@ -823,12 +835,30 @@ private fun MediaBubble(
             val b = bytes
             val err = error
             when {
-                err != null -> Text(
-                    text = "Media unavailable: $err",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                err != null -> Column(
                     modifier = Modifier.padding(16.dp),
-                )
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    // Single prefix: the transport's reasons already start
+                    // with "media unavailable:" — strip it so the UI prefix
+                    // doesn't double up ("Media unavailable: media
+                    // unavailable: ...", Garrett 2026-10-19 evening).
+                    val reason = err.replaceFirst(
+                        Regex("^media unavailable:\\s*", RegexOption.IGNORE_CASE),
+                        "",
+                    )
+                    Text(
+                        text = "Media unavailable: $reason",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "Tap to retry",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 b != null && media.isImage -> {
                     // Natural-size rendering: decode the true pixel bounds and
                     // NEVER upscale. A small inline/thumbnail image blown up to

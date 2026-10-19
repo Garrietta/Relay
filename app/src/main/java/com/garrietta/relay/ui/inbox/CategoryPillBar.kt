@@ -44,10 +44,11 @@ import kotlin.math.roundToInt
  * evening: SEPARATE chips with significant spacing between them (his
  * music-app reference), each morphing WITHIN its own padded slot so the
  * selected oval can never overlap its neighbors. The end chips (All first,
- * Unknown last) are ALWAYS half-rectangle / half-oval — rounded on the
- * outward edge, square on the inward edge — whether selected or not. Middle
- * chips are pure rectangles. When a chip is SELECTED it morphs into a full
- * oval and pops (scale + z-order), bouncy.
+ * Unknown last) are ALWAYS half-oval outward with a slight radius on the
+ * inward edge — whether selected or not. Middle chips are rounded
+ * rectangles with a slight (18dp) radius, matching the reference. When a
+ * chip is SELECTED it morphs into a full oval and pops (scale + z-order),
+ * bouncy.
  *
  * Unselected, the chips sit as the spaced strip; selected, the tapped chip
  * blooms into the floating oval inside its own slot. The morph fires the
@@ -133,9 +134,11 @@ fun CategoryPillBar(
 }
 
 /**
- * One chocolate-bar segment. Unselected ends are half-oval (rounded outward,
- * square inward); middles are pure rectangles. On selection the segment
- * morphs to a FULL oval, fills, and scales up within its own slot.
+ * One chocolate-bar segment. Unselected middles are rounded rectangles with
+ * a slight corner radius (Garrett 2026-10-19 evening: match the music-app
+ * reference — NOT sharp rectangles); unselected end caps are half-oval
+ * outward with the same slight radius on the inward edge. On selection the
+ * segment morphs to a FULL oval, fills, and scales up within its own slot.
  */
 @Composable
 private fun RowScope.ChocolateSegment(
@@ -157,9 +160,14 @@ private fun RowScope.ChocolateSegment(
     // "Corner size in Px can't be negative"): the bouncy spring overshoots
     // below 0 / above 1 mid-animation. Clamp the morph factor so no animated
     // corner radius can ever go negative.
+    // Unselected middle chips are rounded rectangles with a slight radius
+    // (music-app reference, Garrett 2026-10-19 evening) — 18dp, not sharp.
+    // End caps keep the half-oval outward edge and take the same slight
+    // radius on the inward edge. Selection morphs everything to the full
+    // 26dp stadium oval.
     val selC = sel.coerceIn(0f, 1f)
     fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
-        val base = if (outwardRounded) 26f else 0f
+        val base = if (outwardRounded) 26f else 18f
         return (base + (26f - base) * selC).dp.coerceAtLeast(0.dp)
     }
     val shape = RoundedCornerShape(

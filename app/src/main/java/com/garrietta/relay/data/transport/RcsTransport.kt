@@ -669,6 +669,10 @@ class RcsTransport(context: Context) : Transport {
      * server-declared size is rejected (AES-GCM chunked decrypt yields the
      * exact plaintext, so a real mismatch means wrong bytes). A
      * corrupt-looking image must NEVER render.
+     *
+     * Retry (2026-10-19 evening): a truncated download is usually transient,
+     * so the fetch is retried up to 3 times with backoff before the error
+     * surfaces; the bubble offers tap-to-retry after that.
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
@@ -697,56 +701,81 @@ class RcsTransport(context: Context) : Transport {
                     return@withContext cached
                 }
             }
-            val token = session.currentAuth()?.tachyonToken
-                ?: throw IllegalStateException("media unavailable: not paired")
-            val meta = java.util.Base64.getEncoder().encodeToString(
-                encodeDownloadAttachmentRequest(
-                    AuthMessage(
-                        requestId = java.util.UUID.randomUUID().toString(),
-                        network = "GDitto",
-                        tachyonToken = token,
+            // Single attempt: fetch + decrypt + validate. Kept as a local so
+            // the retry loop below can re-run a FRESH download.
+            suspend fun attemptDownload(): ByteArray {
+                val token = session.currentAuth()?.tachyonToken
+                    ?: throw IllegalStateException("media unavailable: not paired")
+                val meta = java.util.Base64.getEncoder().encodeToString(
+                    encodeDownloadAttachmentRequest(
+                        AuthMessage(
+                            requestId = java.util.UUID.randomUUID().toString(),
+                            network = "GDitto",
+                            tachyonToken = token,
+                        ),
+                        att.mediaId,
                     ),
-                    att.mediaId,
-                ),
-            )
-            val req = okhttp3.Request.Builder()
-                .url(UPLOAD_URL)
-                .get()
-                .header("x-goog-download-metadata", meta)
-                .header("User-Agent", MEDIA_UA)
-                .header("accept", "*/*")
-                .header("origin", "https://messages.google.com")
-                .header("referer", "https://messages.google.com/")
-                .header("sec-fetch-site", "cross-site")
-                .header("sec-fetch-mode", "cors")
-                .header("sec-fetch-dest", "empty")
-                .build()
-            val encrypted = RelayApi.client().newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IllegalStateException("media unavailable: download HTTP ${resp.code}")
-                }
-                resp.body!!.bytes()
-            }
-            val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
-            // Sanity: the server-declared size is the full plaintext media
-            // (AES-GCM chunked decrypt yields the EXACT plaintext — the only
-            // overhead stripped is per-chunk tags). A real mismatch means we
-            // got the wrong bytes; the old 50% tolerance let corrupt payloads
-            // through. 5% headroom covers declared-size rounding.
-            if (att.size > 0 && plain.size < (att.size * 0.95).toLong()) {
-                throw IllegalStateException(
-                    "media unavailable: server returned ${plain.size} bytes, expected ~${att.size}",
                 )
+                val req = okhttp3.Request.Builder()
+                    .url(UPLOAD_URL)
+                    .get()
+                    .header("x-goog-download-metadata", meta)
+                    .header("User-Agent", MEDIA_UA)
+                    .header("accept", "*/*")
+                    .header("origin", "https://messages.google.com")
+                    .header("referer", "https://messages.google.com/")
+                    .header("sec-fetch-site", "cross-site")
+                    .header("sec-fetch-mode", "cors")
+                    .header("sec-fetch-dest", "empty")
+                    .build()
+                val encrypted = RelayApi.client().newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("media unavailable: download HTTP ${resp.code}")
+                    }
+                    resp.body!!.bytes()
+                }
+                val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
+                // Sanity: the server-declared size is the full plaintext media
+                // (AES-GCM chunked decrypt yields the EXACT plaintext — the only
+                // overhead stripped is per-chunk tags). A real mismatch means we
+                // got the wrong bytes; the old 50% tolerance let corrupt payloads
+                // through. 5% headroom covers declared-size rounding.
+                if (att.size > 0 && plain.size < (att.size * 0.95).toLong()) {
+                    throw IllegalStateException(
+                        "media unavailable: server returned ${plain.size} bytes, expected ~${att.size}",
+                    )
+                }
+                if (att.isImage && !isValidImageBytes(plain)) {
+                    throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
+                }
+                // Full-decode gate: magic bytes only sniff the header. A valid
+                // header over garbage scan data passes the sniff and renders as
+                // gray blocks — decode the whole stream (downsampled: we only
+                // need the verdict, not the pixels) and reject what won't decode.
+                if (att.isImage && !decodesAsImage(plain)) {
+                    throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
+                }
+                return plain
             }
-            if (att.isImage && !isValidImageBytes(plain)) {
-                throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
-            }
-            // Full-decode gate: magic bytes only sniff the header. A valid
-            // header over garbage scan data passes the sniff and renders as
-            // gray blocks — decode the whole stream (downsampled: we only
-            // need the verdict, not the pixels) and reject what won't decode.
-            if (att.isImage && !decodesAsImage(plain)) {
-                throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
+            // Retry (Garrett 2026-10-19 evening): a truncated download
+            // ("server returned X bytes, expected ~Y") is usually a transient
+            // interruption, not permanent corruption — retry the fresh fetch
+            // up to 3 attempts with backoff before surfacing the error.
+            // Network IO failures during the fetch retry the same way.
+            var plain: ByteArray? = null
+            var attempt = 0
+            while (plain == null) {
+                try {
+                    plain = attemptDownload()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    attempt++
+                    val retryable = e is java.io.IOException ||
+                        (e is IllegalStateException &&
+                            e.message?.contains("server returned") == true)
+                    if (!retryable || attempt >= 3) throw e
+                    delay(1000L * attempt)
+                }
             }
             cacheDir.mkdirs()
             cacheFile.writeBytes(plain)

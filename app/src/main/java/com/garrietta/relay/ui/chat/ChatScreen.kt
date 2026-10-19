@@ -352,12 +352,15 @@ fun ChatScreen(
                                     message = message,
                                     media = media,
                                     loadMedia = { att -> viewModel.mediaBytes(att) },
-                                    // Images get near-full conversation
-                                    // width (Garrett 2026-10-19 evening:
-                                    // Google Messages renders photos nearly
-                                    // full-bleed); text bubbles keep the
-                                    // narrower 0.8 cap.
-                                    maxBubbleWidth = maxWidth * 0.92f,
+                                    // Images get a UNIFORM preview width
+                                    // matching Google Messages (Garrett
+                                    // 2026-10-19 evening: measured 0.676 of
+                                    // screen width on his GM screenshot —
+                                    // between the old small size and #125's
+                                    // 0.92 overshoot). Every image bubble is
+                                    // the same width; height follows aspect
+                                    // ratio. Text bubbles keep the 0.8 cap.
+                                    maxBubbleWidth = maxWidth * 0.66f,
                                 )
                                 return@itemsIndexed
                             }
@@ -865,11 +868,12 @@ private fun MediaBubble(
                     )
                 }
                 b != null && media.isImage -> {
-                    // Natural-size rendering: decode the true pixel bounds and
-                    // NEVER upscale. A small inline/thumbnail image blown up to
-                    // bubble size is exactly the blocky "corrupted" look
-                    // (diagnosed 2026-10-19). Small images render small and
-                    // sharp; large ones are capped at the bubble max.
+                    // Uniform preview (Garrett 2026-10-19 evening): EVERY
+                    // image bubble renders at the same fixed width, whatever
+                    // its native dimensions — height follows the aspect ratio
+                    // from the decoded bounds. (Supersedes the old
+                    // natural-size rule: he wants one consistent preview
+                    // size, Google Messages style.)
                     val bounds = loadedBounds
                     // Render-side sanity (deep-dive 2026-10-19): the transport
                     // gates should already have rejected these, but a header
@@ -886,7 +890,8 @@ private fun MediaBubble(
                         val density = LocalDensity.current
                         val naturalW = with(density) { bounds.first.toDp() }
                         val naturalH = with(density) { bounds.second.toDp() }
-                        val w = minOf(naturalW, maxBubbleWidth)
+                        // Uniform width for every image; height from aspect.
+                        val w = maxBubbleWidth
                         val h = (w * (naturalH.value / naturalW.value)).coerceAtLeast(24.dp)
                         AsyncImage(
                             model = b,

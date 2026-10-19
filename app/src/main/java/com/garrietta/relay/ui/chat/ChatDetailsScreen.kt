@@ -650,7 +650,8 @@ private fun upscaleSmallImageForDisplay(bytes: ByteArray): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         scaled.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
         scaled.recycle()
-        out.toByteArray().ifEmpty { bytes }
+        val upscaled = out.toByteArray()
+        return if (upscaled.isEmpty()) bytes else upscaled
     } catch (_: Exception) {
         bytes
     }

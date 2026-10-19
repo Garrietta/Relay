@@ -650,7 +650,7 @@ private fun MediaBubble(
                         val naturalW = with(density) { bounds.first.toDp() }
                         val naturalH = with(density) { bounds.second.toDp() }
                         val w = minOf(naturalW, maxBubbleWidth)
-                        val h = (w * naturalH / naturalW).coerceAtLeast(24.dp)
+                        val h = (w * (naturalH.value / naturalW.value)).coerceAtLeast(24.dp)
                         AsyncImage(
                             model = b,
                             contentDescription = "Shared image",

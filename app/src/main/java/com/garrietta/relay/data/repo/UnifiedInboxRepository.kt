@@ -15,6 +15,8 @@ import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
+import com.garrietta.relay.rcs.proto.cleanRcsParticipantList
+import com.garrietta.relay.rcs.proto.displayNameOrNumber
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -300,7 +302,7 @@ class UnifiedInboxRepository(
         val name = c.name
             .takeIf { it.isNotBlank() && !it.contains("unknown", ignoreCase = true) }
             ?: others.joinToString(", ") {
-                com.garrietta.relay.rcs.proto.displayNameOrNumber(it)
+                it.displayNameOrNumber()
             }.ifBlank { c.id }
         // Self-chat (no others): address on a self number so the photo
         // lookup and the avatar shape key match the chat header's. Falling
@@ -409,11 +411,11 @@ class UnifiedInboxRepository(
                 .firstOrNull { it.id == conversationId }
                 ?: return@withContext emptyList()
             val selfNumbers = selfNumberSet()
-            com.garrietta.relay.rcs.proto.cleanRcsParticipantList(conv.participants, selfNumbers)
+            cleanRcsParticipantList(conv.participants, selfNumbers)
                 .map { p ->
                     Participant(
                         address = p.number,
-                        displayName = com.garrietta.relay.rcs.proto.displayNameOrNumber(p)
+                        displayName = p.displayNameOrNumber()
                             .ifBlank { p.number },
                         photoUri = contactLookup.photoUri(p.number),
                         isSelf = p.isMe,

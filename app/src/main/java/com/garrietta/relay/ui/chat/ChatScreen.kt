@@ -866,7 +866,11 @@ private fun MediaBubble(
                     // (diagnosed 2026-10-19). Small images render small and
                     // sharp; large ones are capped at the bubble max.
                     val bounds = loadedBounds
-                    if (bounds == null) {
+                    // Render-side sanity (deep-dive 2026-10-19): the transport
+                    // gates should already have rejected these, but a header
+                    // claiming sub-24px dimensions renders as a glitch strip
+                    // in the bubble — refuse it here too, never render it.
+                    if (bounds == null || bounds.first < 24 || bounds.second < 24) {
                         Text(
                             text = "Media unavailable: undecodable image",
                             style = MaterialTheme.typography.bodyMedium,

@@ -665,14 +665,28 @@ class RcsTransport(context: Context) : Transport {
      * the attachment claims to be an image; downloaded payloads must FULLY
      * DECODE (not just pass the magic sniff — a valid header over garbage
      * scan data renders as gray blocks, which is what Garrett filmed);
-     * and a decrypted payload that doesn't essentially match the
-     * server-declared size is rejected (AES-GCM chunked decrypt yields the
-     * exact plaintext, so a real mismatch means wrong bytes). A
-     * corrupt-looking image must NEVER render.
+     * and the decrypted size is validated against the WIRE GEOMETRY, not
+     * the raw declared size (see below). A corrupt-looking image must NEVER
+     * render.
      *
-     * Retry (2026-10-19 evening): a truncated download is usually transient,
-     * so the fetch is retried up to 3 times with backoff before the error
-     * surfaces; the bubble offers tap-to-retry after that.
+     * Size accounting — deep-dive fix (2026-10-19 evening): the
+     * server-declared size (MediaContent field 5) is the ENCRYPTED wire
+     * size — it includes the per-chunk 28-byte overhead (12B nonce + 16B
+     * GCM tag). Comparing it directly against decrypted plaintext misfires
+     * DETERMINISTICALLY (Garrett's Maria screenshot: 2,032,110 declared vs
+     * 1,279,386 plaintext = exactly 26,883 chunks x 28B — no retry can fix
+     * arithmetic). The expected plaintext is therefore derived from the
+     * wire itself (wire bytes - 2B header - 28B per chunk) and must match
+     * EXACTLY; a short WIRE (vs declared size) means a truncated download
+     * and is retried. AES-GCM authenticates every chunk, so mid-stream
+     * garbage is cryptographically impossible — only truncation (trailer
+     * check) and corrupt sources (decode gate) remain.
+     *
+     * Retry (2026-10-19 evening): transient failures (IO, truncated
+     * download, decrypt auth/size mismatch, HTTP 429/5xx) are retried up
+     * to 3 times with backoff before the error surfaces; the bubble offers
+     * tap-to-retry after that. Deterministic failures (bad key, bad header,
+     * undecodable content) fail immediately.
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
@@ -680,13 +694,25 @@ class RcsTransport(context: Context) : Transport {
                 // No server copy — the inline bytes are the only bytes.
                 // They may be a small full image or just a thumbnail; either
                 // way the UI renders them at natural size, never upscaled.
+                // Strict gates: magic + trailer + sane dimensions + full
+                // decode. There is no size reference for inline bytes, and
+                // BitmapFactory is lenient (partial decodes return non-null),
+                // so the trailer check is what catches truncated thumbnails.
                 val inline = att.inlineData
                     ?: throw IllegalStateException("media unavailable: no attachment id or data")
-                if (att.isImage && !isValidImageBytes(inline)) {
-                    throw IllegalStateException("media unavailable: inline bytes are not a valid image")
-                }
-                if (att.isImage && !decodesAsImage(inline)) {
-                    throw IllegalStateException("media unavailable: inline bytes do not decode as an image")
+                if (att.isImage) {
+                    if (!isValidImageBytes(inline)) {
+                        throw IllegalStateException("media unavailable: inline bytes are not a valid image")
+                    }
+                    if (!hasIntactImageTrailer(inline)) {
+                        throw IllegalStateException("media unavailable: inline image is truncated")
+                    }
+                    if (!hasSaneImageDimensions(inline)) {
+                        throw IllegalStateException("media unavailable: inline image dimensions unusable")
+                    }
+                    if (!decodesAsImage(inline)) {
+                        throw IllegalStateException("media unavailable: inline bytes do not decode as an image")
+                    }
                 }
                 return@withContext inline
             }
@@ -695,7 +721,10 @@ class RcsTransport(context: Context) : Transport {
             val cacheFile = java.io.File(cacheDir, att.mediaId.sanitizeFileName())
             if (cacheFile.exists()) {
                 val cached = cacheFile.readBytes()
-                if (att.isImage && !isValidImageBytes(cached)) {
+                // Cheap revalidation on every cache hit: magic + trailer +
+                // bounds (no full decode — it passed at download time).
+                // Poisoned bytes are deleted and re-fetched below.
+                if (att.isImage && !isCacheableImageBytes(cached)) {
                     cacheFile.delete()
                 } else {
                     return@withContext cached
@@ -730,38 +759,69 @@ class RcsTransport(context: Context) : Transport {
                     .build()
                 val encrypted = RelayApi.client().newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        throw IllegalStateException("media unavailable: download HTTP ${resp.code}")
+                        val code = resp.code
+                        // 429/5xx are transient — retry; 4xx is deterministic.
+                        if (code == 429 || code >= 500) {
+                            throw RetryableMediaException("media unavailable: download HTTP $code")
+                        }
+                        throw IllegalStateException("media unavailable: download HTTP $code")
                     }
                     resp.body!!.bytes()
                 }
-                val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
-                // Sanity: the server-declared size is the full plaintext media
-                // (AES-GCM chunked decrypt yields the EXACT plaintext — the only
-                // overhead stripped is per-chunk tags). A real mismatch means we
-                // got the wrong bytes; the old 50% tolerance let corrupt payloads
-                // through. 5% headroom covers declared-size rounding.
-                if (att.size > 0 && plain.size < (att.size * 0.95).toLong()) {
-                    throw IllegalStateException(
-                        "media unavailable: server returned ${plain.size} bytes, expected ~${att.size}",
+                // Wire-integrity accounting (deep-dive 2026-10-19): parse the
+                // chunk geometry from the stream header BEFORE decrypting.
+                if (encrypted.size < 2 || encrypted[0] != 0.toByte()) {
+                    throw IllegalStateException("media unavailable: bad media stream header")
+                }
+                val wireChunk = 1 shl (encrypted[1].toInt() and 0xFF)
+                if (wireChunk <= 28) {
+                    throw IllegalStateException("media unavailable: bad media chunk size")
+                }
+                // The declared size is the ENCRYPTED wire size. A short wire
+                // is a truncated download — fail fast (retryable) instead of
+                // decrypting garbage.
+                if (att.size > 0 && encrypted.size < (att.size * 0.95).toLong()) {
+                    throw RetryableMediaException(
+                        "media unavailable: truncated download (got ${encrypted.size} of ~${att.size} encrypted bytes)",
                     )
                 }
-                if (att.isImage && !isValidImageBytes(plain)) {
-                    throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
+                val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
+                // Exact plaintext check, derived from the wire itself:
+                // wire - 2B header - 28B (nonce+tag) per chunk. AES-GCM is
+                // deterministic, so any deviation means lost bytes.
+                val expectedPlain = wireExpectedPlaintext(encrypted)
+                if (plain.size.toLong() != expectedPlain) {
+                    throw RetryableMediaException(
+                        "media unavailable: decrypt size mismatch (got ${plain.size}, expected $expectedPlain)",
+                    )
                 }
-                // Full-decode gate: magic bytes only sniff the header. A valid
-                // header over garbage scan data passes the sniff and renders as
-                // gray blocks — decode the whole stream (downsampled: we only
-                // need the verdict, not the pixels) and reject what won't decode.
-                if (att.isImage && !decodesAsImage(plain)) {
-                    throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
+                if (att.isImage) {
+                    if (!isValidImageBytes(plain)) {
+                        throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
+                    }
+                    if (!hasIntactImageTrailer(plain)) {
+                        throw RetryableMediaException("media unavailable: downloaded image is truncated")
+                    }
+                    if (!hasSaneImageDimensions(plain)) {
+                        throw IllegalStateException("media unavailable: downloaded image dimensions unusable")
+                    }
+                    // Full-decode gate: magic bytes only sniff the header. A
+                    // valid header over garbage scan data passes the sniff
+                    // and renders as gray blocks — decode the whole stream
+                    // (downsampled: we only need the verdict, not the pixels)
+                    // and reject what won't decode.
+                    if (!decodesAsImage(plain)) {
+                        throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
+                    }
                 }
                 return plain
             }
-            // Retry (Garrett 2026-10-19 evening): a truncated download
-            // ("server returned X bytes, expected ~Y") is usually a transient
-            // interruption, not permanent corruption — retry the fresh fetch
-            // up to 3 attempts with backoff before surfacing the error.
-            // Network IO failures during the fetch retry the same way.
+            // Retry (Garrett 2026-10-19): transient failures — network IO,
+            // decrypt auth (a flipped bit in transit), truncated downloads,
+            // decrypt size mismatches, HTTP 429/5xx — are retried up to 3
+            // attempts with backoff before surfacing the error. Deterministic
+            // failures (bad key, bad header, undecodable content) throw
+            // immediately.
             var plain: ByteArray? = null
             var attempt = 0
             while (plain == null) {
@@ -771,8 +831,8 @@ class RcsTransport(context: Context) : Transport {
                     if (e is CancellationException) throw e
                     attempt++
                     val retryable = e is java.io.IOException ||
-                        (e is IllegalStateException &&
-                            e.message?.contains("server returned") == true)
+                        e is java.security.GeneralSecurityException ||
+                        e is RetryableMediaException
                     if (!retryable || attempt >= 3) throw e
                     delay(1000L * attempt)
                 }
@@ -829,37 +889,130 @@ enum class RcsPairingState {
  * render (or cache) bytes that are not actually an image — a corrupt-looking
  * image must never render; it surfaces as an error instead.
  */
-fun isValidImageBytes(bytes: ByteArray): Boolean {
-    if (bytes.size < 12) return false
+fun isValidImageBytes(bytes: ByteArray): Boolean = imageKindOf(bytes) != ImageKind.UNKNOWN
+
+/** Image container detected from magic bytes. Pure-Kotlin, JVM-testable. */
+enum class ImageKind { JPEG, PNG, GIF, WEBP, HEIC, BMP, UNKNOWN }
+
+internal fun imageKindOf(bytes: ByteArray): ImageKind {
+    if (bytes.size < 12) return ImageKind.UNKNOWN
     // JPEG: FF D8 FF
-    if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return true
+    if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return ImageKind.JPEG
     // PNG: 89 50 4E 47
-    if (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return true
+    if (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return ImageKind.PNG
     // GIF: 47 49 46 ("GIF")
-    if (bytes[0] == 0x47.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte()) return true
+    if (bytes[0] == 0x47.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte()) return ImageKind.GIF
     // WebP: 52 49 46 46 ("RIFF") .... 57 45 42 50 ("WEBP")
     if (bytes[0] == 0x52.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte() && bytes[3] == 0x46.toByte() &&
         bytes[8] == 0x57.toByte() && bytes[9] == 0x45.toByte() && bytes[10] == 0x42.toByte() && bytes[11] == 0x50.toByte()
-    ) return true
+    ) return ImageKind.WEBP
     // HEIC/HEIF: .... 66 74 79 70 ("ftyp") at offset 4
-    if (bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() && bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()) return true
+    if (bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() && bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()) return ImageKind.HEIC
     // BMP: 42 4D ("BM")
-    if (bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) return true
-    return false
+    if (bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) return ImageKind.BMP
+    return ImageKind.UNKNOWN
 }
+
+/**
+ * True when the image's TRAILER is intact — the cheap truncation detector
+ * the magic sniff can't provide. A truncated download keeps a valid header
+ * (passes [isValidImageBytes]) and Android's BitmapFactory is lenient
+ * (partial decodes return non-null), so without this a cut-off JPEG renders
+ * as gray blocks or a glitch strip. Pure-Kotlin, JVM-testable.
+ */
+fun hasIntactImageTrailer(bytes: ByteArray): Boolean {
+    if (bytes.size < 12) return false
+    return when (imageKindOf(bytes)) {
+        // JPEG must end with the EOI marker FF D9.
+        ImageKind.JPEG ->
+            bytes[bytes.size - 2] == 0xFF.toByte() && bytes[bytes.size - 1] == 0xD9.toByte()
+        // PNG must end with the IEND chunk: length 0 + "IEND" + CRC.
+        ImageKind.PNG -> bytes.size >= 12 &&
+            bytes[bytes.size - 8] == 0x49.toByte() && bytes[bytes.size - 7] == 0x45.toByte() &&
+            bytes[bytes.size - 6] == 0x4E.toByte() && bytes[bytes.size - 5] == 0x44.toByte()
+        // GIF must end with the 0x3B trailer byte.
+        ImageKind.GIF -> bytes[bytes.size - 1] == 0x3B.toByte()
+        // WebP: RIFF chunk size (LE32 at offset 4) + 8 must equal the file size.
+        ImageKind.WEBP -> {
+            val riffSize = (bytes[4].toInt() and 0xFF) or
+                ((bytes[5].toInt() and 0xFF) shl 8) or
+                ((bytes[6].toInt() and 0xFF) shl 16) or
+                ((bytes[7].toInt() and 0xFF) shl 24)
+            riffSize + 8 == bytes.size
+        }
+        // BMP: bfSize (LE32 at offset 2) must equal the file size.
+        ImageKind.BMP -> {
+            val bfSize = (bytes[2].toInt() and 0xFF) or
+                ((bytes[3].toInt() and 0xFF) shl 8) or
+                ((bytes[4].toInt() and 0xFF) shl 16) or
+                ((bytes[5].toInt() and 0xFF) shl 24)
+            bfSize == bytes.size
+        }
+        // HEIC/HEIF is a box container with no single trailer — the magic
+        // and decode gates carry it.
+        ImageKind.HEIC -> true
+        ImageKind.UNKNOWN -> false
+    }
+}
+
+/**
+ * True when the header-declared dimensions are sane for display. A header
+ * claiming a sub-[minPx] dimension renders as a glitch strip in the bubble
+ * (Garrett's group-chat slivers, 2026-10-19) — refuse it instead. Bounds
+ * decode is header-only (no pixel work), so this stays cheap.
+ */
+fun hasSaneImageDimensions(bytes: ByteArray, minPx: Int = 24): Boolean {
+    if (bytes.size < 12) return false
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        opts.outWidth >= minPx && opts.outHeight >= minPx
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/**
+ * Cheap revalidation for cache hits: magic + trailer + bounds. Skips the
+ * full pixel decode (it passed at download time); poisoned bytes are
+ * deleted and re-fetched by the caller.
+ */
+fun isCacheableImageBytes(bytes: ByteArray): Boolean =
+    isValidImageBytes(bytes) && hasIntactImageTrailer(bytes) && hasSaneImageDimensions(bytes)
+
+/**
+ * Expected decrypted plaintext size for an AES-GCM chunked media stream,
+ * derived from the wire geometry: total wire bytes minus the 2-byte header
+ * minus 28 bytes (12B nonce + 16B GCM tag) per wire chunk. Pure-Kotlin,
+ * JVM-testable. AES-GCM decryption is deterministic, so a correct download
+ * must produce EXACTLY this many plaintext bytes.
+ */
+fun wireExpectedPlaintext(encrypted: ByteArray): Long {
+    require(encrypted.size >= 2 && encrypted[0] == 0.toByte()) { "bad media stream header" }
+    val wireChunk = 1 shl (encrypted[1].toInt() and 0xFF)
+    require(wireChunk > 28) { "bad media chunk size" }
+    val numChunks = (encrypted.size - 2 + wireChunk - 1) / wireChunk
+    return (encrypted.size - 2 - numChunks * 28L).coerceAtLeast(0)
+}
+
+/** Marker for media failures worth retrying (transient, not deterministic). */
+private class RetryableMediaException(message: String) : IllegalStateException(message)
 
 /**
  * True when [bytes] decode end-to-end as an image. Stronger than
  * [isValidImageBytes]: the magic sniff only reads the header, so a valid
  * header over garbage scan data passes it and renders as gray blocks.
- * This runs the real decoder (downsampled 8x — only the verdict matters,
+ * This runs the real decoder (downsampled 2x — only the verdict matters,
  * not the pixels, so it stays cheap) and rejects what won't decode.
+ * Note BitmapFactory is lenient (partial decodes return non-null), so this
+ * is the LAST gate, not the only one: [hasIntactImageTrailer] catches
+ * truncation and the wire-size accounting catches short downloads.
  * Runs on Dispatchers.IO with the other media work, never the UI thread.
  */
 fun decodesAsImage(bytes: ByteArray): Boolean {
     if (bytes.size < 12) return false
     return try {
-        val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) != null
     } catch (_: Exception) {
         false

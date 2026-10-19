@@ -54,6 +54,21 @@ class ChatViewModel(
     private val _selectedIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedIds: StateFlow<Set<Long>> = _selectedIds
 
+    /**
+     * Tracks whether this chat is the currently visible screen, so
+     * MainActivity's notification collector can skip buzzing for the chat
+     * Garrett is already looking at. Called from ChatScreen's
+     * DisposableEffect (ViewModel.onCleared doesn't fire on pop — the VM
+     * survives in the activity scope while the back stack changes).
+     */
+    fun setVisible(visible: Boolean) {
+        if (visible) {
+            repository.openRcsConversation.value = rcsConversationId
+        } else if (repository.openRcsConversation.value == rcsConversationId) {
+            repository.openRcsConversation.value = null
+        }
+    }
+
     fun toggleSelect(id: Long) {
         _selectedIds.value = _selectedIds.value.let {
             if (id in it) it - id else it + id

@@ -1,7 +1,9 @@
 package com.garrietta.relay
 
 import android.app.Application
+import android.content.Context
 import com.garrietta.relay.data.repo.AppSeedStore
+import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -23,6 +25,30 @@ class RelayApp : Application() {
 
     /** App-wide persistent contact color seed (see AppSeedStore). */
     val appSeedStore: AppSeedStore by lazy { AppSeedStore(this) }
+
+    /** User-defined inbox categories + chat assignments (see CategoryStore). */
+    val categoryStore: CategoryStore by lazy { CategoryStore(this) }
+
+    private val appPrefs by lazy {
+        getSharedPreferences("relay_app", Context.MODE_PRIVATE)
+    }
+
+    /**
+     * Relay's own incoming-message notifications (Settings → Texting).
+     * Default ON — Garrett explicitly asked for notifications from the app
+     * (2026-10-19); the old code never posted any ("the default SMS app
+     * owns notifying"), so nothing ever buzzed.
+     */
+    fun areMessageNotificationsEnabled(): Boolean =
+        appPrefs.getBoolean(KEY_MSG_NOTIFICATIONS, true)
+
+    fun setMessageNotificationsEnabled(enabled: Boolean) {
+        appPrefs.edit().putBoolean(KEY_MSG_NOTIFICATIONS, enabled).apply()
+    }
+
+    companion object {
+        private const val KEY_MSG_NOTIFICATIONS = "msg_notifications_enabled"
+    }
 
     override fun onCreate() {
         super.onCreate()

@@ -72,6 +72,14 @@ class UnifiedInboxRepository(
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
+    /**
+     * The RCS conversation id of the chat currently on screen (null when
+     * none). Set by ChatViewModel via ChatScreen's DisposableEffect; read by
+     * MainActivity's notification collector so an incoming message for the
+     * OPEN chat doesn't buzz while Garrett is already looking at it.
+     */
+    val openRcsConversation = MutableStateFlow<String?>(null)
+
     private val refreshTick = MutableStateFlow(0)
 
     /**

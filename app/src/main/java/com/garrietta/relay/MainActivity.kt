@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
     // Hoisted to activity level so onResume can refresh the default-SMS state
     // (the banner must disappear the moment the role is granted).
     private val settingsVm: SettingsViewModel by viewModels {
-        SettingsViewModelFactory(applicationContext, (application as RelayApp).repository)
+        SettingsViewModelFactory(applicationContext, (application as RelayApp).repository, (application as RelayApp).categoryStore)
     }
 
     private val permissionLauncher = registerForActivityResult(
@@ -121,6 +121,7 @@ class MainActivity : ComponentActivity() {
         // SYSTEM theme, not the app's override — our explicit flags win.
         applySystemBarAppearance()
         requestMessagingPermissions()
+        startIncomingMessageNotifications()
 
         setContent {
             val themeMode by settingsVm.themeMode.collectAsState()
@@ -227,7 +228,7 @@ class MainActivity : ComponentActivity() {
                     when (screen) {
                         is Screen.Inbox -> {
                             val inboxVm: InboxViewModel = viewModel(
-                                factory = InboxViewModelFactory(app.repository)
+                                factory = InboxViewModelFactory(app.repository, app.categoryStore)
                             )
                             InboxScreen(
                                 viewModel = inboxVm,
@@ -323,7 +324,7 @@ class MainActivity : ComponentActivity() {
                         color = MaterialTheme.colorScheme.background,
                     ) {
                         val inboxVm: InboxViewModel = viewModel(
-                            factory = InboxViewModelFactory(app.repository)
+                            factory = InboxViewModelFactory(app.repository, app.categoryStore)
                         )
                         InboxScreen(
                             viewModel = inboxVm,
@@ -527,6 +528,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Incoming-message notifications (Garrett 2026-10-19: "i'm not getting
+     * notifications from messages in the app"). The old code built the
+     * channel but never posted anything ("the default SMS app owns
+     * notifying") — so live RCS arrivals were silent. This collector posts
+     * a MessagingStyle notification for every INCOMING live message:
+     * - skipped for own outgoing/echo messages,
+     * - skipped when the message's chat is currently on screen,
+     * - skipped when paired is false (unpaired SMS is the default app's job),
+     * - gated on the Settings → Texting toggle (default ON).
+     * POST_NOTIFICATIONS itself is requested in requestMessagingPermissions;
+     * showIncoming additionally guards the runtime grant and no-ops.
+     */
+    private fun startIncomingMessageNotifications() {
+        lifecycleScope.launch {
+            app.repository.observeRcsMessages().collect { msg ->
+                if (msg.fromMe) return@collect
+                if (!app.rcsTransport.isPairedNow) return@collect
+                if (!app.areMessageNotificationsEnabled()) return@collect
+                val open = app.repository.openRcsConversation.value
+                if (open != null && open == msg.conversationId) return@collect
+                val name = app.repository.conversations.value
+                    .firstOrNull { it.rcsConversationId == msg.conversationId }
+                    ?.displayName?.ifBlank { null } ?: "New message"
+                val body = msg.body.ifBlank {
+                    if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
+                }
+                com.garrietta.relay.notifications.MessageNotifications.showIncoming(
+                    this@MainActivity, name, body, msg.timestampMs,
+                )
+            }
+        }
+    }
+
     private fun requestMessagingPermissions() {
         val needed = mutableListOf(
             Manifest.permission.READ_SMS,
@@ -546,10 +581,11 @@ class MainActivity : ComponentActivity() {
 
 private class InboxViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
+    private val categories: com.garrietta.relay.data.repo.CategoryStore,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        InboxViewModel(repo) as T
+        InboxViewModel(repo, categories) as T
 }
 
 private class ChatViewModelFactory(
@@ -569,10 +605,11 @@ private class ChatViewModelFactory(
 private class SettingsViewModelFactory(
     private val context: android.content.Context,
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
+    private val categories: com.garrietta.relay.data.repo.CategoryStore,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        SettingsViewModel(context.applicationContext, repo) as T
+        SettingsViewModel(context.applicationContext, repo, categories) as T
 }
 
 

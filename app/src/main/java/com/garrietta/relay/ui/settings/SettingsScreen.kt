@@ -15,8 +15,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
@@ -98,13 +102,35 @@ fun SettingsScreen(
             }
 
             SettingsCard(title = "Texting", icon = Icons.Filled.Send) {
+                val notificationsEnabled by viewModel.notificationsEnabled.collectAsState()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Message notifications", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Notify when new messages arrive in Relay",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = notificationsEnabled,
+                        onCheckedChange = viewModel::setNotificationsEnabled,
+                    )
+                }
                 SettingsRow(
-                    title = "Notifications",
+                    title = "Notification settings",
                     subtitle = "Sounds, badges, and previews",
                     actionLabel = "Open",
                     onAction = viewModel::openNotificationSettings,
                 )
             }
+
+            CategoriesCard(viewModel = viewModel)
 
             SettingsCard(title = "RCS", icon = Icons.Filled.Notifications) {
                 SettingsRow(
@@ -170,6 +196,218 @@ fun SettingsScreen(
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
             Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/**
+ * Inbox categories: the music-app-style pill bar's backing store. Add,
+ * rename, delete, and REORDER categories; tap a category to assign chats
+ * to it (one category per chat — assigning elsewhere moves it). "All" is
+ * implicit and always shows every conversation.
+ */
+@Composable
+private fun CategoriesCard(viewModel: SettingsViewModel) {
+    val categories by viewModel.categories.collectAsState()
+    val assignments by viewModel.assignments.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
+    var showAddDialog by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<com.garrietta.relay.data.repo.ChatCategory?>(null) }
+    var expandedId by remember { mutableStateOf<String?>(null) }
+
+    if (showAddDialog) {
+        var name by remember { mutableStateOf("") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("New category") },
+            text = {
+                androidx.compose.material3.TextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    placeholder = { Text("e.g. Work") },
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        viewModel.addCategory(name)
+                        showAddDialog = false
+                    },
+                ) { Text("Add") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showAddDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+    renameTarget?.let { target ->
+        var name by remember(target.id) { mutableStateOf(target.name) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename category") },
+            text = {
+                androidx.compose.material3.TextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        viewModel.renameCategory(target.id, name)
+                        renameTarget = null
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { renameTarget = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    SettingsCard(title = "Categories", icon = Icons.Filled.Send) {
+        Text(
+            "Organize chats into groups shown in the inbox pill bar. " +
+                "Tap a category to choose which chats belong to it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        if (categories.isEmpty()) {
+            Text(
+                "No categories yet — the inbox shows everything under All.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+        }
+        categories.forEachIndexed { index, category ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        category.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                expandedId = if (expandedId == category.id) null else category.id
+                            }
+                            .padding(vertical = 12.dp),
+                    )
+                    // Reorder
+                    IconButton(
+                        onClick = { viewModel.moveCategory(category.id, -1) },
+                        enabled = index > 0,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowUp,
+                            contentDescription = "Move up",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(
+                        onClick = { viewModel.moveCategory(category.id, 1) },
+                        enabled = index < categories.size - 1,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowDown,
+                            contentDescription = "Move down",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(
+                        onClick = { renameTarget = category },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Edit,
+                            contentDescription = "Rename",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = { viewModel.deleteCategory(category.id) },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Delete",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                // Assignment: which chats belong to this category.
+                if (expandedId == category.id) {
+                    val memberCount = conversations.count { conv ->
+                        assignments[com.garrietta.relay.data.repo.CategoryStore.conversationKey(
+                            conv.rcsConversationId, conv.threadId,
+                        )] == category.id
+                    }
+                    Text(
+                        "$memberCount chat${if (memberCount == 1) "" else "s"} in ${category.name}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                    conversations.take(200).forEach { conv ->
+                        val key = com.garrietta.relay.data.repo.CategoryStore.conversationKey(
+                            conv.rcsConversationId, conv.threadId,
+                        )
+                        val checked = assignments[key] == category.id
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.assignChat(
+                                        conv, if (checked) null else category.id,
+                                    )
+                                }
+                                .padding(vertical = 6.dp),
+                        ) {
+                            androidx.compose.material3.Checkbox(
+                                checked = checked,
+                                onCheckedChange = { isChecked ->
+                                    viewModel.assignChat(
+                                        conv, if (isChecked) category.id else null,
+                                    )
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                conv.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        androidx.compose.material3.TextButton(onClick = { showAddDialog = true }) {
+            Icon(Icons.Filled.Add, contentDescription = null)
+            Spacer(Modifier.width(4.dp))
+            Text("Add category")
         }
     }
 }

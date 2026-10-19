@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.garrietta.relay.RelayApp
+import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.ThemeMode
+import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsPairingState
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -23,6 +27,7 @@ private const val TAG = "RelaySettings"
 class SettingsViewModel(
     private val context: Context,
     private val repository: UnifiedInboxRepository,
+    private val categoryStore: CategoryStore,
 ) : ViewModel() {
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -62,6 +67,56 @@ class SettingsViewModel(
         }
         runCatching { context.startActivity(intent) }
     }
+
+    // ---- Message notifications toggle (Relay's own incoming buzz) ----
+
+    private val app: RelayApp get() = context.applicationContext as RelayApp
+
+    private val _notificationsEnabled =
+        MutableStateFlow(app.areMessageNotificationsEnabled())
+    val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        app.setMessageNotificationsEnabled(enabled)
+        _notificationsEnabled.value = enabled
+    }
+
+    // ---- Categories ----
+
+    val categories: StateFlow<List<ChatCategory>> = categoryStore.categories
+    val assignments: StateFlow<Map<String, String>> = categoryStore.assignments
+
+    /** All conversations, for the per-category assignment UI. */
+    val conversations: StateFlow<List<Conversation>> = repository.conversations
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun addCategory(name: String) {
+        if (categoryStore.addCategory(name) == null) {
+            notify("Enter a category name first")
+        }
+    }
+
+    fun renameCategory(id: String, name: String) = categoryStore.renameCategory(id, name)
+
+    fun deleteCategory(id: String) {
+        categoryStore.deleteCategory(id)
+        notify("Category deleted")
+    }
+
+    fun moveCategory(id: String, delta: Int) = categoryStore.moveCategory(id, delta)
+
+    /** Assigns a chat to a category (null = unassign). One category per chat. */
+    fun assignChat(conversation: Conversation, categoryId: String?) {
+        val key = CategoryStore.conversationKey(
+            conversation.rcsConversationId, conversation.threadId,
+        )
+        categoryStore.assignChat(key, categoryId)
+    }
+
+    fun categoryFor(conversation: Conversation): String? =
+        categoryStore.categoryFor(
+            CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId),
+        )
 
     /**
      * Live RCS transport state for the Diagnostics card. Polled (not a

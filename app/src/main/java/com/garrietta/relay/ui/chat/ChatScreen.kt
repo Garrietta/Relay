@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -100,6 +101,7 @@ import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.GroupAvatarCluster
@@ -136,6 +138,12 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    // Visible-chat tracking for notification suppression: while this chat
+    // is on screen, MainActivity's collector skips its incoming messages.
+    DisposableEffect(viewModel) {
+        viewModel.setVisible(true)
+        onDispose { viewModel.setVisible(false) }
+    }
     // Header mode from the OTHER-participant count (self excluded and
     // deduped — the server's participant list can include him twice).
     // Per-sender bubble theming applies to groups.
@@ -448,6 +456,12 @@ private fun OneToOneHeader(
                         .padding(top = 2.dp, bottom = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
+                    // Overlay clip matches the resolved per-contact shape (not
+                    // a hardcoded WavyBlobShape) — the inbox side was fixed
+                    // for the same corner-glitch; both ends must agree.
+                    val overlayShape = remember(shapeKey) {
+                        AvatarShapeAssigner.namedShapeFor(shapeKey).shape
+                    }
                     ContactAvatar(
                         photoUri = photoUri,
                         name = name,
@@ -456,7 +470,7 @@ private fun OneToOneHeader(
                         textStyle = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.motionSharedAvatar(
                             SharedElementKeys.avatar(threadId),
-                            shape = WavyBlobShape,
+                            shape = overlayShape,
                         ),
                     )
                     Spacer(Modifier.height(4.dp))

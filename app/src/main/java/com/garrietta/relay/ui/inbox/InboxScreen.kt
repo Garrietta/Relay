@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -34,7 +35,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -44,8 +47,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -63,6 +64,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,6 +81,7 @@ import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import com.garrietta.relay.ui.theme.CloverShape
 import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
@@ -105,8 +108,32 @@ fun InboxScreen(
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val query by viewModel.query.collectAsState()
+    val categories by viewModel.categories.collectAsState()
+    val selectedCategoryId by viewModel.selectedCategoryId.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
+    // Search lives behind the bottom-right expressive button now; tapping
+    // it swaps the category bar slot for the search field.
+    var searchOpen by remember { mutableStateOf(false) }
+    // Bottom bar auto-hide: the new-chat pill + search button slide down
+    // off the bottom when scrolling down, and return on scroll up (or when
+    // back at the very top).
+    var bottomBarVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        var prevIndex = 0
+        var prevOffset = 0
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                bottomBarVisible = when {
+                    index == 0 && offset < 120 -> true
+                    index > prevIndex || (index == prevIndex && offset > prevOffset + 12) -> false
+                    index < prevIndex || (index == prevIndex && offset < prevOffset - 12) -> true
+                    else -> bottomBarVisible
+                }
+                prevIndex = index
+                prevOffset = offset
+            }
+    }
 
     // Scroll-linked collapsing header: the big "Messages" title shrinks all
     // the way down to a compact bar title as the list scrolls. The collapse
@@ -156,63 +183,27 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search — compact 48dp pill (was a 56dp OutlinedTextField with
-                // 8dp vertical padding: 72dp total). Custom field for tight
-                // control; clear button appears when there's a query.
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .heightIn(min = 48.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    ) {
-                        Icon(
-                            Icons.Filled.Search,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        BasicTextField(
-                            value = query,
-                            onValueChange = viewModel::setQuery,
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                color = MaterialTheme.colorScheme.onSurface,
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            decorationBox = { inner ->
-                                if (query.isEmpty()) {
-                                    Text(
-                                        "Search conversations",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                    )
-                                }
-                                inner()
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (query.isNotEmpty()) {
-                            IconButton(
-                                onClick = { viewModel.setQuery("") },
-                                modifier = Modifier.size(32.dp),
-                            ) {
-                                Icon(
-                                    Icons.Filled.Close,
-                                    contentDescription = "Clear search",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
-                        }
-                    }
+                if (searchOpen) {
+                    // Search mode: the field takes the category bar's slot,
+                    // with a back affordance to close it. Entered from the
+                    // bottom-right expressive search button.
+                    SearchField(
+                        query = query,
+                        onQueryChange = viewModel::setQuery,
+                        onClose = {
+                            searchOpen = false
+                            viewModel.setQuery("")
+                        },
+                    )
+                } else {
+                    // Category bar — music-app style segmented pill. Only
+                    // rendered when custom categories exist; with none, the
+                    // inbox shows no bar at all.
+                    CategoryPillBar(
+                        categories = categories,
+                        selectedId = selectedCategoryId,
+                        onSelect = viewModel::selectCategory,
+                    )
                 }
                 // The conversation LIST is its own rounded container
                 // (Google Messages M3E pattern) — solid color, no decoration.
@@ -269,27 +260,131 @@ fun InboxScreen(
                     }
                 }
             }
-            // True floating pill: elevated above the list with margins on all
-            // sides — the list scrolls beneath it. Not a docked bar. The
-            // densest color in the scheme, per the expressive contrast rule.
-            // One-shot entrance: rises + fades in with the bouncy language
-            // when the inbox appears.
+            // Bottom cluster: the new-conversation pill (cropped width-wise to
+            // make room) + the expressive search button at the bottom-right.
+            // Both slide down off the bottom of the phone on scroll-down and
+            // return on scroll-up. One-shot entrance on first appearance.
             var pillVisible by remember { mutableStateOf(false) }
             LaunchedEffect(Unit) { pillVisible = true }
             AnimatedVisibility(
-                visible = pillVisible,
+                visible = pillVisible && bottomBarVisible,
                 enter = fadeIn(tween(300, delayMillis = 150)) +
                     slideInVertically(
                         tween(450, delayMillis = 150),
                     ) { it },
+                exit = fadeOut(tween(180)) +
+                    slideOutVertically(tween(220)) { it },
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                NewConversationPill(
-                    onClick = onNewConversation,
+                Row(
                     modifier = Modifier
+                        .fillMaxWidth()
                         .padding(horizontal = 24.dp)
                         .padding(bottom = 24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    NewConversationPill(
+                        onClick = onNewConversation,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    // Search: a distinctive expressive shape (Sunny star) —
+                    // deliberately NOT a circle, per the expressive brief.
+                    Box(
+                        modifier = Modifier
+                            .size(60.dp)
+                            .clip(expressiveShape("Sunny"))
+                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { searchOpen = true },
+                                role = Role.Button,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.Search,
+                            contentDescription = "Search conversations",
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The search field, shown in the category bar's slot while search mode is
+ * open (entered from the bottom-right expressive search button). Compact
+ * 48dp pill with a back affordance to close; clear button appears when
+ * there's a query.
+ */
+@Composable
+private fun SearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .heightIn(min = 48.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+        ) {
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.ArrowBack,
+                    contentDescription = "Close search",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
                 )
+            }
+            Spacer(Modifier.width(4.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                decorationBox = { inner ->
+                    if (query.isEmpty()) {
+                        Text(
+                            "Search conversations",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    inner()
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (query.isNotEmpty()) {
+                IconButton(
+                    onClick = { onQueryChange("") },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Clear search",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
     }
@@ -331,7 +426,9 @@ private fun CollapsingMessagesHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Brand mark: a Pop star in the primary container, shrinking
-            // with the collapse.
+            // with the collapse. The glyph is a chat bubble — deliberately
+            // NOT a pencil (Garrett 2026-10-19: the pencil already lives in
+            // the New conversation pill; the header mark shouldn't repeat it).
             Box(
                 modifier = Modifier
                     .size((34 - 12 * collapse).dp)
@@ -340,7 +437,7 @@ private fun CollapsingMessagesHeader(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    Icons.Filled.Edit,
+                    Icons.Filled.ChatBubble,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
                     modifier = Modifier.size((18 - 6 * collapse).dp),
@@ -666,14 +763,24 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
                 },
             )
         } else {
+            // Overlay-clip fix (Garrett 2026-10-19: the avatar "bugs" at its
+            // bottom corners when opening a chat). motionSharedAvatar clips
+            // the transition overlay to the given shape — it was hardcoded
+            // to WavyBlobShape while the avatar actually renders the
+            // per-contact rotation shape, so the clip and the content
+            // disagreed at the corners. Pass the RESOLVED shape instead.
+            val shapeKey = conversation.address.ifBlank { conversation.displayName }
+            val overlayShape = remember(shapeKey) {
+                AvatarShapeAssigner.namedShapeFor(shapeKey).shape
+            }
             ContactAvatar(
                 photoUri = conversation.photoUri,
                 name = conversation.displayName,
-                shapeKey = conversation.address.ifBlank { conversation.displayName },
+                shapeKey = shapeKey,
                 modifier = Modifier
                     .motionSharedAvatar(
                         SharedElementKeys.avatar(conversation.threadId),
-                        shape = WavyBlobShape,
+                        shape = overlayShape,
                     )
                     .graphicsLayer {
                         scaleX = pressScale

@@ -110,32 +110,24 @@ data class Participant(
 )
 
 /**
- * String-level ghost predicate (Garrett 2026-10-19): the server wraps this
- * remnant's name in quotes — straight, curly, or backtick, sometimes several
- * layers — which is exactly why it renders quoted in the header
- * ("Alec, Trenton, 'UNKNOWN_SENDER!'"). The #118 exact-match missed it
- * because only ASCII quotes were stripped. Strip every quote flavor (plus
- * zero-width/invisible chars) from both ends, then exact-match.
- * Display-layer only; the underlying data is never touched.
+ * String-level ghost predicate (Garrett 2026-10-19): the server emits this
+ * remnant's name wrapped in varying quote/invisible characters — straight,
+ * curly, backtick, sometimes several layers, possibly with other junk —
+ * which is why it renders quoted in the header ("Alec, Trenton,
+ * 'UNKNOWN_SENDER!'"). Exact-match kept missing it (#118, #119). Now: strip
+ * every quote flavor and invisible char from the WHOLE string, then match
+ * on the substring — the constant UNKNOWN_SENDER is specific enough to
+ * never collide with a real contact name. Display-layer only; the
+ * underlying data is never touched.
  */
 fun String.isUnknownSenderGhostName(): Boolean {
-    var s = trim()
-    val quotes = charArrayOf('"', '\'', '\u201C', '\u201D', '\u2018', '\u2019', '`')
-    val invisible = charArrayOf(' ', '\t', '\n', '\r', '\u200B', '\u200C', '\u200D', '\uFEFF')
-    var changed: Boolean
-    do {
-        changed = false
-        while (s.length >= 2 && s.first() in quotes && s.last() in quotes) {
-            s = s.substring(1, s.length - 1)
-            changed = true
-        }
-        val t = s.trim(*quotes, *invisible)
-        if (t != s) {
-            s = t
-            changed = true
-        }
-    } while (changed)
-    return s == "UNKNOWN_SENDER!"
+    val strip = setOf(
+        '"', '\'', '\u201C', '\u201D', '\u2018', '\u2019', '\u201A', '\u201E',
+        '\u2039', '\u203A', '\u00AB', '\u00BB', '`', '\u00B4', '\u02BC',
+        ' ', '\t', '\n', '\r', '\u00A0', '\u200B', '\u200C', '\u200D', '\uFEFF',
+    )
+    val normalized = this.filterNot { it in strip }
+    return normalized.contains("UNKNOWN_SENDER")
 }
 
 /**

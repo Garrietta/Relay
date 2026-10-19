@@ -40,16 +40,18 @@ import com.garrietta.relay.ui.motion.RelaySprings
 import kotlin.math.roundToInt
 
 /**
- * The inbox category bar — Garrett's 2026-10-19 "chocolate bar" directive:
- * ONE continuous pill bifurcated by dividers. The end chips (All first,
+ * The inbox category bar — Garrett's 2026-10-19 directive, refined 2026-10-19
+ * evening: SEPARATE chips with significant spacing between them (his
+ * music-app reference), each morphing WITHIN its own padded slot so the
+ * selected oval can never overlap its neighbors. The end chips (All first,
  * Unknown last) are ALWAYS half-rectangle / half-oval — rounded on the
  * outward edge, square on the inward edge — whether selected or not. Middle
  * chips are pure rectangles. When a chip is SELECTED it morphs into a full
- * oval and pops out of the bar (scale + z-order), bouncy.
+ * oval and pops (scale + z-order), bouncy.
  *
- * Unselected, the chips tile into the segmented strip; selected, the tapped
- * chip blooms into the floating oval. The morph fires the frame the tap
- * lands (RelaySprings bouncy).
+ * Unselected, the chips sit as the spaced strip; selected, the tapped chip
+ * blooms into the floating oval inside its own slot. The morph fires the
+ * frame the tap lands (RelaySprings bouncy).
  *
  * Segments: "All" first (always), then the user's custom categories in
  * their Settings order, then the built-in Unknown tab last. Equal widths
@@ -101,13 +103,14 @@ fun CategoryPillBar(
             }
         }
 
-        // No gaps: chips tile edge-to-edge into the continuous bar, split
-        // by 1dp dividers — the chocolate bar.
+        // Separate chips with significant spacing (Garrett 2026-10-19
+        // evening): each chip morphs WITHIN its own slot, so the selected
+        // oval's pop-out scale can never reach its neighbors.
         Row(
             modifier = if (fillMode) Modifier.fillMaxSize()
             else Modifier.fillMaxSize().horizontalScroll(scrollState),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(0.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             segmentIds.forEachIndexed { index, id ->
                 val isFirst = index == 0
@@ -120,11 +123,10 @@ fun CategoryPillBar(
                     onClick = { onSelect(id) },
                     modifier = (if (fillMode) Modifier.weight(1f) else Modifier.width(120.dp))
                         .fillMaxHeight()
-                        // The selected oval pops OUT of the bar, drawn over
-                        // its neighbors.
+                        // The selected oval pops within its own slot, drawn
+                        // over the gaps (never over neighbors).
                         .zIndex(if (index == selectedIndex) 1f else 0f),
                 )
-                if (!isLast) SegmentDivider()
             }
         }
     }
@@ -133,7 +135,7 @@ fun CategoryPillBar(
 /**
  * One chocolate-bar segment. Unselected ends are half-oval (rounded outward,
  * square inward); middles are pure rectangles. On selection the segment
- * morphs to a FULL oval, fills, and scales up over its neighbors.
+ * morphs to a FULL oval, fills, and scales up within its own slot.
  */
 @Composable
 private fun RowScope.ChocolateSegment(
@@ -151,9 +153,14 @@ private fun RowScope.ChocolateSegment(
         animationSpec = RelaySprings.bouncy(),
         label = "chocSel",
     )
+    // CRASH GUARD (Garrett 2026-10-19 evening: IllegalArgumentException
+    // "Corner size in Px can't be negative"): the bouncy spring overshoots
+    // below 0 / above 1 mid-animation. Clamp the morph factor so no animated
+    // corner radius can ever go negative.
+    val selC = sel.coerceIn(0f, 1f)
     fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
         val base = if (outwardRounded) 26f else 0f
-        return (base + (26f - base) * sel).dp
+        return (base + (26f - base) * selC).dp.coerceAtLeast(0.dp)
     }
     val shape = RoundedCornerShape(
         topStart = corner(isFirst),
@@ -177,7 +184,7 @@ private fun RowScope.ChocolateSegment(
         animationSpec = RelaySprings.bouncy(),
         label = "chocPress",
     )
-    val popScale = 1f + 0.08f * sel
+    val popScale = 1f + 0.08f * selC
     Box(
         modifier = modifier
             .graphicsLayer {
@@ -206,18 +213,4 @@ private fun RowScope.ChocolateSegment(
             modifier = Modifier.padding(horizontal = 8.dp),
         )
     }
-}
-
-/** The bifurcation between chocolate-bar segments. */
-@Composable
-private fun RowScope.SegmentDivider() {
-    Box(
-        modifier = Modifier
-            .width(1.dp)
-            .height(24.dp)
-            .align(Alignment.CenterVertically)
-            .background(
-                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-            ),
-    )
 }

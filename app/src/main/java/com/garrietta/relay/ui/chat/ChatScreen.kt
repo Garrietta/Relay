@@ -92,6 +92,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontWeight
@@ -589,7 +590,10 @@ private fun OneToOneHeader(
             Box(modifier = Modifier.fillMaxWidth()) {
                 IconButton(
                     onClick = onBack,
-                    modifier = Modifier.align(Alignment.TopStart),
+                    // The details tap region below covers the full width —
+                    // the back button must sit above it in z-order or its
+                    // touches get swallowed (Garrett 2026-10-19 evening).
+                    modifier = Modifier.align(Alignment.TopStart).zIndex(1f),
                 ) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                 }
@@ -1186,9 +1190,13 @@ private fun lerpBubbleShape(
     isOutgoing: Boolean,
     position: ItemPosition,
 ): RoundedCornerShape {
+    // Clamp: the bouncy spring overshoots past [0,1] mid-animation, which
+    // would drive a corner negative and crash (same class of bug as the
+    // pill-bar corner crash, Garrett 2026-10-19 evening).
+    val s = squareness.coerceIn(0f, 1f)
     val soft = bubbleCorners(isOutgoing, position)
     val squared = 10.dp
-    fun lerp(a: Dp, b: Dp): Dp = a + (b - a) * squareness
+    fun lerp(a: Dp, b: Dp): Dp = (a + (b - a) * s).coerceAtLeast(0.dp)
     return RoundedCornerShape(
         topStart = lerp(soft.topStart, squared),
         topEnd = lerp(soft.topEnd, squared),

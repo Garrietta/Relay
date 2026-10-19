@@ -592,9 +592,14 @@ fun ChatDetailsScreen(
         }
     }
 
-    // Fullscreen image viewer.
+    // Fullscreen image viewer. Thumbnail-only bytes (no server copy) are
+    // small; upscale them for display so the viewer is legible instead of
+    // tiny (Garrett 2026-10-19 evening). Display-only — the cache is untouched.
     val zoomedBytes = zoomedId?.let { mediaCache[it] }
-    if (zoomedId != null && zoomedBytes != null) {
+    val zoomedDisplay = remember(zoomedBytes) {
+        zoomedBytes?.let { upscaleSmallImageForDisplay(it) }
+    }
+    if (zoomedId != null && zoomedDisplay != null) {
         Dialog(
             onDismissRequest = { zoomedId = null },
             properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -611,7 +616,7 @@ fun ChatDetailsScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 AsyncImage(
-                    model = zoomedBytes,
+                    model = zoomedDisplay,
                     contentDescription = "Shared image",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
@@ -620,6 +625,34 @@ fun ChatDetailsScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * Display-only upscale for tiny-but-valid images (thumbnail-only bytes with
+ * no server copy). If the decoded image's longest side is under 720px,
+ * scales it up so the fullscreen viewer is legible. Never downscales;
+ * returns the original bytes when they can't be decoded.
+ */
+private fun upscaleSmallImageForDisplay(bytes: ByteArray): ByteArray {
+    return try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        if (longest <= 0 || longest >= 720) return bytes
+        val scale = 720f / longest
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: return bytes
+        val w = (bmp.width * scale).toInt().coerceAtLeast(1)
+        val h = (bmp.height * scale).toInt().coerceAtLeast(1)
+        val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true)
+        if (scaled !== bmp) bmp.recycle()
+        val out = java.io.ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+        scaled.recycle()
+        out.toByteArray().ifEmpty { bytes }
+    } catch (_: Exception) {
+        bytes
     }
 }
 

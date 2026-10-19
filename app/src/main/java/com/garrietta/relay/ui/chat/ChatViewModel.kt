@@ -40,6 +40,16 @@ class ChatViewModel(
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
 
+    /**
+     * RCS history depth: starts at the fast 50 for the first paint, grows
+     * to [DEEP_HISTORY_COUNT] once the background deep fill lands — later
+     * reloads keep the deeper count so the list never shrinks back.
+     */
+    private var rcsHistoryCount = 50L
+    private companion object {
+        const val DEEP_HISTORY_COUNT = 300L
+    }
+
     private var activeThreadId: Long = threadId
 
     private val _sending = MutableStateFlow(false)
@@ -156,8 +166,21 @@ class ChatViewModel(
         // cache — no visible load delay on tap.
         _messages.value = repository.cachedMessages(conversationId) ?: emptyList()
         viewModelScope.launch {
-            _messages.value = repository.rcsMessages(conversationId)
+            _messages.value = repository.rcsMessages(conversationId, rcsHistoryCount)
             repository.markRcsRead(conversationId)
+            // Background deep fill (Garrett 2026-10-19: "way more messages
+            // here"). The first paint stays fast; a larger pull then fills
+            // in older history without blocking. Same descending sort, cache
+            // rewritten; later reloads keep the deeper count.
+            try {
+                val deep = repository.rcsMessages(conversationId, DEEP_HISTORY_COUNT)
+                if (deep.size > _messages.value.size) {
+                    rcsHistoryCount = DEEP_HISTORY_COUNT
+                    setMessages(deep)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Deep history fill failed: ${e.message}", e)
+            }
         }
         viewModelScope.launch {
             _transportLabel.value =
@@ -193,7 +216,10 @@ class ChatViewModel(
         val optimistic = tmpId?.let { pendingOptimistic.remove(it) }
         if (optimistic == null) {
             viewModelScope.launch {
-                _messages.value = repository.rcsMessages(rcsConversationId ?: return@launch)
+                _messages.value = repository.rcsMessages(
+                    rcsConversationId ?: return@launch,
+                    rcsHistoryCount,
+                )
             }
             return
         }

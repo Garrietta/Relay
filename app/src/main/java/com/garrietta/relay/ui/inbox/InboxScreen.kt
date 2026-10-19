@@ -1,10 +1,14 @@
 package com.garrietta.relay.ui.inbox
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -56,6 +60,7 @@ import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -71,11 +76,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
@@ -115,6 +123,21 @@ fun InboxScreen(
     // Search lives behind the bottom-right expressive button now; tapping
     // it swaps the category bar slot for the search field.
     var searchOpen by remember { mutableStateOf(false) }
+    // Search query must NEVER persist: Garrett's bug — type "haley", exit
+    // the app, come back, and the inbox is still filtered. Leaving the
+    // inbox (background) or returning to it always resets to the default
+    // unfiltered view.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_RESUME) {
+                searchOpen = false
+                viewModel.setQuery("")
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
     // Bottom bar auto-hide: the new-chat pill + search button slide down
     // off the bottom when scrolling down, and return on scroll up (or when
     // back at the very top).
@@ -183,27 +206,47 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                if (searchOpen) {
-                    // Search mode: the field takes the category bar's slot,
-                    // with a back affordance to close it. Entered from the
-                    // bottom-right expressive search button.
-                    SearchField(
-                        query = query,
-                        onQueryChange = viewModel::setQuery,
-                        onClose = {
-                            searchOpen = false
-                            viewModel.setQuery("")
-                        },
-                    )
-                } else {
-                    // Category bar — music-app style segmented pill. Only
-                    // rendered when custom categories exist; with none, the
-                    // inbox shows no bar at all.
-                    CategoryPillBar(
-                        categories = categories,
-                        selectedId = selectedCategoryId,
-                        onSelect = viewModel::selectCategory,
-                    )
+                // Search open animation (Garrett 2026-10-19): tapping the
+                // search button doesn't snap — the search pane blooms into
+                // the category bar's slot with a bouncy expand+fade.
+                AnimatedContent(
+                    targetState = searchOpen,
+                    transitionSpec = {
+                        (fadeIn(RelaySprings.bouncy()) +
+                            expandVertically(
+                                expandFrom = Alignment.Top,
+                                animationSpec = RelaySprings.bouncy(),
+                            )) togetherWith
+                            (fadeOut(tween(150)) +
+                                shrinkVertically(
+                                    shrinkTowards = Alignment.Top,
+                                    animationSpec = tween(150),
+                                ))
+                    },
+                    label = "searchSwap",
+                ) { open ->
+                    if (open) {
+                        // Search mode: the field takes the category bar's slot,
+                        // with a back affordance to close it. Entered from the
+                        // bottom-right expressive search button.
+                        SearchField(
+                            query = query,
+                            onQueryChange = viewModel::setQuery,
+                            onClose = {
+                                searchOpen = false
+                                viewModel.setQuery("")
+                            },
+                        )
+                    } else {
+                        // Category bar — music-app style segmented pill. Only
+                        // rendered when custom categories exist; with none, the
+                        // inbox shows no bar at all.
+                        CategoryPillBar(
+                            categories = categories,
+                            selectedId = selectedCategoryId,
+                            onSelect = viewModel::selectCategory,
+                        )
+                    }
                 }
                 // The conversation LIST is its own rounded container
                 // (Google Messages M3E pattern) — solid color, no decoration.

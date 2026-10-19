@@ -381,11 +381,11 @@ class UnifiedInboxRepository(
      * bottom and the oldest sits at the top, matching Google Messages.
      * (Ascending here rendered every chat upside down; diagnosed 2026-10-18.)
      */
-    suspend fun rcsMessages(conversationId: String): List<Message> = withContext(Dispatchers.IO) {
+    suspend fun rcsMessages(conversationId: String, count: Long = 50L): List<Message> = withContext(Dispatchers.IO) {
         val conv = rcsTransport.currentRcsConversations().firstOrNull { it.id == conversationId }
         val participants = conv?.participants ?: emptyList()
         val threadKey = ("rcs:" + conversationId).hashCode().toLong()
-        val server = rcsTransport.rcsMessages(conversationId, participants)
+        val server = rcsTransport.rcsMessages(conversationId, participants, count)
         synchronized(rcsServerMessages) { rcsServerMessages[conversationId] = server }
         server.map { m ->
             val senderNumber = participants

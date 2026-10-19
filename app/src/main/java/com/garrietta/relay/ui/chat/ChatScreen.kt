@@ -13,6 +13,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -77,6 +79,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -85,6 +88,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -138,6 +142,18 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    // Composer collapse-back triggers (Garrett 2026-10-19: the expand worked
+    // but "whenever i stop typing" it never collapsed back — nothing ever
+    // cleared focus). Focus loss is the single driver of the collapse
+    // animation, so every end-of-typing path must clear focus:
+    //  (a) tapping anywhere outside the text field (the tap detector below),
+    //  (b) dismissing the keyboard (IME hide),
+    //  (c) sending a message (submit()).
+    val focusManager = LocalFocusManager.current
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible) {
+        if (!imeVisible) focusManager.clearFocus()
+    }
     // Visible-chat tracking for notification suppression: while this chat
     // is on screen, MainActivity's collector skips its incoming messages.
     DisposableEffect(viewModel) {
@@ -233,7 +249,13 @@ fun ChatScreen(
                     )
                     .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                     .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .imePadding(),
+                    .imePadding()
+                    // Tap-outside clears the text field's focus: message
+                    // bubbles consume their own taps (child clickables win),
+                    // so this only fires on empty areas / the composer shell.
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = { focusManager.clearFocus() })
+                    },
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // Bubbles never span the full width: received keep an
@@ -986,6 +1008,7 @@ private fun Composer(
     var showAttachSheet by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
+    val focusManager = LocalFocusManager.current
     // Focus animation (Garrett's directive): tapping the text field expands
     // the inner Message pill to the full width of the outer pill while the
     // attachment buttons fade+shrink away. They spring back WHENEVER the
@@ -1001,6 +1024,8 @@ private fun Composer(
         if (!canSend) return
         onSend(text.trim())
         text = ""
+        // End of typing: collapse the pill back (focus loss drives it).
+        focusManager.clearFocus()
         // Spring pop on send — the unified bouncy language.
         scope.launch {
             sendPop.snapTo(0.82f)

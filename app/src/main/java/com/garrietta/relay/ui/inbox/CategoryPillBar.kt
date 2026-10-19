@@ -1,12 +1,16 @@
 package com.garrietta.relay.ui.inbox
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -17,40 +21,38 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.motion.RelaySprings
+import kotlin.math.roundToInt
 
 /**
  * The inbox category bar — Garrett's 2026-10-19 directive, modeled on the
- * music app's top pill bar (see his screen recording): one long continuous
- * stadium container, horizontally scrollable, with the selection as a
- * filled pill that SLIDES behind the tapped segment (Koda-style slider,
- * RelaySprings-bouncy).
+ * music app's top pill bar (see his screen recording): ONE full-width pill
+ * divided into N EQUAL segments (2 categories = split down the middle,
+ * 3 = thirds, and so on) with visible dividers between them. Tapping a
+ * segment slides the rounded-corner selection surround to it
+ * (RelaySprings-bouncy, music-app style).
  *
  * Segments: "All" first (always), then the user's custom categories in
- * their Settings order. No cap — horizontal scroll handles overflow.
+ * their Settings order. No cap — when segments no longer fit at a readable
+ * width the bar becomes horizontally scrollable with fixed-width segments.
  * Shown ONLY when at least one custom category exists; otherwise the inbox
  * shows no bar at all.
  *
- * Positioning uses ROOT coordinates for both the container and the
- * segments, so the sliding pill stays glued to the selected segment even
- * while the bar is scrolled (parent-relative coordinates don't account
- * for scroll offset).
+ * Positioning is computed deterministically from the segment index (equal
+ * segments = known geometry), so the sliding pill needs no measurement
+ * pass and never flashes at the wrong size.
  *
  * [selectedId]: null = "All".
  */
@@ -62,98 +64,137 @@ fun CategoryPillBar(
     modifier: Modifier = Modifier,
 ) {
     if (categories.isEmpty()) return
-    // Segment ids: null = All, then each category id.
     val segmentIds: List<String?> = remember(categories) {
         listOf(null) + categories.map { it.id }
     }
     val segmentNames: List<String> = remember(categories) {
         listOf("All") + categories.map { it.name }
     }
+    val count = segmentIds.size
     val selectedIndex = segmentIds.indexOf(selectedId).takeIf { it >= 0 } ?: 0
 
-    // Selected segment bounds in ROOT coordinates; re-measured on scroll.
-    val segBounds = remember { mutableStateMapOf<Int, FloatArray>() }
-    var boxX by remember { mutableStateOf(0f) }
-    var boxY by remember { mutableStateOf(0f) }
-    val density = LocalDensity.current
-    val b = segBounds[selectedIndex]
-    val pillX: Dp
-    val pillY: Dp
-    val pillW: Dp
-    val pillH: Dp
-    with(density) {
-        pillX = ((b?.get(0) ?: 0f) - boxX).toDp()
-        pillY = ((b?.get(1) ?: 0f) - boxY).toDp()
-        pillW = (b?.get(2) ?: 0f).toDp()
-        pillH = (b?.get(3) ?: 0f).toDp()
-    }
-    val animX: Dp by animateDpAsState(pillX, RelaySprings.bouncy(), label = "catPillX")
-    val animY: Dp by animateDpAsState(pillY, RelaySprings.bouncy(), label = "catPillY")
-    val animW: Dp by animateDpAsState(pillW, RelaySprings.bouncy(), label = "catPillW")
-    val animH: Dp by animateDpAsState(pillH, RelaySprings.bouncy(), label = "catPillH")
-
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 4.dp)
-            .onGloballyPositioned {
-                boxX = it.positionInRoot().x
-                boxY = it.positionInRoot().y
-            }
             .clip(RoundedCornerShape(percent = 50))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .height(52.dp),
     ) {
-        // Sliding selection pill — drawn UNDER the labels.
-        if (pillW > 0.dp && pillH > 0.dp) {
-            Box(
-                modifier = Modifier
-                    .offset(x = animX, y = animY)
-                    .width(animW)
-                    .height(animH)
-                    .clip(RoundedCornerShape(percent = 50))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-            )
+        val density = LocalDensity.current
+        val containerWPx = with(density) { maxWidth.toPx() }
+        val insetPx = with(density) { 4.dp.toPx() }
+        // Equal segments while they fit at a readable width; beyond that
+        // the bar scrolls with fixed-width segments (still equal).
+        val minSegPx = with(density) { 96.dp.toPx() }
+        val fillMode = count * minSegPx <= containerWPx
+        val segWPx = if (fillMode) {
+            (containerWPx - insetPx * 2) / count
+        } else {
+            with(density) { 120.dp.toPx() }
         }
-        Row(
+        val scrollState = rememberScrollState()
+        // Pill geometry in container-local coords. In scroll mode the scroll
+        // offset shifts it; scrollState.value is State-backed, so this stays
+        // glued while scrolling.
+        val targetXPx = insetPx + selectedIndex * segWPx -
+            (if (fillMode) 0f else scrollState.value.toFloat())
+        val pillYPx = with(density) { 4.dp.toPx() }
+        val animX by animateFloatAsState(targetXPx, RelaySprings.bouncy(), label = "catPillX")
+        val animW by animateFloatAsState(segWPx, RelaySprings.bouncy(), label = "catPillW")
+        // Shape morph (Garrett 2026-10-19): while the surround slides it's a
+        // rounded rectangle; settling onto the tapped segment it blooms into
+        // the sideways oval. Lightweight: the corner radius keys off whether
+        // the slide has settled (animX == target when the spring rests).
+        val cornerTarget = if (animX == targetXPx) 28.dp else 10.dp
+        val animCorner by animateDpAsState(cornerTarget, RelaySprings.bouncy(), label = "catPillCorner")
+
+        // Keep the selected segment on screen in scroll mode.
+        LaunchedEffect(selectedIndex, fillMode) {
+            if (!fillMode) {
+                val target = (insetPx + selectedIndex * segWPx - containerWPx / 2 + segWPx / 2)
+                    .roundToInt().coerceAtLeast(0)
+                scrollState.animateScrollTo(target, RelaySprings.bouncy())
+            }
+        }
+
+        // Sliding selection surround — drawn UNDER the labels.
+        Box(
             modifier = Modifier
-                .fillMaxSize()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 4.dp),
+                .offset { IntOffset(animX.roundToInt(), pillYPx.roundToInt()) }
+                .width(with(density) { animW.toDp() })
+                .height(44.dp)
+                .clip(RoundedCornerShape(animCorner))
+                .background(MaterialTheme.colorScheme.primaryContainer),
+        )
+
+        val rowModifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 4.dp)
+        val segWDp = with(density) { segWPx.toDp() }
+        Row(
+            modifier = if (fillMode) rowModifier
+            else rowModifier.horizontalScroll(scrollState),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             segmentIds.forEachIndexed { index, id ->
-                val selected = index == selectedIndex
-                Box(
-                    modifier = Modifier
-                        .onGloballyPositioned { coords ->
-                            val p = coords.positionInRoot()
-                            segBounds[index] = floatArrayOf(
-                                p.x, p.y,
-                                coords.size.width.toFloat(),
-                                coords.size.height.toFloat(),
-                            )
-                        }
-                        .clip(RoundedCornerShape(percent = 50))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { onSelect(id) }
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = segmentNames[index],
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected)
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Segment(
+                    name = segmentNames[index],
+                    selected = index == selectedIndex,
+                    onClick = { onSelect(id) },
+                    // RowScope: weight() only resolves here, not outside.
+                    modifier = if (fillMode) Modifier.weight(1f)
+                    else Modifier.width(segWDp),
+                )
+                if (index < count - 1) SegmentDivider()
             }
         }
     }
+}
+
+/** One equal segment of the bar. */
+@Composable
+private fun RowScope.Segment(
+    name: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(percent = 50))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected)
+                MaterialTheme.colorScheme.onPrimaryContainer
+            else
+                MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+    }
+}
+
+/** Visible segmentation between categories — the "split" Garrett asked for. */
+@Composable
+private fun RowScope.SegmentDivider() {
+    Box(
+        modifier = Modifier
+            .width(1.dp)
+            .height(24.dp)
+            .align(Alignment.CenterVertically)
+            .background(
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+            ),
+    )
 }

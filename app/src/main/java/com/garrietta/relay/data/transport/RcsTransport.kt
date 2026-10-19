@@ -109,6 +109,20 @@ class RcsTransport(context: Context) : Transport {
             val msg = "Conversations sync failed: ${e.message ?: e.javaClass.simpleName}"
             Log.w(TAG, msg, e)
             _syncError.value = msg
+            return
+        }
+        // Deeper history in the background (Garrett 2026-10-19: "way more
+        // messages here"). The first pull stays fast (50); a larger pull
+        // then fills in older conversations without blocking the UI.
+        // Merged by id, newest first. Best-effort: failures only log.
+        try {
+            val deep = session.listConversations(count = 400L)
+            if (deep.isNotEmpty()) {
+                _rcsConversations.value =
+                    (deep + _rcsConversations.value).distinctBy { it.id }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Deep conversation fill failed: ${e.message}", e)
         }
     }
 
@@ -120,7 +134,8 @@ class RcsTransport(context: Context) : Transport {
     suspend fun rcsMessages(
         conversationId: String,
         participants: List<RcsParticipant> = emptyList(),
-    ): List<RcsMessage> = session.listMessages(conversationId, participants = participants)
+        count: Long = 50L,
+    ): List<RcsMessage> = session.listMessages(conversationId, count, participants)
 
     /** Live incoming RCS messages (server echoes + new arrivals). */
     fun observeRcsMessages(): Flow<RcsMessage> = session.incoming

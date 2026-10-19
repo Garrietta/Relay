@@ -2,7 +2,11 @@ package com.garrietta.relay.ui
 
 import android.content.Context
 import android.provider.ContactsContract
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -132,17 +136,13 @@ fun NewConversationDialog(
         ),
     ) {
         var visible by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) {
-            visible = true
-            // Raise the keyboard on open so Garrett can type immediately.
-            focusRequester.requestFocus()
+        LaunchedEffect(Unit) { visible = true }
+        // Raise the keyboard once the sheet exists (it enters with a
+        // slide-up, so focus waits for the composition, not the animation).
+        LaunchedEffect(visible) {
+            if (visible) focusRequester.requestFocus()
         }
-        // Bouncy dialog entrance — the unified spring language.
-        val scale by animateFloatAsState(
-            targetValue = if (visible) 1f else 0.92f,
-            animationSpec = RelaySprings.bouncy(),
-            label = "dialogScale",
-        )
+        // Scrim fade — the sheet itself slides up (see below).
         val alpha by animateFloatAsState(
             targetValue = if (visible) 1f else 0f,
             animationSpec = RelaySprings.bouncy(),
@@ -163,6 +163,18 @@ fun NewConversationDialog(
                 ),
             contentAlignment = Alignment.BottomCenter,
         ) {
+            // Music-player sheet entrance (Garrett 2026-10-19): the sheet
+            // slides UP from the bottom with the bouncy spring — no more
+            // scale-in. The screen-level nav transition is a plain fade for
+            // this destination (see MainActivity) so the two never fight.
+            AnimatedVisibility(
+                visible = visible,
+                enter = slideInVertically(
+                    animationSpec = RelaySprings.bouncy(),
+                ) { it } + fadeIn(tween(120)),
+                modifier = Modifier.align(Alignment.BottomCenter),
+                label = "newChatSheet",
+            ) {
             Surface(
                 // NO imePadding here: the sheet is full-height and the result
                 // list extends BEHIND the keyboard (Garrett's directive —
@@ -172,7 +184,6 @@ fun NewConversationDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .fillMaxHeight(0.92f)
-                    .graphicsLayer(scaleX = scale, scaleY = scale)
                     // Swallow taps so they don't fall through to the scrim.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -288,6 +299,7 @@ fun NewConversationDialog(
                     }
                 }
             }
+            } // AnimatedVisibility (sheet slide-up)
         }
     }
 }

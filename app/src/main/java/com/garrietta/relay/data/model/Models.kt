@@ -81,3 +81,19 @@ data class Participant(
     /** True for the device owner (RCS server says so; Telephony infers it). */
     val isSelf: Boolean = false,
 )
+
+/**
+ * Display-layer ghost predicate (Garrett 2026-10-19): a participant whose
+ * display name is literally "UNKNOWN_SENDER!" — a remnant (he suspects car
+ * usage) — is HIDDEN from name lists and avatar stacks, never deleted.
+ * The underlying data is untouched; call sites filter with
+ * `filterNot { it.isUnknownSenderGhost() }`. Surrounding quotes are
+ * stripped before the exact-match comparison, in case they're part of
+ * the stored name.
+ */
+fun Participant.isUnknownSenderGhost(): Boolean {
+    val stripped = displayName.trim()
+        .removeSurrounding("\"")
+        .removeSurrounding("'")
+    return stripped == "UNKNOWN_SENDER!"
+}

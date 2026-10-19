@@ -100,6 +100,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.motion.RelaySprings
@@ -380,10 +381,15 @@ private fun ChatHeader(
             HeaderMode.OneToOne -> {
                 // Self-chat (no others): show self, once.
                 val peer = others.firstOrNull() ?: participants.firstOrNull()
-                val name = peer?.displayName?.ifBlank { peer.address }
-                    ?.ifBlank { displayName } ?: displayName
+                val peerName = when {
+                    peer == null -> displayName
+                    // UNKNOWN_SENDER! ghost: show the address, never the
+                    // literal string (display layer only).
+                    peer.isUnknownSenderGhost() -> peer.address.ifBlank { displayName }
+                    else -> peer.displayName.ifBlank { peer.address }.ifBlank { displayName }
+                }
                 OneToOneHeader(
-                    name = name,
+                    name = peerName,
                     photoUri = peer?.photoUri ?: photoUri,
                     shapeKey = peer?.address ?: recipient,
                     threadId = threadId,
@@ -534,10 +540,13 @@ private fun GroupHeader(
     patternKey: String,
     onBack: () -> Unit,
 ) {
+    // UNKNOWN_SENDER! ghosts are hidden from the name list AND the avatar
+    // stack (Garrett 2026-10-19) — display layer only, data untouched.
+    val visibleOthers = remember(others) { others.filterNot { it.isUnknownSenderGhost() } }
     // Defense in depth: a participant whose name is blank or the literal
     // "Unknown" renders as its number, never the word "Unknown".
-    val names = remember(others) {
-        others.map {
+    val names = remember(visibleOthers) {
+        visibleOthers.map {
             val n = it.displayName.substringBefore(" ").ifBlank { it.address }
             if (n.equals("Unknown", ignoreCase = true)) it.address else n
         }.filter { it.isNotBlank() }.joinToString(", ")
@@ -558,7 +567,7 @@ private fun GroupHeader(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GroupAvatarCluster(
-                    members = others.map {
+                    members = visibleOthers.map {
                         ClusterMember(
                             photoUri = it.photoUri,
                             name = it.displayName.ifBlank { it.address },
@@ -867,7 +876,8 @@ private fun MessageBubble(
                     horizontalAlignment = Alignment.Start,
                 ) {
                     Text(
-                        text = sender.displayName.ifBlank { sender.address },
+                        text = if (sender.isUnknownSenderGhost()) sender.address
+                        else sender.displayName.ifBlank { sender.address },
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = senderNameTone,

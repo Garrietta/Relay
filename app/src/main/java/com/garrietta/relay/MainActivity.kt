@@ -19,6 +19,10 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.gestures.Orientation
@@ -212,7 +216,17 @@ class MainActivity : ComponentActivity() {
             AnimatedContent(
                 targetState = backStack.last(),
                 transitionSpec = {
-                    motionTransforms[if (navForward) MotionKind.FORWARD else MotionKind.BACKWARD]
+                    val incoming = targetState
+                    val outgoing = initialState
+                    if (incoming is Screen.NewConversation || outgoing is Screen.NewConversation) {
+                        // The new-conversation sheet animates ITSELF (slide-up
+                        // entrance like a music player, inside
+                        // NewConversationDialog) — the screen swap underneath
+                        // is a plain quick fade so the two never fight.
+                        fadeIn(tween(120)) togetherWith fadeOut(tween(120))
+                    } else {
+                        motionTransforms[if (navForward) MotionKind.FORWARD else MotionKind.BACKWARD]
+                    }
                 },
                 label = "relay-nav",
             ) { screen ->

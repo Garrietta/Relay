@@ -11,6 +11,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -35,8 +36,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -85,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -119,7 +121,10 @@ fun InboxScreen(
     val categories by viewModel.categories.collectAsState()
     val selectedCategoryId by viewModel.selectedCategoryId.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val listState = rememberLazyListState()
+    // One scroll state per category: switching categories starts the new
+    // list at the top, and the header-collapse + bottom-bar effects below
+    // re-key on it.
+    val listState = remember(selectedCategoryId) { LazyListState() }
     // Search lives behind the bottom-right expressive button now; tapping
     // it swaps the category bar slot for the search field.
     var searchOpen by remember { mutableStateOf(false) }
@@ -165,12 +170,21 @@ fun InboxScreen(
     // oscillates, recomposes the header continuously, and visibly lags the
     // scroll (diagnosed 2026-10-18 as the 120Hz scroll-choppiness culprit).
     // The scroll itself is the animation; 1:1 tracking is correct.
-    val collapse by remember {
+    val collapse by remember(listState) {
         derivedStateOf {
             val offset = listState.firstVisibleItemScrollOffset.toFloat()
             val jump = if (listState.firstVisibleItemIndex > 0) 360f else 0f
             ((jump + offset) / 360f).coerceIn(0f, 1f)
         }
+    }
+
+    // Row entrance stagger plays ONLY on the very first load. On category
+    // switches the rows must NOT replay their slide-in — Garrett 2026-10-19:
+    // "i can see messages slide out in the back"; the switch is an overlay
+    // pop (see below), never a slide.
+    var firstLoad by remember { mutableStateOf(true) }
+    LaunchedEffect(conversations) {
+        if (conversations.isNotEmpty()) firstLoad = false
     }
 
     LaunchedEffect(Unit) {
@@ -206,48 +220,45 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search open animation (Garrett 2026-10-19): tapping the
-                // search button doesn't snap — the search pane blooms into
-                // the category bar's slot with a bouncy expand+fade.
-                AnimatedContent(
-                    targetState = searchOpen,
-                    transitionSpec = {
-                        (fadeIn(RelaySprings.bouncy()) +
-                            expandVertically(
-                                expandFrom = Alignment.Top,
-                                animationSpec = RelaySprings.bouncy(),
-                            )) togetherWith
-                            (fadeOut(tween(150)) +
-                                shrinkVertically(
-                                    shrinkTowards = Alignment.Top,
-                                    animationSpec = tween(150),
-                                ))
-                    },
-                    label = "searchSwap",
-                ) { open ->
-                    if (open) {
-                        // Search mode: the field takes the category bar's slot,
-                        // with a back affordance to close it. Entered from the
-                        // bottom-right expressive search button.
-                        SearchField(
-                            query = query,
-                            onQueryChange = viewModel::setQuery,
-                            onClose = {
-                                searchOpen = false
-                                viewModel.setQuery("")
-                            },
-                        )
-                    } else {
-                        // Category bar — music-app style segmented pill. Only
-                        // rendered when custom categories exist; with none, the
-                        // inbox shows no bar at all.
-                        CategoryPillBar(
-                            categories = categories,
-                            selectedId = selectedCategoryId,
-                            onSelect = viewModel::selectCategory,
-                        )
-                    }
+                // Search bar: animated expressive entrance from the top.
+                // The category pill bar STAYS visible below it while
+                // searching (Garrett 2026-10-19) — search and category
+                // filter COMBINE, so he can flip All/W/T mid-search to
+                // re-filter the results.
+                AnimatedVisibility(
+                    visible = searchOpen,
+                    enter = fadeIn(RelaySprings.bouncy()) +
+                        expandVertically(
+                            expandFrom = Alignment.Top,
+                            animationSpec = RelaySprings.bouncy(),
+                        ),
+                    exit = fadeOut(tween(150)) +
+                        shrinkVertically(
+                            shrinkTowards = Alignment.Top,
+                            animationSpec = tween(150),
+                        ),
+                    label = "searchBar",
+                ) {
+                    // Search mode: the field sits above the category bar,
+                    // with a back affordance to close it. Entered from the
+                    // bottom-right expressive search button.
+                    SearchField(
+                        query = query,
+                        onQueryChange = viewModel::setQuery,
+                        onClose = {
+                            searchOpen = false
+                            viewModel.setQuery("")
+                        },
+                    )
                 }
+                // Category bar — music-app style chips (no container pill).
+                // Only rendered when custom categories exist; with none, the
+                // inbox shows no bar at all.
+                CategoryPillBar(
+                    categories = categories,
+                    selectedId = selectedCategoryId,
+                    onSelect = viewModel::selectCategory,
+                )
                 // The conversation LIST is its own rounded container
                 // (Google Messages M3E pattern) — solid color, no decoration.
                 Surface(
@@ -259,9 +270,24 @@ fun InboxScreen(
                     shape = RoundedCornerShape(28.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                 ) {
-                    if (conversations.isEmpty()) {
-                        EmptyInbox()
-                    } else {
+                    // Category switch = OVERLAY pop (Garrett 2026-10-19):
+                    // the current messages stay put underneath while the new
+                    // category's list pops in over them — messages never
+                    // slide out. Incoming content draws on top by default.
+                    AnimatedContent(
+                        targetState = selectedCategoryId,
+                        transitionSpec = {
+                            (fadeIn(RelaySprings.bouncy()) +
+                                scaleIn(
+                                    RelaySprings.bouncy(),
+                                    initialScale = 0.96f,
+                                )) togetherWith fadeOut(tween(160))
+                        },
+                        label = "categorySwap",
+                    ) {
+                        if (conversations.isEmpty()) {
+                            EmptyInbox()
+                        } else {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
@@ -269,25 +295,39 @@ fun InboxScreen(
                             // last row is never hidden underneath it.
                             contentPadding = PaddingValues(top = 8.dp, bottom = 108.dp),
                         ) {
-                            // Staggered entrance: each row fades+slides in the
-                            // first time it's composed (keyed by threadId, so
-                            // scroll recycling never replays it for the same
-                            // row). Stagger caps at the first screenful so
-                            // fast scrolling never feels laggy.
+                            // Staggered entrance: each row fades+slides in on the
+                            // very first load only (firstLoad). Keyed by
+                            // threadId, so scroll recycling never replays it
+                            // for the same row. Stagger caps at the first
+                            // screenful so fast scrolling never feels laggy.
+                            // On category switches the rows must NOT replay
+                            // their slide-in — the switch is an overlay pop.
                             itemsIndexed(
                                 items = conversations,
                                 key = { _, it -> it.threadId },
                                 contentType = { _, _ -> "conversation" },
                             ) { index, conversation ->
-                                val staggerDelay = if (index < 12) index * 45 else 0
-                                AnimatedVisibility(
-                                    visible = true,
-                                    enter = fadeIn(
-                                        tween(280, delayMillis = staggerDelay),
-                                    ) + slideInVertically(
-                                        tween(320, delayMillis = staggerDelay),
-                                    ) { it / 4 },
-                                ) {
+                                if (firstLoad) {
+                                    val staggerDelay = if (index < 12) index * 45 else 0
+                                    AnimatedVisibility(
+                                        visible = true,
+                                        enter = fadeIn(
+                                            tween(280, delayMillis = staggerDelay),
+                                        ) + slideInVertically(
+                                            tween(320, delayMillis = staggerDelay),
+                                        ) { it / 4 },
+                                    ) {
+                                        ConversationRow(
+                                            conversation = conversation,
+                                            onClick = { onOpenChat(conversation) },
+                                            onMarkRead = {
+                                                if (conversation.unread) viewModel.markRead(conversation.threadIds)
+                                                else viewModel.markUnread(conversation.threadIds)
+                                            },
+                                            onDelete = { viewModel.delete(conversation.threadIds) },
+                                        )
+                                    }
+                                } else {
                                     ConversationRow(
                                         conversation = conversation,
                                         onClick = { onOpenChat(conversation) },
@@ -302,6 +342,7 @@ fun InboxScreen(
                         }
                     }
                 }
+            }
             }
             // Bottom cluster: the new-conversation pill (cropped width-wise to
             // make room) + the expressive search button at the bottom-right.
@@ -789,8 +830,10 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
         if (conversation.participants.size > 1) {
             // Group row: the group's unique avatar cluster (spiral / grid /
             // zigzag, deterministic per conversation) instead of one avatar.
+            // UNKNOWN_SENDER! ghosts are hidden from the stack (display
+            // layer only — the data is untouched).
             GroupAvatarCluster(
-                members = conversation.participants.map {
+                members = conversation.participants.filterNot { it.isUnknownSenderGhost() }.map {
                     ClusterMember(
                         photoUri = it.photoUri,
                         name = it.displayName.ifBlank { it.address },

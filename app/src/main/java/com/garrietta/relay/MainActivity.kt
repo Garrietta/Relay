@@ -270,7 +270,7 @@ class MainActivity : ComponentActivity() {
                         is Screen.Chat -> {
                             val chatVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, app.chatScrollStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
                             )
                             ChatScreen(
                                 viewModel = chatVm,
@@ -304,7 +304,7 @@ class MainActivity : ComponentActivity() {
                             // (participants, messages, media).
                             val detailsVm: ChatViewModel = viewModel(
                                 key = "chat_${screen.threadId}",
-                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
+                                factory = ChatViewModelFactory(app.repository, app.appSeedStore, app.chatScrollStore, screen.threadId, screen.threadIds, screen.address, screen.rcsConversationId, screen.transportLabel),
                             )
                             ChatDetailsScreen(
                                 viewModel = detailsVm,
@@ -461,7 +461,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     val chatVm: ChatViewModel = viewModel(
                                         key = "chat_${convo.threadId}",
-                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, convo.threadId, convo.threadIds, convo.address, convo.rcsConversationId, convo.transportLabel),
+                                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, app.chatScrollStore, convo.threadId, convo.threadIds, convo.address, convo.rcsConversationId, convo.transportLabel),
                                     )
                                     ChatScreen(
                                         viewModel = chatVm,
@@ -502,7 +502,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val detailsVm: ChatViewModel = viewModel(
                         key = "chat_${dc.threadId}",
-                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, dc.threadId, dc.threadIds, dc.address, dc.rcsConversationId, dc.transportLabel),
+                        factory = ChatViewModelFactory(app.repository, app.appSeedStore, app.chatScrollStore, dc.threadId, dc.threadIds, dc.address, dc.rcsConversationId, dc.transportLabel),
                     )
                     ChatDetailsScreen(
                         viewModel = detailsVm,
@@ -731,6 +731,7 @@ private class InboxViewModelFactory(
 private class ChatViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
     private val appSeedStore: com.garrietta.relay.data.repo.AppSeedStore,
+    private val scrollStore: com.garrietta.relay.data.repo.ChatScrollStore,
     private val threadId: Long,
     private val threadIds: List<Long> = listOf(threadId),
     private val address: String = "",
@@ -739,7 +740,7 @@ private class ChatViewModelFactory(
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(repo, appSeedStore, threadId, threadIds, address, rcsConversationId, initialTransportLabel) as T
+        ChatViewModel(repo, appSeedStore, scrollStore, threadId, threadIds, address, rcsConversationId, initialTransportLabel) as T
 }
 
 private class SettingsViewModelFactory(

@@ -7,6 +7,8 @@ import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatScrollStore
+import com.garrietta.relay.data.repo.ScrollPosition
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +20,7 @@ private const val TAG = "ChatViewModel"
 class ChatViewModel(
     private val repository: UnifiedInboxRepository,
     private val appSeedStore: AppSeedStore,
+    private val scrollStore: ChatScrollStore,
     private val threadId: Long,
     /** All provider threads merged into this conversation (see Screen.Chat). */
     private val threadIds: List<Long> = listOf(threadId),
@@ -163,10 +166,17 @@ class ChatViewModel(
     private fun initRcs(conversationId: String) {
         // Instant open: show the cached messages immediately (empty on
         // first visit), then refresh in the background and rewrite the
-        // cache — no visible load delay on tap.
+        // cache — no visible load delay on tap. The first network pull never
+        // goes SHALLOWER than what's on screen (Garrett 2026-10-19): if the
+        // cache already holds 300, pulling 50 would shrink the list out
+        // from under a restored scroll position.
         _messages.value = repository.cachedMessages(conversationId) ?: emptyList()
         viewModelScope.launch {
-            _messages.value = repository.rcsMessages(conversationId, rcsHistoryCount)
+            val floor = maxOf(rcsHistoryCount, _messages.value.size.toLong())
+            // Keep the count consistent for later live reloads — a later
+            // 50-pull must not shrink a 300-deep list either.
+            rcsHistoryCount = floor
+            _messages.value = repository.rcsMessages(conversationId, floor)
             repository.markRcsRead(conversationId)
             // Background deep fill (Garrett 2026-10-19: "way more messages
             // here"). The first paint stays fast; a larger pull then fills
@@ -241,6 +251,14 @@ class ChatViewModel(
         )
         viewModelScope.launch { repository.markRcsRead(rcsConversationId ?: return@launch) }
     }
+
+    /** Saves the current first-visible position so reopening restores it. */
+    fun saveScrollPosition(messageId: Long, scrollOffset: Int) {
+        scrollStore.save(cacheKey(), messageId, scrollOffset)
+    }
+
+    /** The saved scroll position for this conversation, if any. */
+    fun savedScrollPosition(): ScrollPosition? = scrollStore.positionFor(cacheKey())
 
     /**
      * Cache key for this thread: the RCS conversation id when known, else

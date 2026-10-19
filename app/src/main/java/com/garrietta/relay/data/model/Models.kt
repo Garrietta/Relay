@@ -119,3 +119,19 @@ fun String.isUnknownSenderGhostName(): Boolean {
  * `filterNot { it.isUnknownSenderGhost() }`.
  */
 fun Participant.isUnknownSenderGhost(): Boolean = displayName.isUnknownSenderGhostName()
+
+/**
+ * Built-in "Unknown" category membership (Garrett 2026-10-19): a
+ * conversation is "unknown" when its display title is a bare phone number —
+ * digits, +, spaces, dashes, parens, dots only, no resolved contact name.
+ * His political-campaign SMS threads ("(317) 286-6929", "454545", "22395")
+ * land here. No new permissions: the title the inbox already shows is the
+ * whole signal. Auto-classification wins: an unknown thread is excluded
+ * from All and from custom categories while the toggle is on, and shows
+ * only under the Unknown tab.
+ */
+fun Conversation.isUnknownNumber(): Boolean {
+    val t = displayName.trim()
+    if (t.isEmpty() || !t.any { it.isDigit() }) return false
+    return t.all { it.isDigit() || it in "+-(). " }
+}

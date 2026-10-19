@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.CrashReporter
 import com.garrietta.relay.data.model.ThemeMode
+import com.garrietta.relay.data.model.isUnknownNumber
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.data.transport.RcsPairingState
@@ -283,6 +284,30 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(8.dp))
+        // Built-in Unknown tab (Garrett 2026-10-19): automatic, always last
+        // in the pill bar. While on, chats from bare unsaved numbers
+        // (campaign spam, short codes) move out of All into their own tab.
+        val unknownEnabled by viewModel.unknownEnabled.collectAsState()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Unknown senders", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Auto-group chats from unsaved numbers into their own tab",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            androidx.compose.material3.Switch(
+                checked = unknownEnabled,
+                onCheckedChange = viewModel::setUnknownEnabled,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
         if (categories.isEmpty()) {
             Text(
                 "No categories yet — the inbox shows everything under All.",
@@ -370,7 +395,13 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 4.dp),
                     )
-                    conversations.take(200).forEach { conv ->
+                    // Unknown-number threads are auto-classified while the
+                    // Unknown tab is on — they can't be manually
+                    // recategorized, so they're hidden from the picker.
+                    val assignable = if (unknownEnabled) {
+                        conversations.filterNot { it.isUnknownNumber() }
+                    } else conversations
+                    assignable.take(200).forEach { conv ->
                         val key = CategoryStore.conversationKey(
                             conv.rcsConversationId, conv.threadId,
                         )

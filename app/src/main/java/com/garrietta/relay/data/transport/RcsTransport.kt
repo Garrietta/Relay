@@ -2,6 +2,7 @@ package com.garrietta.relay.data.transport
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.util.Log
 import com.garrietta.relay.rcs.pairing.MicrogPairing
 import com.garrietta.relay.rcs.pairing.PairingException
@@ -658,13 +659,16 @@ class RcsTransport(context: Context) : Transport {
      * When a mediaId exists we ALWAYS download the authoritative bytes;
      * the inline thumbnail is used only when there is nothing to download.
      *
-     * Corruption guards (2026-10-19): the cache is versioned (v2) so stale
+     * Corruption guards (2026-10-19): the cache is versioned (v3) so stale
      * bytes from earlier builds are never served; every byte payload —
      * cached, downloaded, or inline — must pass the image magic check when
-     * the attachment claims to be an image, and a downloaded payload
-     * dramatically smaller than the server-declared size is rejected (that
-     * shape means the server answered with the thumbnail instead of the
-     * full media). A corrupt-looking image must NEVER render.
+     * the attachment claims to be an image; downloaded payloads must FULLY
+     * DECODE (not just pass the magic sniff — a valid header over garbage
+     * scan data renders as gray blocks, which is what Garrett filmed);
+     * and a decrypted payload that doesn't essentially match the
+     * server-declared size is rejected (AES-GCM chunked decrypt yields the
+     * exact plaintext, so a real mismatch means wrong bytes). A
+     * corrupt-looking image must NEVER render.
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
@@ -677,10 +681,13 @@ class RcsTransport(context: Context) : Transport {
                 if (att.isImage && !isValidImageBytes(inline)) {
                     throw IllegalStateException("media unavailable: inline bytes are not a valid image")
                 }
+                if (att.isImage && !decodesAsImage(inline)) {
+                    throw IllegalStateException("media unavailable: inline bytes do not decode as an image")
+                }
                 return@withContext inline
             }
             require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
-            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v2")
+            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v3")
             val cacheFile = java.io.File(cacheDir, att.mediaId.sanitizeFileName())
             if (cacheFile.exists()) {
                 val cached = cacheFile.readBytes()
@@ -721,16 +728,25 @@ class RcsTransport(context: Context) : Transport {
                 resp.body!!.bytes()
             }
             val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
-            // Sanity: the server-declared size is the full media. A payload
-            // dramatically smaller means we got the thumbnail (or wrong
-            // bytes) — refuse to cache or render it as the photo.
-            if (att.size > 0 && plain.size * 2 < att.size) {
+            // Sanity: the server-declared size is the full plaintext media
+            // (AES-GCM chunked decrypt yields the EXACT plaintext — the only
+            // overhead stripped is per-chunk tags). A real mismatch means we
+            // got the wrong bytes; the old 50% tolerance let corrupt payloads
+            // through. 5% headroom covers declared-size rounding.
+            if (att.size > 0 && plain.size < (att.size * 0.95).toLong()) {
                 throw IllegalStateException(
                     "media unavailable: server returned ${plain.size} bytes, expected ~${att.size}",
                 )
             }
             if (att.isImage && !isValidImageBytes(plain)) {
                 throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
+            }
+            // Full-decode gate: magic bytes only sniff the header. A valid
+            // header over garbage scan data passes the sniff and renders as
+            // gray blocks — decode the whole stream (downsampled: we only
+            // need the verdict, not the pixels) and reject what won't decode.
+            if (att.isImage && !decodesAsImage(plain)) {
+                throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
             }
             cacheDir.mkdirs()
             cacheFile.writeBytes(plain)
@@ -801,4 +817,22 @@ fun isValidImageBytes(bytes: ByteArray): Boolean {
     // BMP: 42 4D ("BM")
     if (bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) return true
     return false
+}
+
+/**
+ * True when [bytes] decode end-to-end as an image. Stronger than
+ * [isValidImageBytes]: the magic sniff only reads the header, so a valid
+ * header over garbage scan data passes it and renders as gray blocks.
+ * This runs the real decoder (downsampled 8x — only the verdict matters,
+ * not the pixels, so it stays cheap) and rejects what won't decode.
+ * Runs on Dispatchers.IO with the other media work, never the UI thread.
+ */
+fun decodesAsImage(bytes: ByteArray): Boolean {
+    if (bytes.size < 12) return false
+    return try {
+        val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) != null
+    } catch (_: Exception) {
+        false
+    }
 }

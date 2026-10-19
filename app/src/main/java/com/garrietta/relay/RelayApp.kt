@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatScrollStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -28,6 +29,9 @@ class RelayApp : Application() {
 
     /** User-defined inbox categories + chat assignments (see CategoryStore). */
     val categoryStore: CategoryStore by lazy { CategoryStore(this) }
+
+    /** Per-conversation chat scroll positions (see ChatScrollStore). */
+    val chatScrollStore: ChatScrollStore by lazy { ChatScrollStore(this) }
 
     private val appPrefs by lazy {
         getSharedPreferences("relay_app", Context.MODE_PRIVATE)

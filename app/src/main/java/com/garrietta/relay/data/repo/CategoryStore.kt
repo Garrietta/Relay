@@ -47,6 +47,21 @@ class CategoryStore(context: Context) {
     /** Null = "All". */
     val selectedCategoryId: StateFlow<String?> = _selectedId.asStateFlow()
 
+    private val _unknownEnabled = MutableStateFlow(prefs.getBoolean(KEY_UNKNOWN, true))
+    /**
+     * Built-in "Unknown" tab (Garrett 2026-10-19): automatic, toggleable,
+     * always LAST in the pill bar. Default ON — he asked for the tab; he
+     * can switch it off. While on, bare-number conversations are pulled
+     * out of All into their own tab.
+     */
+    val unknownEnabled: StateFlow<Boolean> = _unknownEnabled.asStateFlow()
+
+    fun setUnknownEnabled(on: Boolean) {
+        _unknownEnabled.value = on
+        prefs.edit().putBoolean(KEY_UNKNOWN, on).apply()
+        if (!on && _selectedId.value == UNKNOWN_ID) selectCategory(null)
+    }
+
     /** Adds a category; returns its id. Blank names are rejected with null. */
     fun addCategory(name: String): String? {
         val clean = name.trim()
@@ -105,7 +120,8 @@ class CategoryStore(context: Context) {
 
     /** Null = "All". Unknown ids are ignored (stay on current selection). */
     fun selectCategory(id: String?) {
-        if (id != null && _categories.value.none { it.id == id }) return
+        if (id != null && id != UNKNOWN_ID && _categories.value.none { it.id == id }) return
+        if (id == UNKNOWN_ID && !_unknownEnabled.value) return
         _selectedId.value = id
         prefs.edit().putString(KEY_SELECTED, id).apply()
     }
@@ -115,6 +131,13 @@ class CategoryStore(context: Context) {
         private const val KEY_CATEGORIES = "categories_json"
         private const val KEY_ASSIGNMENTS = "assignments_json"
         private const val KEY_SELECTED = "selected_id"
+        private const val KEY_UNKNOWN = "unknown_enabled"
+        /**
+         * Synthetic id of the built-in Unknown tab. Never stored in
+         * [_categories] (not user-created, not deletable/renamable/
+         * reorderable) — the UI appends it LAST after the user categories.
+         */
+        const val UNKNOWN_ID = "unknown"
 
         /** Stable key for a conversation across restarts. */
         fun conversationKey(rcsConversationId: String?, threadId: Long): String =

@@ -165,9 +165,21 @@ fun ChatScreen(
     }
     // Visible-chat tracking for notification suppression: while this chat
     // is on screen, MainActivity's collector skips its incoming messages.
+    // Also the scroll-position memory (Garrett 2026-10-19): on exit we save
+    // the first visible message id + offset; on open we restore it (below).
     DisposableEffect(viewModel) {
         viewModel.setVisible(true)
-        onDispose { viewModel.setVisible(false) }
+        onDispose {
+            viewModel.setVisible(false)
+            val current = messages
+            if (current.isNotEmpty()) {
+                val idx = listState.firstVisibleItemIndex.coerceIn(0, current.size - 1)
+                viewModel.saveScrollPosition(
+                    current[idx].id,
+                    listState.firstVisibleItemScrollOffset,
+                )
+            }
+        }
     }
     // Header mode from the OTHER-participant count (self excluded and
     // deduped — the server's participant list can include him twice).
@@ -216,8 +228,41 @@ fun ChatScreen(
             viewModel.clearError()
         }
     }
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.scrollToItem(0)
+    // Scroll restore (Garrett 2026-10-19: reopening a chat must NOT jump
+    // back to the top — it restores the exact position where he left off).
+    // The old LaunchedEffect(messages.size) slammed scrollToItem(0) on EVERY
+    // size change (cache → 50 → deep-fill 300, plus live arrivals), which is
+    // what yanked him. Now: restore by saved MESSAGE ID (stable while the
+    // list grows underneath — older messages append at higher indices, so
+    // the saved message keeps its identity). The effect retries across the
+    // load sequence until the saved message appears (cache → network →
+    // deep fill); after a few misses it falls back to newest, and once
+    // restored it never touches scroll again — live arrivals in the
+    // reverseLayout list settle at the bottom on their own.
+    var scrollRestored by remember(viewModel) { mutableStateOf(false) }
+    var restoreAttempts by remember(viewModel) { mutableStateOf(0) }
+    LaunchedEffect(messages) {
+        if (messages.isEmpty() || scrollRestored) return@LaunchedEffect
+        val saved = viewModel.savedScrollPosition()
+        if (saved == null) {
+            listState.scrollToItem(0)
+            scrollRestored = true
+            return@LaunchedEffect
+        }
+        val index = messages.indexOfFirst { it.id == saved.messageId }
+        if (index >= 0) {
+            listState.scrollToItem(index, saved.scrollOffset)
+            scrollRestored = true
+        } else {
+            restoreAttempts++
+            if (restoreAttempts >= 4) {
+                // The message is gone (deleted/expired) — newest it is.
+                listState.scrollToItem(0)
+                scrollRestored = true
+            }
+            // Otherwise a deeper load may still bring it; wait for the
+            // next emission without touching scroll.
+        }
     }
 
     MaterialTheme(colorScheme = chatScheme) {
@@ -706,6 +751,17 @@ private fun MediaBubble(
         }
     }
 
+    // Whether these bytes are the full download (mediaId present) or a
+    // thumbnail-only payload (inline data, nothing to download). The
+    // fullscreen viewer must NEVER upscale thumbnail bytes — a small
+    // thumbnail blown up to screen width is exactly the "corrupt" look
+    // Garrett filmed (2026-10-19).
+    val isFullSize = media.mediaId.isNotEmpty()
+    val loadedBytes = bytes
+    val loadedBounds = if (loadedBytes != null && media.isImage) {
+        remember(message.id) { decodeImageBounds(loadedBytes) }
+    } else null
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
@@ -736,7 +792,7 @@ private fun MediaBubble(
                     // bubble size is exactly the blocky "corrupted" look
                     // (diagnosed 2026-10-19). Small images render small and
                     // sharp; large ones are capped at the bubble max.
-                    val bounds = remember(message.id) { decodeImageBounds(b) }
+                    val bounds = loadedBounds
                     if (bounds == null) {
                         Text(
                             text = "Media unavailable: undecodable image",
@@ -823,14 +879,31 @@ private fun MediaBubble(
 
     if (zoomed) {
         val b = bytes
-        if (b != null) {
+        if (b != null && media.isImage) {
             Dialog(onDismissRequest = { zoomed = false }) {
-                AsyncImage(
-                    model = b,
-                    contentDescription = "Shared image fullscreen",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (isFullSize) {
+                    AsyncImage(
+                        model = b,
+                        contentDescription = "Shared image fullscreen",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    // Thumbnail-only bytes: show at natural size, NEVER
+                    // upscaled — upscaling is the "corrupt" look.
+                    val fb = loadedBounds
+                    if (fb != null) {
+                        val density = LocalDensity.current
+                        val nw = with(density) { fb.first.toDp() }
+                        val nh = with(density) { fb.second.toDp() }
+                        AsyncImage(
+                            model = b,
+                            contentDescription = "Shared image preview",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(nw, nh),
+                        )
+                    }
+                }
             }
         }
     }

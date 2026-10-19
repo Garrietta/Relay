@@ -3,6 +3,7 @@ package com.garrietta.relay.ui.inbox
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.isUnknownNumber
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
@@ -23,6 +24,7 @@ class InboxViewModel(
 
     val categories: StateFlow<List<ChatCategory>> = categoryStore.categories
     val selectedCategoryId: StateFlow<String?> = categoryStore.selectedCategoryId
+    val unknownEnabled: StateFlow<Boolean> = categoryStore.unknownEnabled
 
     val conversations: StateFlow<List<Conversation>> =
         combine(
@@ -30,15 +32,26 @@ class InboxViewModel(
             _query,
             categoryStore.assignments,
             categoryStore.selectedCategoryId,
-        ) { list, q, assignments, selectedId ->
+            categoryStore.unknownEnabled,
+        ) { list, q, assignments, selectedId, unknownOn ->
             var filtered = list
-            // Category filter: "All" (null) shows everything; a category
-            // shows only chats assigned to it. Stale assignments (to a
-            // deleted category) match nothing.
-            if (selectedId != null) {
-                filtered = filtered.filter { conv ->
-                    assignments[CategoryStore.conversationKey(conv.rcsConversationId, conv.threadId)] == selectedId
-                }
+            // Category filter. "All" (null) shows everything EXCEPT unknown
+            // numbers while the Unknown tab is on; the Unknown tab shows
+            // ONLY bare-number threads; a custom category shows its assigned
+            // chats — but auto-classification wins, so unknown threads never
+            // leak into All or into a custom category while the toggle is on.
+            // Stale assignments (to a deleted category) match nothing.
+            filtered = when {
+                unknownOn && selectedId == CategoryStore.UNKNOWN_ID ->
+                    filtered.filter { it.isUnknownNumber() }
+                selectedId != null ->
+                    filtered.filter { conv ->
+                        val key = CategoryStore.conversationKey(conv.rcsConversationId, conv.threadId)
+                        assignments[key] == selectedId &&
+                            !(unknownOn && conv.isUnknownNumber())
+                    }
+                unknownOn -> filtered.filterNot { it.isUnknownNumber() }
+                else -> filtered
             }
             if (q.isBlank()) filtered
             else filtered.filter {

@@ -87,6 +87,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.isUnknownSenderGhost
+import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -120,6 +122,15 @@ fun InboxScreen(
     val query by viewModel.query.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val selectedCategoryId by viewModel.selectedCategoryId.collectAsState()
+    val unknownEnabled by viewModel.unknownEnabled.collectAsState()
+    // The built-in Unknown tab is synthetic: appended LAST after the user's
+    // custom categories, always at the far right of the pill bar (Garrett
+    // 2026-10-19). The bar shows when custom categories exist OR the
+    // Unknown tab is on.
+    val pillCategories = remember(categories, unknownEnabled) {
+        if (unknownEnabled) categories + ChatCategory(CategoryStore.UNKNOWN_ID, "Unknown")
+        else categories
+    }
     val snackbarHostState = remember { SnackbarHostState() }
     // One scroll state per category: switching categories starts the new
     // list at the top, and the header-collapse + bottom-bar effects below
@@ -220,14 +231,21 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search bar: animated expressive entrance from the top.
+                // Search bar: UNMISTAKABLE bouncy entrance from the top
+                // (Garrett 2026-10-19: "you didn't implement any kind of
+                // animation for the search bar"). The bar drops in from
+                // above with the bouncy spring while expanding — slide +
+                // expand + fade together so the arrival can't be missed.
                 // The category pill bar STAYS visible below it while
-                // searching (Garrett 2026-10-19) — search and category
-                // filter COMBINE, so he can flip All/W/T mid-search to
-                // re-filter the results.
+                // searching — search and category filter COMBINE, so he can
+                // flip All/W/T mid-search to re-filter the results.
                 AnimatedVisibility(
                     visible = searchOpen,
-                    enter = fadeIn(RelaySprings.bouncy()) +
+                    enter = fadeIn(animationSpec = tween(200)) +
+                        slideInVertically(
+                            animationSpec = RelaySprings.bouncy(),
+                            initialOffsetY = { -it / 2 },
+                        ) +
                         expandVertically(
                             expandFrom = Alignment.Top,
                             animationSpec = RelaySprings.bouncy(),
@@ -252,10 +270,10 @@ fun InboxScreen(
                     )
                 }
                 // Category bar — music-app style chips (no container pill).
-                // Only rendered when custom categories exist; with none, the
-                // inbox shows no bar at all.
+                // Rendered when custom categories exist or the built-in
+                // Unknown tab is on; otherwise the inbox shows no bar.
                 CategoryPillBar(
-                    categories = categories,
+                    categories = pillCategories,
                     selectedId = selectedCategoryId,
                     onSelect = viewModel::selectCategory,
                 )

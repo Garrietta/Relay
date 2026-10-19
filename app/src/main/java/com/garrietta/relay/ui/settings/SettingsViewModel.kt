@@ -127,4 +127,14 @@ class SettingsViewModel(
      */
     fun transportDiagnostics(): String =
         repository.rcsTransport.transportDiagnostics()
+
+    /**
+     * Notification pipeline state for the Diagnostics card: runtime
+     * permission, channel importance, last incoming observed, posted
+     * count + last post, last skip reason. Garrett 2026-10-19 evening.
+     */
+    fun notificationDiagnostics(): String =
+        com.garrietta.relay.notifications.MessageNotifications.diagnostics(
+            context.applicationContext,
+        )
 }

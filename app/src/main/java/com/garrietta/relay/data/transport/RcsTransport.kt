@@ -88,6 +88,15 @@ class RcsTransport(context: Context) : Transport {
     val syncError: Flow<String?> = _syncError.asStateFlow()
     fun clearSyncError() { _syncError.value = null }
 
+    /**
+     * Images that arrived with no downloadable rendition at all (no
+     * mediaID field 2, no thumbnailMediaID field 9) — rendered from the
+     * tiny inline bytes. Surfaced in Diagnostics so Garrett can report
+     * whether specific images (e.g. the baby-shower invite) land here.
+     */
+    private val noDownloadIdImages = java.util.concurrent.atomic.AtomicInteger(0)
+    fun noDownloadIdImageCount(): Int = noDownloadIdImages.get()
+
     /** Last-good server conversation list — the paired inbox's source. */
     fun currentRcsConversations(): List<RcsConversation> = _rcsConversations.value
 
@@ -99,7 +108,8 @@ class RcsTransport(context: Context) : Transport {
      */
     fun transportDiagnostics(): String {
         val pairing = _pairingState.value
-        return "pairing=$pairing, ${session.diagnostics()}"
+        return "pairing=$pairing, ${session.diagnostics()}, " +
+            "noDownloadIdImages=${noDownloadIdImages.get()}"
     }
 
     /** Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim. */
@@ -690,6 +700,39 @@ class RcsTransport(context: Context) : Transport {
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
+            // Full-size server copy.
+            if (att.mediaId.isNotEmpty()) {
+                require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
+                return@withContext downloadValidatedById(
+                    id = att.mediaId,
+                    key = att.decryptionKey,
+                    declaredWireSize = att.size,
+                    isImage = att.isImage,
+                )
+            }
+            // No full-size ID, but the server gave a thumbnailMediaID (field
+            // 9): download it through the same validated choke point. This
+            // is the "some images render small" fix (Garrett 2026-10-19
+            // evening) — the old code ignored field 9 entirely and rendered
+            // the tiny inline field-7 bytes. The declared-size pre-check is
+            // skipped (field 5 describes the full rendition, not the
+            // thumbnail); the geometry-derived plaintext check still
+            // applies. Any failure falls through to the inline bytes below.
+            if (att.thumbnailMediaId.isNotEmpty() && att.thumbnailKey.size == 32) {
+                try {
+                    return@withContext downloadValidatedById(
+                        id = att.thumbnailMediaId,
+                        key = att.thumbnailKey,
+                        declaredWireSize = 0,
+                        isImage = att.isImage,
+                    )
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    // fall through to inline bytes
+                }
+            }
+            // Inline-only: no downloadable rendition at all.
+            noDownloadIdImages.incrementAndGet()
             if (att.mediaId.isEmpty()) {
                 // No server copy — the inline bytes are the only bytes.
                 // They may be a small full image or just a thumbnail; either
@@ -716,15 +759,29 @@ class RcsTransport(context: Context) : Transport {
                 }
                 return@withContext inline
             }
-            require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
+        } // closes downloadMedia's withContext
+
+    /**
+     * Validated download core shared by the full-size and thumbnail paths.
+     * declaredWireSize = 0 skips the declared-size pre-check (used for the
+     * thumbnail rendition, whose declared size describes the full media).
+     * Every gate from the deep-dive round applies identically here.
+     */
+    private suspend fun downloadValidatedById(
+        id: String,
+        key: ByteArray,
+        declaredWireSize: Long,
+        isImage: Boolean,
+    ): ByteArray {
+        return withContext(Dispatchers.IO) {
             val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v3")
-            val cacheFile = java.io.File(cacheDir, att.mediaId.sanitizeFileName())
+            val cacheFile = java.io.File(cacheDir, id.sanitizeFileName())
             if (cacheFile.exists()) {
                 val cached = cacheFile.readBytes()
                 // Cheap revalidation on every cache hit: magic + trailer +
                 // bounds (no full decode — it passed at download time).
                 // Poisoned bytes are deleted and re-fetched below.
-                if (att.isImage && !isCacheableImageBytes(cached)) {
+                if (isImage && !isCacheableImageBytes(cached)) {
                     cacheFile.delete()
                 } else {
                     return@withContext cached
@@ -742,7 +799,7 @@ class RcsTransport(context: Context) : Transport {
                             network = "GDitto",
                             tachyonToken = token,
                         ),
-                        att.mediaId,
+                        id,
                     ),
                 )
                 val req = okhttp3.Request.Builder()
@@ -780,12 +837,12 @@ class RcsTransport(context: Context) : Transport {
                 // The declared size is the ENCRYPTED wire size. A short wire
                 // is a truncated download — fail fast (retryable) instead of
                 // decrypting garbage.
-                if (att.size > 0 && encrypted.size < (att.size * 0.95).toLong()) {
+                if (declaredWireSize > 0 && encrypted.size < (declaredWireSize * 0.95).toLong()) {
                     throw RetryableMediaException(
-                        "media unavailable: truncated download (got ${encrypted.size} of ~${att.size} encrypted bytes)",
+                        "media unavailable: truncated download (got ${encrypted.size} of ~${declaredWireSize} encrypted bytes)",
                     )
                 }
-                val plain = aesGcmDecryptChunked(att.decryptionKey, encrypted)
+                val plain = aesGcmDecryptChunked(key, encrypted)
                 // Exact plaintext check, derived from the wire itself:
                 // wire - 2B header - 28B (nonce+tag) per chunk. AES-GCM is
                 // deterministic, so any deviation means lost bytes.
@@ -795,7 +852,7 @@ class RcsTransport(context: Context) : Transport {
                         "media unavailable: decrypt size mismatch (got ${plain.size}, expected $expectedPlain)",
                     )
                 }
-                if (att.isImage) {
+                if (isImage) {
                     if (!isValidImageBytes(plain)) {
                         throw IllegalStateException("media unavailable: downloaded bytes are not a valid image")
                     }
@@ -841,6 +898,7 @@ class RcsTransport(context: Context) : Transport {
             cacheFile.writeBytes(plain)
             plain
         }
+    }
 
     /** Strips path-unsafe characters from a cache file name. */
     private fun String.sanitizeFileName(): String =

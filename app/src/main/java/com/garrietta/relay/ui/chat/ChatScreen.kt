@@ -352,7 +352,12 @@ fun ChatScreen(
                                     message = message,
                                     media = media,
                                     loadMedia = { att -> viewModel.mediaBytes(att) },
-                                    maxBubbleWidth = maxBubbleWidth,
+                                    // Images get near-full conversation
+                                    // width (Garrett 2026-10-19 evening:
+                                    // Google Messages renders photos nearly
+                                    // full-bleed); text bubbles keep the
+                                    // narrower 0.8 cap.
+                                    maxBubbleWidth = maxWidth * 0.92f,
                                 )
                                 return@itemsIndexed
                             }

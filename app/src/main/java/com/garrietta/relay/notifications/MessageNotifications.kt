@@ -23,6 +23,64 @@ import com.garrietta.relay.R
 object MessageNotifications {
     private const val CHANNEL_ID = "relay_messages"
 
+    // Pipeline diagnostics (Garrett 2026-10-19 evening: "still not getting
+    // notifications" — surfaced in Settings → Diagnostics so the failure
+    // point is visible without logcat).
+    private val lastIncomingAt = java.util.concurrent.atomic.AtomicLong(0)
+    private val lastPostedAt = java.util.concurrent.atomic.AtomicLong(0)
+    private val lastPostedSender = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val postedCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val lastSkipReason = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val lastSkipAt = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Called for every live incoming message, before any skip decision. */
+    fun recordIncomingObserved() {
+        lastIncomingAt.set(System.currentTimeMillis())
+    }
+
+    /** Called when a message is deliberately not notified. */
+    fun recordSkipped(reason: String) {
+        lastSkipReason.set(reason)
+        lastSkipAt.set(System.currentTimeMillis())
+    }
+
+    /** True when the runtime POST_NOTIFICATIONS grant is held (Android 13+). */
+    fun isPermissionGranted(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+        return ContextCompat.checkSelfPermission(
+            context, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /** The channel's current importance, or null when the channel is missing. */
+    fun channelImportance(context: Context): Int? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        val manager = context.getSystemService(NotificationManager::class.java)
+            ?: return null
+        return manager.getNotificationChannel(CHANNEL_ID)?.importance
+    }
+
+    private fun ageAgo(at: Long): String {
+        if (at == 0L) return "never"
+        val s = (System.currentTimeMillis() - at) / 1000
+        return when {
+            s < 60 -> "${s}s ago"
+            s < 3600 -> "${s / 60}m ago"
+            else -> "${s / 3600}h ago"
+        }
+    }
+
+    /** One-line pipeline state for Settings → Diagnostics. */
+    fun diagnostics(context: Context): String {
+        val perm = if (isPermissionGranted(context)) "granted" else "DENIED"
+        val imp = channelImportance(context)?.toString() ?: "no channel"
+        return "perm=$perm, channelImportance=$imp, " +
+            "lastIncoming=${ageAgo(lastIncomingAt.get())}, " +
+            "posted=${postedCount.get()} (last ${ageAgo(lastPostedAt.get())}" +
+            (lastPostedSender.get()?.let { " from $it" } ?: "") + "), " +
+            "lastSkip=${lastSkipReason.get() ?: "none"} (${ageAgo(lastSkipAt.get())})"
+    }
+
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -37,12 +95,12 @@ object MessageNotifications {
     }
 
     fun showIncoming(context: Context, sender: String, body: String, timestamp: Long) {
-        // Android 13+: posting without the runtime grant throws. Fail silent
-        // (the permission is requested in MainActivity); never crash.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) return
+        // Android 13+: posting without the runtime grant throws. Record the
+        // block (visible in Diagnostics) and no-op; never crash.
+        if (!isPermissionGranted(context)) {
+            recordSkipped("POST_NOTIFICATIONS denied")
+            return
+        }
         ensureChannel(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -65,5 +123,8 @@ object MessageNotifications {
             .build()
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.notify(sender.hashCode(), notification)
+        lastPostedAt.set(System.currentTimeMillis())
+        lastPostedSender.set(sender)
+        postedCount.incrementAndGet()
     }
 }

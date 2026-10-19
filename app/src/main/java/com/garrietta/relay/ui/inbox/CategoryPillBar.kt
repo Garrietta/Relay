@@ -84,14 +84,16 @@ fun CategoryPillBar(
     BoxWithConstraints(
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 4.dp)
-            .height(52.dp),
+            .height(40.dp),
     ) {
         val density = LocalDensity.current
         val containerWPx = with(density) { maxWidth.toPx() }
-        // Equal chips while they fit at a readable width; beyond that the
-        // bar scrolls with fixed-width chips (still equal).
-        val minChipPx = with(density) { 96.dp.toPx() }
-        val fillMode = count * minChipPx <= containerWPx
+        // Squeeze rule (Garrett 2026-10-19 evening): up to 5 chips total
+        // (All + customs + Unknown) always fit without scrolling — text
+        // shrinks to make room. Horizontal scroll only kicks in at 6+.
+        val fillMode = count <= 5
+        // Compact text when squeezing 4-5 chips in.
+        val compact = fillMode && count >= 4
         val scrollState = rememberScrollState()
 
         // Keep the selected chip on screen in scroll mode.
@@ -121,6 +123,7 @@ fun CategoryPillBar(
                     selected = index == selectedIndex,
                     isFirst = isFirst,
                     isLast = isLast,
+                    compact = compact,
                     onClick = { onSelect(id) },
                     modifier = (if (fillMode) Modifier.weight(1f) else Modifier.width(120.dp))
                         .fillMaxHeight()
@@ -146,6 +149,7 @@ private fun RowScope.ChocolateSegment(
     selected: Boolean,
     isFirst: Boolean,
     isLast: Boolean,
+    compact: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -161,14 +165,14 @@ private fun RowScope.ChocolateSegment(
     // below 0 / above 1 mid-animation. Clamp the morph factor so no animated
     // corner radius can ever go negative.
     // Unselected middle chips are rounded rectangles with a slight radius
-    // (music-app reference, Garrett 2026-10-19 evening) — 18dp, not sharp.
-    // End caps keep the half-oval outward edge and take the same slight
-    // radius on the inward edge. Selection morphs everything to the full
-    // 26dp stadium oval.
+    // (music-app reference, Garrett 2026-10-19 evening) — 14dp at the
+    // reduced 40dp bar height, not sharp. End caps keep the half-oval
+    // outward edge and take the same slight radius on the inward edge.
+    // Selection morphs everything to the full 20dp stadium oval.
     val selC = sel.coerceIn(0f, 1f)
     fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
-        val base = if (outwardRounded) 26f else 18f
-        return (base + (26f - base) * selC).dp.coerceAtLeast(0.dp)
+        val base = if (outwardRounded) 20f else 14f
+        return (base + (20f - base) * selC).dp.coerceAtLeast(0.dp)
     }
     val shape = RoundedCornerShape(
         topStart = corner(isFirst),
@@ -210,7 +214,8 @@ private fun RowScope.ChocolateSegment(
     ) {
         Text(
             text = name,
-            style = MaterialTheme.typography.titleMedium,
+            style = if (compact) MaterialTheme.typography.titleSmall
+            else MaterialTheme.typography.titleMedium,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             color = if (selected)
                 MaterialTheme.colorScheme.onPrimaryContainer
@@ -218,7 +223,7 @@ private fun RowScope.ChocolateSegment(
                 MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp),
+            modifier = Modifier.padding(horizontal = if (compact) 4.dp else 8.dp),
         )
     }
 }

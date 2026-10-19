@@ -164,10 +164,12 @@ fun SettingsScreen(
             // RCS transport state, refreshed on a ticker while the screen is
             // visible — the sync-timeout debug round's diagnosability core.
             var transportState by remember { mutableStateOf(viewModel.transportDiagnostics()) }
+            var notifState by remember { mutableStateOf(viewModel.notificationDiagnostics()) }
             LaunchedEffect(Unit) {
                 while (true) {
                     kotlinx.coroutines.delay(2000)
                     transportState = viewModel.transportDiagnostics()
+                    notifState = viewModel.notificationDiagnostics()
                 }
             }
             SettingsCard(title = "Diagnostics", icon = Icons.Filled.Warning) {
@@ -176,6 +178,12 @@ fun SettingsScreen(
                     subtitle = transportState,
                     actionLabel = "Refresh",
                     onAction = { transportState = viewModel.transportDiagnostics() },
+                )
+                SettingsRow(
+                    title = "Notifications",
+                    subtitle = notifState,
+                    actionLabel = "Refresh",
+                    onAction = { notifState = viewModel.notificationDiagnostics() },
                 )
                 if (lastCrash != null) {
                     var dismissed by remember { mutableStateOf(false) }

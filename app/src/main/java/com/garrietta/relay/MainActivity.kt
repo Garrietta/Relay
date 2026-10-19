@@ -135,7 +135,6 @@ class MainActivity : ComponentActivity() {
         // SYSTEM theme, not the app's override — our explicit flags win.
         applySystemBarAppearance()
         requestMessagingPermissions()
-        startIncomingMessageNotifications()
 
         setContent {
             val themeMode by settingsVm.themeMode.collectAsState()
@@ -684,40 +683,6 @@ class MainActivity : ComponentActivity() {
                 }
             })
             start()
-        }
-    }
-
-    /**
-     * Incoming-message notifications (Garrett 2026-10-19: "i'm not getting
-     * notifications from messages in the app"). The old code built the
-     * channel but never posted anything ("the default SMS app owns
-     * notifying") — so live RCS arrivals were silent. This collector posts
-     * a MessagingStyle notification for every INCOMING live message:
-     * - skipped for own outgoing/echo messages,
-     * - skipped when the message's chat is currently on screen,
-     * - skipped when paired is false (unpaired SMS is the default app's job),
-     * - gated on the Settings → Texting toggle (default ON).
-     * POST_NOTIFICATIONS itself is requested in requestMessagingPermissions;
-     * showIncoming additionally guards the runtime grant and no-ops.
-     */
-    private fun startIncomingMessageNotifications() {
-        lifecycleScope.launch {
-            app.repository.observeRcsMessages().collect { msg ->
-                if (msg.fromMe) return@collect
-                if (!app.rcsTransport.isPairedNow) return@collect
-                if (!app.areMessageNotificationsEnabled()) return@collect
-                val open = app.repository.openRcsConversation.value
-                if (open != null && open == msg.conversationId) return@collect
-                val name = app.repository.conversations.value
-                    .firstOrNull { it.rcsConversationId == msg.conversationId }
-                    ?.displayName?.ifBlank { null } ?: "New message"
-                val body = msg.body.ifBlank {
-                    if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
-                }
-                com.garrietta.relay.notifications.MessageNotifications.showIncoming(
-                    this@MainActivity, name, body, msg.timestampMs,
-                )
-            }
         }
     }
 

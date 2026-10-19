@@ -74,9 +74,9 @@ class ChatViewModel(
     val selectedIds: StateFlow<Set<Long>> = _selectedIds
 
     /**
-     * Tracks whether this chat is the currently visible screen, so
-     * MainActivity's notification collector can skip buzzing for the chat
-     * Garrett is already looking at. Called from ChatScreen's
+     * Tracks whether this chat is the currently visible screen, so the
+     * application-scoped notification collector (RelayApp) can skip buzzing
+     * for the chat Garrett is already looking at. Called from ChatScreen's
      * DisposableEffect (ViewModel.onCleared doesn't fire on pop — the VM
      * survives in the activity scope while the back stack changes).
      */

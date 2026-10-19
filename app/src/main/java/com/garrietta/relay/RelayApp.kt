@@ -10,6 +10,10 @@ import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.notifications.MessageNotifications
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Manual dependency graph (no DI framework for v1 — the graph is tiny).
@@ -32,6 +36,17 @@ class RelayApp : Application() {
 
     /** Per-conversation chat scroll positions (see ChatScrollStore). */
     val chatScrollStore: ChatScrollStore by lazy { ChatScrollStore(this) }
+
+    /**
+     * Application-scoped coroutine scope: survives Activity destruction.
+     * The incoming-message notification collector MUST live here, not in
+     * MainActivity.lifecycleScope — the old collector died with the
+     * activity, so swiping the app away (or Android reclaiming it) silenced
+     * all notifications even though the foreground service kept the
+     * long-poll alive (Garrett 2026-10-19 evening: "still not getting
+     * notifications").
+     */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val appPrefs by lazy {
         getSharedPreferences("relay_app", Context.MODE_PRIVATE)
@@ -83,6 +98,54 @@ class RelayApp : Application() {
         // the long-poll alive under Doze.
         if (rcsTransport.isPairedNow) {
             com.garrietta.relay.rcs.service.RcsService.start(this)
+        }
+        // Incoming-message notifications: application-scoped so they fire
+        // whether or not any Activity is alive (see appScope).
+        startIncomingMessageNotifications()
+    }
+
+    /**
+     * Incoming-message notifications (Garrett 2026-10-19: "i'm not getting
+     * notifications from messages in the app"). Posts a MessagingStyle
+     * notification for every INCOMING live RCS message:
+     * - skipped for own outgoing/echo messages,
+     * - skipped when the message's chat is currently on screen,
+     * - skipped when unpaired (unpaired SMS is the default app's job),
+     * - gated on the Settings → Texting toggle (default ON).
+     * Runs in [appScope]: the old MainActivity-scoped collector died with
+     * the activity, which is why notifications never arrived once the app
+     * was swiped away. Every decision is recorded in
+     * [MessageNotifications.diagnostics] for Settings → Diagnostics.
+     */
+    private fun startIncomingMessageNotifications() {
+        appScope.launch {
+            repository.observeRcsMessages().collect { msg ->
+                MessageNotifications.recordIncomingObserved()
+                if (msg.fromMe) {
+                    MessageNotifications.recordSkipped("own outgoing/echo")
+                    return@collect
+                }
+                if (!rcsTransport.isPairedNow) {
+                    MessageNotifications.recordSkipped("not paired")
+                    return@collect
+                }
+                if (!areMessageNotificationsEnabled()) {
+                    MessageNotifications.recordSkipped("toggle off in Settings")
+                    return@collect
+                }
+                val open = repository.openRcsConversation.value
+                if (open != null && open == msg.conversationId) {
+                    MessageNotifications.recordSkipped("chat open on screen")
+                    return@collect
+                }
+                val name = repository.conversations.value
+                    .firstOrNull { it.rcsConversationId == msg.conversationId }
+                    ?.displayName?.ifBlank { null } ?: "New message"
+                val body = msg.body.ifBlank {
+                    if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
+                }
+                MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs)
+            }
         }
     }
 }

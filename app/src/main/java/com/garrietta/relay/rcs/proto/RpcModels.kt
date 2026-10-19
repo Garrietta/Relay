@@ -206,6 +206,15 @@ data class RcsMediaAttachment(
      * download is needed.
      */
     val inlineData: ByteArray? = null,
+    /**
+     * Server-hosted thumbnail ID (MediaContent field 9) + its key (field
+     * 12). Some messages carry no full-size mediaID (field 2) but DO carry
+     * a thumbnailMediaID — the old code ignored it and rendered the tiny
+     * inline field-7 bytes. A thumbnail-ID download goes through the same
+     * validated choke point as a full download.
+     */
+    val thumbnailMediaId: String = "",
+    val thumbnailKey: ByteArray = byteArrayOf(),
 ) {
     /** True for image content types (renderable in a bubble). */
     val isImage: Boolean get() = mimeType.startsWith("image/")
@@ -215,7 +224,8 @@ data class RcsMediaAttachment(
 fun decodeMediaContent(m: Map<Int, List<FieldVal>>): RcsMediaAttachment? {
     val mediaId = m.firstStr(2).orEmpty()
     val inline = m.firstBytes(7)
-    if (mediaId.isEmpty() && inline == null) return null
+    val thumbnailMediaId = m.firstStr(9).orEmpty()
+    if (mediaId.isEmpty() && inline == null && thumbnailMediaId.isEmpty()) return null
     val dims = m.firstMsg(6)
     return RcsMediaAttachment(
         mediaId = mediaId,
@@ -225,6 +235,8 @@ fun decodeMediaContent(m: Map<Int, List<FieldVal>>): RcsMediaAttachment? {
         height = dims?.firstVarint(2) ?: 0L,
         size = m.firstVarint(5) ?: 0L,
         inlineData = inline,
+        thumbnailMediaId = thumbnailMediaId,
+        thumbnailKey = m.firstBytes(12) ?: byteArrayOf(),
     )
 }
 

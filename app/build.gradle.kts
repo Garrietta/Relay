@@ -1,8 +1,21 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Release signing credentials: CI supplies them as env vars, local builds read
+// them from local.properties (gitignored). Env wins so CI never picks up a
+// stray local file.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun signingCredential(envName: String, propName: String): String? =
+    System.getenv(envName) ?: localProps.getProperty(propName)
 
 android {
     namespace = "com.garrietta.relay"
@@ -16,9 +29,24 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("${project.rootDir}/keystore/relay.jks")
+            storePassword = signingCredential("KEYSTORE_PASSWORD", "keystore.storePassword")
+            keyAlias = signingCredential("KEY_ALIAS", "keystore.keyAlias")
+            keyPassword = signingCredential("KEY_PASSWORD", "keystore.keyPassword")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign only when the keystore is present (CI decodes it before the
+            // build). Local release builds without the keystore stay unsigned
+            // instead of failing.
+            if (file("${project.rootDir}/keystore/relay.jks").exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -88,5 +116,4 @@ dependencies {
     // any morphing UI without the SDK 37 / 1.5.0-beta01 toolchain.
     implementation("androidx.graphics:graphics-shapes:1.0.1")
 }
-
 

@@ -248,6 +248,39 @@ class RpcModelsTest {
         }
     }
 
+    @Test fun `server microsecond timestamps normalize to milliseconds`() {
+        // µs → ms; ms passes through; zero stays zero.
+        assertEquals(1760000000000L, normalizeServerTimestamp(1760000000000000L))
+        assertEquals(1760000000000L, normalizeServerTimestamp(1760000000000L))
+        assertEquals(0L, normalizeServerTimestamp(0L))
+    }
+
+    @Test fun `decoded message timestamp is milliseconds so optimistic sends sort newest`() {
+        // Device bug (Build #112): the server sends µs; optimistic bubbles
+        // use System.currentTimeMillis(). Without normalization every
+        // server message sorts "newer" and just-sent messages land at the
+        // TOP of the reverseLayout thread.
+        val msg = bmsg(
+            1 to FieldVal.Str("m1"),
+            5 to FieldVal.Varint(1760000000000000L),
+        )
+        val decoded = decodeRcsMessage(ProtoCodec.decode(msg))
+        assertEquals(1760000000000L, decoded.timestampMs)
+        val optimisticMs = 1760000000001L
+        assertTrue(optimisticMs > decoded.timestampMs)
+        val sorted = listOf(decoded.timestampMs, optimisticMs).sortedDescending()
+        assertEquals(optimisticMs, sorted.first())
+    }
+
+    @Test fun `decoded conversation timestamp normalizes microseconds`() {
+        val conv = bmsg(
+            1 to FieldVal.Str("c1"),
+            5 to FieldVal.Varint(1760000000000000L),
+        )
+        val c = decodeConversation(ProtoCodec.decode(conv))
+        assertEquals(1760000000000L, c.timestampMs)
+    }
+
     @Test fun `encrypted responses never suppressed`() {
         val real = RpcMessageData(
             sessionId = "req-123",

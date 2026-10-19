@@ -503,6 +503,18 @@ fun Map<Int, List<FieldVal>>.repStrs(n: Int): List<String> =
 fun Map<Int, List<FieldVal>>.firstBool(n: Int): Boolean? =
     (this[n]?.firstOrNull() as? FieldVal.Varint)?.v?.let { it != 0L }
 
+/**
+ * Server timestamps are MICROseconds (the reference builds them as
+ * `UnixMilli() * 1000`); the app sorts and formats in MILLIseconds. A raw
+ * µs value compares as "newer" than any System.currentTimeMillis()-stamped
+ * optimistic bubble, which put just-sent messages at the TOP of the
+ * reverseLayout thread. Normalize to ms at decode time. The magnitude
+ * guard keeps this safe if the server ever sends ms: 1e14 ms is the year
+ * 5138, so anything larger is unambiguously microseconds.
+ */
+fun normalizeServerTimestamp(raw: Long): Long =
+    if (raw > 100_000_000_000_000L) raw / 1000 else raw
+
 private fun decodeMessageInfo(m: Map<Int, List<FieldVal>>): String? {
     // MessageInfo oneof{2:messageContent, 3:mediaContent, 5:locationContent}
     m.firstMsg(2)?.firstStr(1)?.let { return it }
@@ -519,7 +531,7 @@ fun decodeRcsMessage(
         id = m.firstStr(1).orEmpty(),
         conversationId = m.firstStr(7).orEmpty(),
         body = infos.firstOrNull().orEmpty(),
-        timestampMs = m.firstVarint(5) ?: 0L,
+        timestampMs = normalizeServerTimestamp(m.firstVarint(5) ?: 0L),
         fromMe = resolveFromMe(m, participants, fallbackFromMe),
         status = m.firstMsg(4)?.firstVarint(2)?.toInt() ?: 0,
         tmpId = m.firstStr(12).orEmpty(),
@@ -586,7 +598,7 @@ fun decodeConversation(m: Map<Int, List<FieldVal>>): RcsConversation {
         id = m.firstStr(1).orEmpty(),
         name = m.firstStr(2).orEmpty(),
         snippet = latest?.firstStr(1).orEmpty(),
-        timestampMs = m.firstVarint(5) ?: 0L,
+        timestampMs = normalizeServerTimestamp(m.firstVarint(5) ?: 0L),
         unread = m.firstBool(6) ?: false,
         isGroup = m.firstBool(10) ?: false,
         type = m.firstVarint(22)?.toInt() ?: 0,

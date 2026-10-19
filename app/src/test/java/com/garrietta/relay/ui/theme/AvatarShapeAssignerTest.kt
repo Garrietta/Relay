@@ -31,11 +31,22 @@ class AvatarShapeAssignerTest {
     }
 
     @Test
-    fun `first N distinct keys get N distinct shapes`() {
+    fun `shape for a key is independent of call order`() {
+        // The inbox/chat mismatch: the old sequential hand-out gave a
+        // contact different shapes depending on which screen asked first.
         AvatarShapeAssigner.reshuffle()
-        val n = ExpressiveAvatarShapes.size
-        val shapes = (0 until n).map { AvatarShapeAssigner.shapeFor("contact-$it") }.toSet()
-        assertEquals(n, shapes.size)
+        val first = AvatarShapeAssigner.shapeFor("grace-contact")
+        repeat(50) { AvatarShapeAssigner.shapeFor("other-$it") }
+        assertSame(first, AvatarShapeAssigner.shapeFor("grace-contact"))
+    }
+
+    @Test
+    fun `phone formatting variants share one shape`() {
+        AvatarShapeAssigner.reshuffle()
+        assertSame(
+            AvatarShapeAssigner.shapeFor("+1 (765) 341-9588"),
+            AvatarShapeAssigner.shapeFor("7653419588"),
+        )
     }
 
     @Test

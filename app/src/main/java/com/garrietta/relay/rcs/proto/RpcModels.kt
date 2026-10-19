@@ -154,7 +154,7 @@ data class RcsMediaAttachment(
      */
     val inlineData: ByteArray? = null,
 ) {
-    /** True for image/* content types (renderable in a bubble). */
+    /** True for image content types (renderable in a bubble). */
     val isImage: Boolean get() = mimeType.startsWith("image/")
 }
 

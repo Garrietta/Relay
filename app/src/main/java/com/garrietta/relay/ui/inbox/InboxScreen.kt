@@ -6,7 +6,6 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
@@ -231,24 +230,23 @@ fun InboxScreen(
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search bar: UNMISTAKABLE bouncy entrance from the top
-                // (Garrett 2026-10-19: "you didn't implement any kind of
-                // animation for the search bar"). The bar drops in from
-                // above with the bouncy spring while expanding — slide +
-                // expand + fade together so the arrival can't be missed.
-                // The category pill bar STAYS visible below it while
+                // Search bar: POP-UP entrance (Garrett 2026-10-19: "i expect
+                // like a pop up animation, take inspiration from popular
+                // apps"). The bar blooms into place from the search button:
+                // scale-up + rise + fade on the bouncy spring — a pop, not a
+                // drop. The category pill bar STAYS visible below it while
                 // searching — search and category filter COMBINE, so he can
                 // flip All/W/T mid-search to re-filter the results.
                 AnimatedVisibility(
                     visible = searchOpen,
-                    enter = fadeIn(animationSpec = tween(200)) +
+                    enter = fadeIn(animationSpec = tween(160)) +
+                        scaleIn(
+                            animationSpec = RelaySprings.bouncy(),
+                            initialScale = 0.82f,
+                        ) +
                         slideInVertically(
                             animationSpec = RelaySprings.bouncy(),
-                            initialOffsetY = { -it / 2 },
-                        ) +
-                        expandVertically(
-                            expandFrom = Alignment.Top,
-                            animationSpec = RelaySprings.bouncy(),
+                            initialOffsetY = { it / 3 },
                         ),
                     exit = fadeOut(tween(150)) +
                         shrinkVertically(
@@ -392,13 +390,26 @@ fun InboxScreen(
                     Spacer(Modifier.width(12.dp))
                     // Search: a distinctive expressive shape (Sunny star) —
                     // deliberately NOT a circle, per the expressive brief.
+                    // Press-pop: the button itself bounces when tapped, so
+                    // the tap feels connected to the search bar blooming in.
+                    val searchInteraction = remember { MutableInteractionSource() }
+                    val searchPressed by searchInteraction.collectIsPressedAsState()
+                    val searchPop by animateFloatAsState(
+                        targetValue = if (searchPressed) 0.82f else 1f,
+                        animationSpec = RelaySprings.bouncy(),
+                        label = "searchBtnPop",
+                    )
                     Box(
                         modifier = Modifier
                             .size(60.dp)
+                            .graphicsLayer {
+                                scaleX = searchPop
+                                scaleY = searchPop
+                            }
                             .clip(expressiveShape("Sunny"))
                             .background(MaterialTheme.colorScheme.secondaryContainer)
                             .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
+                                interactionSource = searchInteraction,
                                 indication = null,
                                 onClick = { searchOpen = true },
                                 role = Role.Button,

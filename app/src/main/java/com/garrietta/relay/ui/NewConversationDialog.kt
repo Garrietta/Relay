@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -148,6 +148,14 @@ fun NewConversationDialog(
             animationSpec = RelaySprings.bouncy(),
             label = "dialogAlpha",
         )
+        // LOCKED sheet height (Garrett 2026-10-19): captured ONCE per open as
+        // an absolute Dp — never a fraction re-resolved against live
+        // constraints, so no animation or recomposition can perturb it and
+        // it can never accumulate across opens (the caller also keys each
+        // open fresh).
+        val sheetHeight = remember {
+            (LocalConfiguration.current.screenHeightDp * 0.92f).dp
+        }
 
         // In-Compose scrim: theme-aware, covers the whole window, dismisses
         // on tap. The platform window background is irrelevant behind this.
@@ -183,7 +191,7 @@ fun NewConversationDialog(
                 // button carries imePadding, pinned above the keyboard.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(0.92f)
+                    .height(sheetHeight)
                     // Swallow taps so they don't fall through to the scrim.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },

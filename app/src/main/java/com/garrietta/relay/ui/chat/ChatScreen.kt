@@ -51,6 +51,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
@@ -99,6 +101,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isUnknownSenderGhost
@@ -395,6 +398,42 @@ fun ChatScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Google Messages-style delivery ticks for outgoing bubbles: SENT = single
+ * check, DELIVERED = double check, READ = double check filled blue.
+ * SENDING/NONE show nothing (matches Google Messages).
+ */
+@Composable
+private fun DeliveryTicks(
+    status: DeliveryStatus,
+    modifier: Modifier = Modifier,
+) {
+    val (icon, tint) = when (status) {
+        DeliveryStatus.SENT -> Icons.Filled.Done to MaterialTheme.colorScheme.onSurfaceVariant
+        DeliveryStatus.DELIVERED -> Icons.Filled.DoneAll to MaterialTheme.colorScheme.onSurfaceVariant
+        DeliveryStatus.READ -> Icons.Filled.DoneAll to MaterialTheme.colorScheme.primary
+        else -> null to Color.Unspecified
+    }
+    if (icon != null) {
+        Row(
+            modifier = modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                icon,
+                contentDescription = when (status) {
+                    DeliveryStatus.READ -> "Read"
+                    DeliveryStatus.DELIVERED -> "Delivered"
+                    else -> "Sent"
+                },
+                tint = tint,
+                modifier = Modifier.size(14.dp),
+            )
         }
     }
 }
@@ -1047,6 +1086,31 @@ private fun MessageBubble(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp),
+            )
+        }
+        // Link unfurl (Garrett 2026-10-19): a URL in the body gets a preview
+        // card under the bubble. Skipped on media messages (the attachment
+        // is the content there). Failures degrade to a plain link row —
+        // never a gray block.
+        if (message.media == null) {
+            val linkUrl = remember(message.body) {
+                LinkPreviewFetcher.extractFirstUrl(message.body)
+            }
+            if (linkUrl != null) {
+                Spacer(Modifier.height(6.dp))
+                LinkPreviewCard(
+                    url = linkUrl,
+                    isOutgoing = message.isOutgoing,
+                    maxBubbleWidth = maxBubbleWidth,
+                )
+            }
+        }
+        // Read/delivery receipts (Garrett 2026-10-19): Google Messages-style
+        // ticks under outgoing bubbles — sent ✓, delivered ✓✓, read ✓✓ blue.
+        if (message.isOutgoing) {
+            DeliveryTicks(
+                status = message.deliveryStatus,
+                modifier = Modifier.padding(top = 2.dp, end = 4.dp),
             )
         }
     }

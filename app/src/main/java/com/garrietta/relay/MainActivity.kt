@@ -59,6 +59,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -189,8 +190,16 @@ class MainActivity : ComponentActivity() {
     private fun RelaySinglePane() {
         val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
         var navForward by remember { mutableStateOf(true) }
+        // New-chat open counter (Garrett 2026-10-19): Screen.NewConversation
+        // is a singleton object, so AnimatedContent reuses its composition
+        // across opens — animation/remember state leaks from one open to the
+        // next and the sheet grows taller every time. Keying the dialog on a
+        // per-open nonce forces a genuinely fresh composition (and a locked
+        // sheet height) on every press.
+        var newConvNonce by remember { mutableStateOf(0L) }
         fun push(s: Screen) {
             navForward = true
+            if (s is Screen.NewConversation) newConvNonce++
             backStack.add(s)
         }
         fun pop() {
@@ -331,6 +340,10 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         is Screen.NewConversation -> {
+                            // Fresh composition per open (see newConvNonce):
+                            // no animation or layout state survives between
+                            // opens, so the sheet height can never accumulate.
+                            key(newConvNonce) {
                             NewConversationDialog(
                                 onDismiss = ::pop,
                                 onStart = { number ->
@@ -339,6 +352,7 @@ class MainActivity : ComponentActivity() {
                                     push(Screen.Chat(-1L, number, number))
                                 },
                             )
+                            }
                         }
                     }
                 }
@@ -360,6 +374,9 @@ class MainActivity : ComponentActivity() {
         var selected by remember { mutableStateOf<Conversation?>(null) }
         var showSettings by remember { mutableStateOf(false) }
         var showNewConversation by remember { mutableStateOf(false) }
+        // Same per-open freshness as single-pane (Garrett 2026-10-19): the
+        // sheet must never accumulate height across opens.
+        var newChatNonce by remember { mutableStateOf(0L) }
         var showRcsPairing by remember { mutableStateOf(false) }
         // Conversation details overlay (Garrett 2026-10-19): header/avatar
         // taps in the chat pane open it over the detail pane. The last
@@ -409,7 +426,7 @@ class MainActivity : ComponentActivity() {
                                 detailsRequest = null
                             },
                             onOpenSettings = { showSettings = true },
-                            onNewConversation = { showNewConversation = true },
+                            onNewConversation = { newChatNonce++; showNewConversation = true },
                         )
                     }
                     // Draggable divider handle between the panes: a wide
@@ -519,6 +536,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (showNewConversation) {
+            key(newChatNonce) {
             NewConversationDialog(
                 onDismiss = { showNewConversation = false },
                 onStart = { number ->
@@ -541,6 +559,7 @@ class MainActivity : ComponentActivity() {
                     )
                 },
             )
+            } // key(newChatNonce)
         }
         if (showSettings) {
             SettingsScreen(

@@ -1,7 +1,6 @@
 package com.garrietta.relay.ui.inbox
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -35,26 +34,28 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.motion.RelaySprings
 import kotlin.math.roundToInt
 
 /**
- * The inbox category bar — Garrett's 2026-10-19 directive, modeled on the
- * YouTube Music top pill bar (see his screen recording): there is NO
- * background container pill. Each category is its OWN pill chip, and the
- * chips themselves form the bar. Unselected chips are small-radius rounded
- * rectangles; the selected chip blooms into a filled sideways oval.
+ * The inbox category bar — Garrett's 2026-10-19 "chocolate bar" directive:
+ * ONE continuous pill bifurcated by dividers. The end chips (All first,
+ * Unknown last) are ALWAYS half-rectangle / half-oval — rounded on the
+ * outward edge, square on the inward edge — whether selected or not. Middle
+ * chips are pure rectangles. When a chip is SELECTED it morphs into a full
+ * oval and pops out of the bar (scale + z-order), bouncy.
  *
- * Tapping a chip morphs THAT chip instantly — no sliding surround, no
- * delay. The shape morph fires the frame the tap lands (RelaySprings
- * bouncy), which is what Garrett asked for after the #117 build showed a
- * visible lag in the old sliding-surround transform.
+ * Unselected, the chips tile into the segmented strip; selected, the tapped
+ * chip blooms into the floating oval. The morph fires the frame the tap
+ * lands (RelaySprings bouncy).
  *
  * Segments: "All" first (always), then the user's custom categories in
- * their Settings order. Equal widths while they fit (2 = halves, 3 =
- * thirds, ...); beyond a readable width the bar scrolls with fixed-width
- * chips. Shown ONLY when at least one custom category exists.
+ * their Settings order, then the built-in Unknown tab last. Equal widths
+ * while they fit (2 = halves, 3 = thirds, ...); beyond a readable width the
+ * bar scrolls with fixed-width segments. Shown when at least one custom
+ * category exists or the Unknown tab is on.
  *
  * [selectedId]: null = "All".
  */
@@ -84,60 +85,81 @@ fun CategoryPillBar(
     ) {
         val density = LocalDensity.current
         val containerWPx = with(density) { maxWidth.toPx() }
-        val gapPx = with(density) { 8.dp.toPx() }
         // Equal chips while they fit at a readable width; beyond that the
         // bar scrolls with fixed-width chips (still equal).
         val minChipPx = with(density) { 96.dp.toPx() }
-        val fillMode = count * minChipPx + (count - 1) * gapPx <= containerWPx
+        val fillMode = count * minChipPx <= containerWPx
         val scrollState = rememberScrollState()
 
         // Keep the selected chip on screen in scroll mode.
         LaunchedEffect(selectedIndex, fillMode) {
             if (!fillMode) {
-                val chipPx = with(density) { 120.dp.toPx() } + gapPx
+                val chipPx = with(density) { 120.dp.toPx() }
                 val target = (selectedIndex * chipPx - containerWPx / 2 + chipPx / 2)
                     .roundToInt().coerceAtLeast(0)
                 scrollState.animateScrollTo(target, RelaySprings.bouncy())
             }
         }
 
+        // No gaps: chips tile edge-to-edge into the continuous bar, split
+        // by 1dp dividers — the chocolate bar.
         Row(
             modifier = if (fillMode) Modifier.fillMaxSize()
             else Modifier.fillMaxSize().horizontalScroll(scrollState),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             segmentIds.forEachIndexed { index, id ->
-                CategoryChip(
+                val isFirst = index == 0
+                val isLast = index == count - 1
+                ChocolateSegment(
                     name = segmentNames[index],
                     selected = index == selectedIndex,
+                    isFirst = isFirst,
+                    isLast = isLast,
                     onClick = { onSelect(id) },
-                    // RowScope: weight() only resolves here, not outside.
-                    modifier = if (fillMode) Modifier.weight(1f).fillMaxHeight()
-                    else Modifier.width(120.dp).fillMaxHeight(),
+                    modifier = (if (fillMode) Modifier.weight(1f) else Modifier.width(120.dp))
+                        .fillMaxHeight()
+                        // The selected oval pops OUT of the bar, drawn over
+                        // its neighbors.
+                        .zIndex(if (index == selectedIndex) 1f else 0f),
                 )
+                if (!isLast) SegmentDivider()
             }
         }
     }
 }
 
 /**
- * One category chip. The selection morph lives ON the chip: rounded
- * rectangle (10dp) -> sideways oval (26dp = stadium on the 52dp bar),
- * unfilled -> filled, and it fires instantly on tap with the bouncy
- * spring — no intermediate sliding pill, so there is no transform delay.
+ * One chocolate-bar segment. Unselected ends are half-oval (rounded outward,
+ * square inward); middles are pure rectangles. On selection the segment
+ * morphs to a FULL oval, fills, and scales up over its neighbors.
  */
 @Composable
-private fun RowScope.CategoryChip(
+private fun RowScope.ChocolateSegment(
     name: String,
     selected: Boolean,
+    isFirst: Boolean,
+    isLast: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val corner by animateDpAsState(
-        targetValue = if (selected) 26.dp else 10.dp,
+    // Selection morph 0->1 on the bouncy spring; every corner lerps from
+    // its tiled value to the full 26dp oval.
+    val sel by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
         animationSpec = RelaySprings.bouncy(),
-        label = "chipCorner",
+        label = "chocSel",
+    )
+    fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
+        val base = if (outwardRounded) 26f else 0f
+        return (base + (26f - base) * sel).dp
+    }
+    val shape = RoundedCornerShape(
+        topStart = corner(isFirst),
+        bottomStart = corner(isFirst),
+        topEnd = corner(isLast),
+        bottomEnd = corner(isLast),
     )
     // Color snaps fast (tween): a bouncy spring overshoots through
     // out-of-gamut intermediates on color, which reads as a flash.
@@ -145,23 +167,24 @@ private fun RowScope.CategoryChip(
         targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer
         else MaterialTheme.colorScheme.surfaceContainerHigh,
         animationSpec = tween(180),
-        label = "chipBg",
+        label = "chocBg",
     )
-    // Tactile press scale in the unified spring language.
+    // Tactile press scale composes with the selected pop-out scale.
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
         targetValue = if (pressed) 0.94f else 1f,
         animationSpec = RelaySprings.bouncy(),
-        label = "chipPress",
+        label = "chocPress",
     )
+    val popScale = 1f + 0.08f * sel
     Box(
         modifier = modifier
             .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
+                scaleX = popScale * pressScale
+                scaleY = popScale * pressScale
             }
-            .clip(RoundedCornerShape(corner))
+            .clip(shape)
             .background(bgColor)
             .clickable(
                 interactionSource = interaction,
@@ -183,4 +206,18 @@ private fun RowScope.CategoryChip(
             modifier = Modifier.padding(horizontal = 8.dp),
         )
     }
+}
+
+/** The bifurcation between chocolate-bar segments. */
+@Composable
+private fun RowScope.SegmentDivider() {
+    Box(
+        modifier = Modifier
+            .width(1.dp)
+            .height(24.dp)
+            .align(Alignment.CenterVertically)
+            .background(
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+            ),
+    )
 }

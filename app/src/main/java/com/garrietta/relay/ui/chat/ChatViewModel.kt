@@ -3,8 +3,10 @@ package com.garrietta.relay.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatScrollStore
@@ -45,12 +47,15 @@ class ChatViewModel(
 
     /**
      * RCS history depth: starts at the fast 50 for the first paint, grows
-     * to [DEEP_HISTORY_COUNT] once the background deep fill lands — later
-     * reloads keep the deeper count so the list never shrinks back.
+     * as the background deep fill lands — later reloads keep the deeper
+     * count so the list never shrinks back.
      */
     private var rcsHistoryCount = 50L
     private companion object {
-        const val DEEP_HISTORY_COUNT = 300L
+        /** Garrett 2026-10-19: at least three weeks of chat history. */
+        const val HISTORY_DAYS = 21L
+        /** Safety cap on the background deep fill (messages). */
+        const val MAX_HISTORY_COUNT = 2000L
     }
 
     private var activeThreadId: Long = threadId
@@ -178,15 +183,27 @@ class ChatViewModel(
             rcsHistoryCount = floor
             _messages.value = repository.rcsMessages(conversationId, floor)
             repository.markRcsRead(conversationId)
-            // Background deep fill (Garrett 2026-10-19: "way more messages
-            // here"). The first paint stays fast; a larger pull then fills
-            // in older history without blocking. Same descending sort, cache
-            // rewritten; later reloads keep the deeper count.
+            // Background deep fill (Garrett 2026-10-19: "at least the last
+            // three weeks of chats"). The first paint stays instant from
+            // cache; then we page deeper in the background until the oldest
+            // loaded message is >= 21 days old or the server is exhausted.
+            // Each step only replaces the list when it actually grew, so the
+            // UI never flickers or slows the initial open.
             try {
-                val deep = repository.rcsMessages(conversationId, DEEP_HISTORY_COUNT)
-                if (deep.size > _messages.value.size) {
-                    rcsHistoryCount = DEEP_HISTORY_COUNT
-                    setMessages(deep)
+                var target = maxOf(500L, floor)
+                while (target <= MAX_HISTORY_COUNT) {
+                    val deep = repository.rcsMessages(conversationId, target)
+                    if (deep.size > _messages.value.size) {
+                        rcsHistoryCount = target
+                        setMessages(deep)
+                    }
+                    val oldest = deep.minOfOrNull { it.date } ?: break
+                    val daysBack =
+                        (System.currentTimeMillis() - oldest) / 86_400_000L
+                    // Server exhausted (returned fewer than asked) or three
+                    // weeks deep — done.
+                    if (deep.size < target || daysBack >= HISTORY_DAYS) break
+                    target += 500L
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Deep history fill failed: ${e.message}", e)
@@ -218,13 +235,30 @@ class ChatViewModel(
 
     /**
      * Live RCS arrival. A server echo carries the optimistic bubble's tmpId
-     * and replaces it; anything else is genuinely new — reload to stay
-     * consistent rather than risking a duplicate.
+     * and replaces it; a status-only push (same server id, new status)
+     * updates just the ticks; anything else is genuinely new — reload to
+     * stay consistent rather than risking a duplicate.
      */
     private fun onRcsIncoming(msg: com.garrietta.relay.rcs.proto.RcsMessage) {
         val tmpId = msg.tmpId.ifBlank { null }
         val optimistic = tmpId?.let { pendingOptimistic.remove(it) }
         if (optimistic == null) {
+            // Status-only update? Match by server id and patch the ticks
+            // without a full reload.
+            val serverId = msg.id.hashCode().toLong()
+            val newStatus = rcsStatusToDelivery(msg.status, msg.fromMe)
+            val current = _messages.value
+            val idx = current.indexOfFirst { it.id == serverId }
+            if (idx >= 0 && current[idx].deliveryStatus != newStatus &&
+                newStatus != DeliveryStatus.NONE
+            ) {
+                setMessages(
+                    current.toMutableList().also {
+                        it[idx] = it[idx].copy(deliveryStatus = newStatus)
+                    },
+                )
+                return
+            }
             viewModelScope.launch {
                 _messages.value = repository.rcsMessages(
                     rcsConversationId ?: return@launch,
@@ -243,6 +277,7 @@ class ChatViewModel(
             isMms = false,
             read = true,
             tmpId = tmpId,
+            deliveryStatus = rcsStatusToDelivery(msg.status, true),
         )
         setMessages(
             _messages.value
@@ -393,6 +428,7 @@ class ChatViewModel(
             isMms = false,
             read = true,
             tmpId = tmpId,
+            deliveryStatus = DeliveryStatus.SENDING,
         )
         pendingOptimistic[tmpId] = optimistic
         // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
@@ -423,6 +459,7 @@ class ChatViewModel(
                     isOutgoing = true,
                     isMms = false,
                     read = true,
+                    deliveryStatus = DeliveryStatus.SENT,
                 )
                 setMessages((_messages.value + optimistic).sortedByDescending { it.date })
                 repository.refresh()

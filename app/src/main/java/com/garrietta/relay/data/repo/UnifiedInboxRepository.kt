@@ -9,9 +9,11 @@ import android.os.Looper
 import android.provider.ContactsContract
 import android.util.Log
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isUnknownSenderGhostName
+import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -405,6 +407,7 @@ class UnifiedInboxRepository(
                 read = true,
                 tmpId = m.tmpId.ifBlank { null },
                 media = m.media,
+                deliveryStatus = rcsStatusToDelivery(m.status, m.fromMe),
             )
         }.sortedByDescending { it.date }
             // Write-through to the instant-open cache.
@@ -658,6 +661,8 @@ class UnifiedInboxRepository(
                             isOutgoing = typeI >= 0 && c.getInt(typeI) == 2,
                             isMms = false,
                             read = readI < 0 || c.getInt(readI) == 1,
+                            deliveryStatus = if (typeI >= 0 && c.getInt(typeI) == 2)
+                                DeliveryStatus.SENT else DeliveryStatus.NONE,
                         )
                     )
                 }
@@ -693,6 +698,8 @@ class UnifiedInboxRepository(
                             isOutgoing = boxI >= 0 && c.getInt(boxI) == 2,
                             isMms = true,
                             read = readI < 0 || c.getInt(readI) == 1,
+                            deliveryStatus = if (boxI >= 0 && c.getInt(boxI) == 2)
+                                DeliveryStatus.SENT else DeliveryStatus.NONE,
                         )
                     )
                 }

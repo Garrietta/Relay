@@ -50,6 +50,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.CrashReporter
 import com.garrietta.relay.data.model.ThemeMode
+import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.data.transport.RcsPairingState
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -212,7 +214,7 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
     val assignments by viewModel.assignments.collectAsState()
     val conversations by viewModel.conversations.collectAsState()
     var showAddDialog by remember { mutableStateOf(false) }
-    var renameTarget by remember { mutableStateOf<com.garrietta.relay.data.repo.ChatCategory?>(null) }
+    var renameTarget by remember { mutableStateOf<ChatCategory?>(null) }
     var expandedId by remember { mutableStateOf<String?>(null) }
 
     if (showAddDialog) {
@@ -356,7 +358,7 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
                 // Assignment: which chats belong to this category.
                 if (expandedId == category.id) {
                     val memberCount = conversations.count { conv ->
-                        assignments[com.garrietta.relay.data.repo.CategoryStore.conversationKey(
+                        assignments[CategoryStore.conversationKey(
                             conv.rcsConversationId, conv.threadId,
                         )] == category.id
                     }
@@ -367,7 +369,7 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
                         modifier = Modifier.padding(bottom = 4.dp),
                     )
                     conversations.take(200).forEach { conv ->
-                        val key = com.garrietta.relay.data.repo.CategoryStore.conversationKey(
+                        val key = CategoryStore.conversationKey(
                             conv.rcsConversationId, conv.threadId,
                         )
                         val checked = assignments[key] == category.id

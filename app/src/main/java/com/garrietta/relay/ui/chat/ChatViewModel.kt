@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.repo.AppSeedStore
+import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -150,6 +151,10 @@ class ChatViewModel(
      * Conversation.type, never hardcoded.
      */
     private fun initRcs(conversationId: String) {
+        // Instant open: show the cached messages immediately (empty on
+        // first visit), then refresh in the background and rewrite the
+        // cache — no visible load delay on tap.
+        _messages.value = repository.cachedMessages(conversationId) ?: emptyList()
         viewModelScope.launch {
             _messages.value = repository.rcsMessages(conversationId)
             repository.markRcsRead(conversationId)
@@ -203,10 +208,28 @@ class ChatViewModel(
             read = true,
             tmpId = tmpId,
         )
-        _messages.value = _messages.value
-            .map { if (it.tmpId == tmpId) mapped else it }
-            .sortedByDescending { it.date }
+        setMessages(
+            _messages.value
+                .map { if (it.tmpId == tmpId) mapped else it }
+                .sortedByDescending { it.date },
+        )
         viewModelScope.launch { repository.markRcsRead(rcsConversationId ?: return@launch) }
+    }
+
+    /**
+     * Cache key for this thread: the RCS conversation id when known, else
+     * the Telephony thread id. Matches the keys the repository's loaders
+     * write through.
+     */
+    private fun cacheKey(): String =
+        CategoryStore.conversationKey(
+            rcsConversationId, threadIds.firstOrNull() ?: threadId,
+        )
+
+    /** Sets the message list and writes it through to the instant-open cache. */
+    private fun setMessages(list: List<Message>) {
+        _messages.value = list
+        repository.putCachedMessages(cacheKey(), list)
     }
 
     /** Resolves the participant who sent [address], or null when unknown. */
@@ -251,6 +274,13 @@ class ChatViewModel(
     }
 
     fun reload() {
+        // Instant open (Telephony path): cached messages first, then the
+        // provider refresh rewrites the cache in the background.
+        _messages.value = repository.cachedMessages(
+            CategoryStore.conversationKey(
+                null, threadIds.firstOrNull() ?: threadId,
+            ),
+        ) ?: emptyList()
         viewModelScope.launch {
             // Merged conversations load the full history across thread_ids.
             val loaded = repository.loadMessages(threadIds)
@@ -322,14 +352,14 @@ class ChatViewModel(
         )
         pendingOptimistic[tmpId] = optimistic
         // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
-        _messages.value = (_messages.value + optimistic).sortedByDescending { it.date }
+        setMessages((_messages.value + optimistic).sortedByDescending { it.date })
         when (val outcome = repository.sendRcs(conversationId, body, tmpId)) {
             is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
                 // The server echo (same tmpId) replaces the optimistic bubble.
             }
             is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
                 pendingOptimistic.remove(tmpId)
-                _messages.value = _messages.value.filterNot { it.tmpId == tmpId }
+                setMessages(_messages.value.filterNot { it.tmpId == tmpId })
                 _sendError.value = outcome.reason
             }
         }
@@ -350,7 +380,7 @@ class ChatViewModel(
                     isMms = false,
                     read = true,
                 )
-                _messages.value = (_messages.value + optimistic).sortedByDescending { it.date }
+                setMessages((_messages.value + optimistic).sortedByDescending { it.date })
                 repository.refresh()
                 // A brand-new conversation has no thread yet; bind to the
                 // real one once the provider knows about it.

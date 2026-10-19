@@ -46,8 +46,21 @@ class RelayApp : Application() {
         appPrefs.edit().putBoolean(KEY_MSG_NOTIFICATIONS, enabled).apply()
     }
 
+    /**
+     * Unfolded two-pane split: fraction of the width given to the
+     * conversation list (rest goes to the chat pane). Draggable via the
+     * divider handle; persisted. Default 0.4 (the old 1f / 1.5f weights).
+     */
+    fun paneFraction(): Float =
+        appPrefs.getFloat(KEY_PANE_FRACTION, 0.4f).coerceIn(0.25f, 0.75f)
+
+    fun setPaneFraction(fraction: Float) {
+        appPrefs.edit().putFloat(KEY_PANE_FRACTION, fraction.coerceIn(0.25f, 0.75f)).apply()
+    }
+
     companion object {
         private const val KEY_MSG_NOTIFICATIONS = "msg_notifications_enabled"
+        private const val KEY_PANE_FRACTION = "pane_fraction"
     }
 
     override fun onCreate() {

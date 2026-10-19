@@ -21,8 +21,12 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -57,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -309,20 +314,26 @@ class MainActivity : ComponentActivity() {
             CompositionLocalProvider(
                 LocalSharedTransitionScope provides this@SharedTransitionLayout,
             ) {
-                Row(
+                // Draggable split (Garrett 2026-10-19): the divider between
+                // the list pane and the chat pane slides freely — no locked
+                // aspect ratio. The fraction persists across restarts.
+                var listFraction by remember { mutableStateOf(app.paneFraction()) }
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    // List pane: its own rounded container.
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        shape = RoundedCornerShape(28.dp),
-                        color = MaterialTheme.colorScheme.background,
-                    ) {
+                    val density = LocalDensity.current
+                    val maxWidthPx = with(density) { maxWidth.toPx() }
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        // List pane: its own rounded container.
+                        Surface(
+                            modifier = Modifier
+                                .weight(listFraction)
+                                .fillMaxHeight(),
+                            shape = RoundedCornerShape(28.dp),
+                            color = MaterialTheme.colorScheme.background,
+                        ) {
                         val inboxVm: InboxViewModel = viewModel(
                             factory = InboxViewModelFactory(app.repository, app.categoryStore)
                         )
@@ -334,12 +345,37 @@ class MainActivity : ComponentActivity() {
                             onNewConversation = { showNewConversation = true },
                         )
                     }
+                    // Draggable divider handle between the panes: a wide
+                    // touch target with a slim visual grip.
+                    val dragState = rememberDraggableState { dxPx ->
+                        listFraction = (listFraction + dxPx / maxWidthPx)
+                            .coerceIn(0.25f, 0.75f)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(24.dp)
+                            .fillMaxHeight()
+                            .draggable(
+                                state = dragState,
+                                orientation = Orientation.Horizontal,
+                                onDragStopped = { app.setPaneFraction(listFraction) },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(MaterialTheme.colorScheme.outlineVariant),
+                        )
+                    }
                     // Detail pane: its own rounded container; crossfades
                     // between the placeholder and the selected chat — no hard
                     // cut, no bare-background gap.
                     Surface(
                         modifier = Modifier
-                            .weight(1.5f)
+                            .weight(1f - listFraction)
                             .fillMaxHeight(),
                         shape = RoundedCornerShape(28.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -375,6 +411,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                } // BoxWithConstraints (draggable split)
             }
         }
 

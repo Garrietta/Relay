@@ -80,6 +80,32 @@ class UnifiedInboxRepository(
      */
     val openRcsConversation = MutableStateFlow<String?>(null)
 
+    /**
+     * In-memory message cache (Garrett 2026-10-19: "any time i tap on a chat
+     * it takes a second to load the messages — that should just be cached").
+     * ChatViewModel shows the cached list INSTANTLY on open, then refreshes
+     * in the background; every load path writes through here, and live
+     * arrivals update it too. LRU-capped; keyed by
+     * CategoryStore.conversationKey (stable across restarts for RCS and
+     * Telephony rows alike).
+     */
+    private val messageCache =
+        object : LinkedHashMap<String, List<com.garrietta.relay.data.model.Message>>(48, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<String, List<com.garrietta.relay.data.model.Message>>,
+            ): Boolean = size > 48
+        }
+
+    /** Synchronous cache read for instant chat open. */
+    @Synchronized
+    fun cachedMessages(conversationKey: String): List<com.garrietta.relay.data.model.Message>? =
+        messageCache[conversationKey]
+
+    @Synchronized
+    fun putCachedMessages(conversationKey: String, messages: List<com.garrietta.relay.data.model.Message>) {
+        messageCache[conversationKey] = messages
+    }
+
     private val refreshTick = MutableStateFlow(0)
 
     /**
@@ -377,6 +403,8 @@ class UnifiedInboxRepository(
                 media = m.media,
             )
         }.sortedByDescending { it.date }
+            // Write-through to the instant-open cache.
+            .also { putCachedMessages(conversationId, it) }
     }
 
     /** Downloads + decrypts an RCS media attachment (disk-cached in transport). */
@@ -670,6 +698,14 @@ class UnifiedInboxRepository(
         // NEWEST FIRST: the thread list is reverseLayout (index 0 renders at
         // the bottom), so descending puts the oldest at the top.
         out.sortedByDescending { it.date }
+            // Write-through to the instant-open cache.
+            .also {
+                if (threadIds.isNotEmpty()) {
+                    putCachedMessages(
+                        CategoryStore.conversationKey(null, threadIds.first()), it,
+                    )
+                }
+            }
     }
 
     /** Single-thread convenience; delegates to the merged loader. */

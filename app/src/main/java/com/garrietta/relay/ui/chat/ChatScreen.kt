@@ -988,9 +988,12 @@ private fun Composer(
     val canSend = text.isNotBlank() && !sending
     // Focus animation (Garrett's directive): tapping the text field expands
     // the inner Message pill to the full width of the outer pill while the
-    // attachment buttons fade+shrink away; they spring back when the field
-    // is unfocused and empty. Send + smiley stay put.
-    val expanded = focused || text.isNotEmpty()
+    // attachment buttons fade+shrink away. They spring back WHENEVER the
+    // field loses focus — "whenever i tap on this and i exit out that
+    // should move back over to its original position because i'm no longer
+    // trying to type" — not only when the field is empty. Send + smiley
+    // stay put.
+    val expanded = focused
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
 
@@ -1022,7 +1025,7 @@ private fun Composer(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Attachment buttons hide while the text field is expanded
-            // (focused or non-empty): fade+shrink out, bouncy spring back.
+            // (focused): fade+shrink out, bouncy spring back on focus loss.
             // Exits use a quick tween — exits never bounce, so nothing
             // flickers. Fixed sizes — never coerced smaller (#110 rule).
             AnimatedVisibility(
@@ -1099,9 +1102,13 @@ private fun Composer(
             }
             // Inner text pill: the distinct "Message" field, like the
             // reference's white inner pill on the blue outer pill.
+            // CONTRAST (Garrett 2026-10-19): the pill blended into the chat
+            // background — surfaceContainerHighest gives it real tonal
+            // separation from the surfaceContainerLow thread behind it, in
+            // both light and dark themes.
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surface,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 4.dp),

@@ -264,7 +264,19 @@ class UnifiedInboxRepository(
      * Garrett"). Drop every self entry via the isMe flag plus an ownAddress
      * match, and collapse duplicates by normalized address. His name must
      * never appear in a header unless the chat is to himself specifically.
+     *
+     * Also drops "ghost" participants with no usable identity (blank number
+     * AND blank/placeholder name, e.g. the "Unknown" in the GIRTH group) —
+     * they render as "Unknown" in headers and name lists otherwise.
      */
+    private fun isGhostParticipant(
+        p: com.garrietta.relay.rcs.proto.RcsParticipant,
+    ): Boolean {
+        if (p.number.isNotBlank()) return false
+        val name = p.fullName.ifBlank { p.firstName }.trim()
+        return name.isBlank() || name.equals("Unknown", ignoreCase = true)
+    }
+
     private fun cleanRcsParticipants(
         parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
         selfNorm: String?,
@@ -272,6 +284,7 @@ class UnifiedInboxRepository(
         val seen = mutableSetOf<String>()
         return parts.filter { p ->
             if (p.isMe) return@filter false
+            if (isGhostParticipant(p)) return@filter false
             val norm = normalizedAddress(p.number)
             if (norm.isEmpty()) return@filter true
             if (norm == selfNorm) return@filter false
@@ -396,7 +409,12 @@ class UnifiedInboxRepository(
                 if (p.isSelf) false
                 else {
                     val norm = normalizedAddress(p.address)
-                    if (norm.isEmpty()) true
+                    // Ghost check on the mapped Participant: blank address
+                    // and blank/"Unknown" display name.
+                    val ghost = norm.isEmpty() &&
+                        (p.displayName.isBlank() || p.displayName.equals("Unknown", ignoreCase = true))
+                    if (ghost) false
+                    else if (norm.isEmpty()) true
                     else if (norm == selfNorm) false
                     else seen.add(norm)
                 }

@@ -2,6 +2,7 @@ package com.garrietta.relay.ui.theme
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -99,6 +100,7 @@ fun ContactAvatar(
     Box(
         modifier = modifier
             .size(size)
+            .aspectRatio(1f)
             .clipToBounds(),
         contentAlignment = Alignment.Center,
     ) {

@@ -635,11 +635,19 @@ class RcsTransport(context: Context) : Transport {
      * Clean-room from the protocol's media flow: DownloadAttachmentRequest
      * (base64) in the x-goog-download-metadata header of GET .../upload,
      * then AES-GCM chunked stream decrypt with the message's decryption key.
+     *
+     * NOTE: MediaContent.mediaData (field 7) is only a low-res THUMBNAIL —
+     * returning it raw renders as blocky garbage (diagnosed 2026-10-19).
+     * When a mediaId exists we ALWAYS download the authoritative bytes;
+     * the inline thumbnail is used only when there is nothing to download.
      */
     suspend fun downloadMedia(att: RcsMediaAttachment): ByteArray =
         withContext(Dispatchers.IO) {
-            att.inlineData?.let { return@withContext it }
-            require(att.mediaId.isNotEmpty()) { "media unavailable: no attachment id" }
+            if (att.mediaId.isEmpty()) {
+                // No server copy — the inline thumbnail is the only bytes.
+                return@withContext att.inlineData
+                    ?: throw IllegalStateException("media unavailable: no attachment id or data")
+            }
             require(att.decryptionKey.size == 32) { "media unavailable: no decryption key" }
             val cacheFile = java.io.File(java.io.File(appContext.cacheDir, "rcs_media"), att.mediaId)
             if (cacheFile.exists()) return@withContext cacheFile.readBytes()

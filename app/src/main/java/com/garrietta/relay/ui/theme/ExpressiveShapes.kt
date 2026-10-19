@@ -176,15 +176,22 @@ private fun namedBlob(name: String, waves: Int, amplitude: Float): NamedShape {
     return NamedShape(name, shape, builder)
 }
 
-/** The full rotation set, in sheet order. */
+/** The full rotation set, in sheet order.
+ *
+ * STANDING RULE (2026-10-19): every avatar shape is 1:1 — even x and y dims,
+ * fit within the bounding box of a square. The Oval/Pill/Clamshell used to
+ * carry non-uniform designed scales (tall oval, wide pill); they rendered
+ * as ovals-that-should-be-circles, so the scales are removed and each shape
+ * keeps its vertex/rounding identity at 1:1.
+ */
 val ExpressiveAvatarShapes: List<NamedShape> = listOf(
-    namedPolygon("Oval", 16, 0f, scaleX = 0.80f, scaleY = 1.12f),
-    namedPolygon("Pill", 16, 0f, scaleX = 1.45f),
+    namedPolygon("Oval", 16, 0f),
+    namedPolygon("Pill", 16, 0f),
     namedPolygon("Triangle", 3, 0.24f, rotationDeg = -90f),
     namedPolygon("Arrow", 3, 0.30f, rotationDeg = 30f),
     namedPolygon("Fan", 3, 0.42f, rotationDeg = 45f),
     namedPolygon("Diamond", 4, 0.16f, rotationDeg = 45f),
-    namedPolygon("Clamshell", 6, 0.30f, scaleX = 1.35f, scaleY = 0.92f),
+    namedPolygon("Clamshell", 6, 0.30f),
     namedPolygon("Pentagon", 5, 0.22f, rotationDeg = -90f),
     namedPolygon("Gem", 4, 0.30f, starInnerFrac = 0.70f),
     namedPolygon("VerySunny", 12, 0.32f, starInnerFrac = 0.76f),

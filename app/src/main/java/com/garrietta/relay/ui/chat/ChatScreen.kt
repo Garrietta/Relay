@@ -42,12 +42,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.SentimentSatisfied
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -923,11 +926,14 @@ private fun lerpBubbleShape(
 }
 
 /**
- * M3 Expressive one-pill composer: [paperclip] [text entry] [send] in a
- * single pill. The paperclip opens the attachment sheet (Gallery, Camera,
- * GIF, Files); the text field flexes in the middle; send sits at the right
- * end with a spring pop on send. Buttons hold fixed sizes typing or not
- * (the #110 no-shrink rule).
+ * Reference-style one-pill composer (Garrett's reference image): ONE outer
+ * pill holding [+] [camera] [voice] on the left, the text field as a
+ * DISTINCT INNER pill, and [smiley] + [send] at the right end.
+ *
+ * [+] opens the attachment sheet (Gallery/Camera/GIF/Files); the camera
+ * button opens the sheet too; voice and smiley are stubs until those
+ * features land. Send keeps its fixed size and spring pop, and no button
+ * shrinks while typing (requiredSize throughout — the #110 no-shrink rule).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -965,45 +971,95 @@ private fun Composer(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 64.dp),
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Paperclip: opens the attachment sheet. Fixed size, like send.
+            // + : opens the attachment sheet. Fixed size — never shrinks.
             IconButton(
                 onClick = { showAttachSheet = true },
-                modifier = Modifier
-                    .padding(start = 4.dp)
-                    .requiredSize(48.dp),
+                modifier = Modifier.requiredSize(48.dp),
             ) {
                 Icon(
-                    Icons.Filled.AttachFile,
+                    Icons.Filled.Add,
                     contentDescription = "Attachments",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(24.dp),
                 )
             }
-            TextField(
-                value = text,
-                onValueChange = { text = it },
-                placeholder = { Text("Message") },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                    imeAction = ImeAction.Send,
-                ),
-                keyboardActions = KeyboardActions(onSend = { submit() }),
+            // Camera: opens the sheet (Camera is one of its options).
+            IconButton(
+                onClick = { showAttachSheet = true },
+                modifier = Modifier.requiredSize(48.dp),
+            ) {
+                Icon(
+                    Icons.Filled.PhotoCamera,
+                    contentDescription = "Camera",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // Voice messages: stub for now.
+            IconButton(
+                onClick = onAttachmentSoon,
+                modifier = Modifier.requiredSize(48.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Mic,
+                    contentDescription = "Voice message",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // Inner text pill: the distinct "Message" field, like the
+            // reference's white inner pill on the blue outer pill.
+            Surface(
                 shape = RoundedCornerShape(24.dp),
-                colors = TextFieldDefaults.colors(
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    disabledIndicatorColor = Color.Transparent,
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    disabledContainerColor = Color.Transparent,
-                ),
-                modifier = Modifier.weight(1f),
-                minLines = 1,
-                maxLines = 5,
-            )
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 4.dp, end = 2.dp),
+                ) {
+                    TextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        placeholder = { Text("Message") },
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Send,
+                        ),
+                        keyboardActions = KeyboardActions(onSend = { submit() }),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = TextFieldDefaults.colors(
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            disabledIndicatorColor = Color.Transparent,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                        ),
+                        modifier = Modifier.weight(1f),
+                        minLines = 1,
+                        maxLines = 5,
+                    )
+                    // Smiley: emoji picker stub for now.
+                    IconButton(
+                        onClick = onAttachmentSoon,
+                        modifier = Modifier.requiredSize(40.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.SentimentSatisfied,
+                            contentDescription = "Emoji",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
             // Send at the pill's right end — the densest color in the scheme.
             // requiredSize: never coerced smaller by tight parent constraints.
             IconButton(
@@ -1016,7 +1072,7 @@ private fun Composer(
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 modifier = Modifier
-                    .padding(end = 6.dp)
+                    .padding(end = 2.dp)
                     .requiredSize(52.dp)
                     .clip(CircleShape)
                     .graphicsLayer {

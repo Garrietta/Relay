@@ -1,10 +1,13 @@
 package com.garrietta.relay.data.transport
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.telephony.SmsManager
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -36,6 +39,17 @@ class SmsTransport(private val context: Context) : Transport {
 
     override suspend fun sendMessage(recipient: String, body: String): SendResult =
         withContext(Dispatchers.IO) {
+            // Explicit grant check: since Relay is never the default SMS app,
+            // the SEND_SMS dangerous permission must be granted at runtime
+            // (the default-SMS role used to imply it). Fail loudly instead
+            // of letting SmsManager throw a bare SecurityException.
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                return@withContext SendResult.Failed(
+                    "SMS permission not granted — allow SMS in system Settings, then retry."
+                )
+            }
             try {
                 val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     context.getSystemService(SmsManager::class.java)

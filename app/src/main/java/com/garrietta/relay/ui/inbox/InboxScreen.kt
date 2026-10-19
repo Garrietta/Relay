@@ -226,14 +226,13 @@ private fun CollapsingMessagesHeader(
     onOpenSettings: () -> Unit,
 ) {
     Surface(
-        color = MaterialTheme.colorScheme.background.copy(alpha = collapse * 0.92f),
-        // Explicit content color: at collapse=0 the surface is fully
-        // transparent, and contentColorFor() can't resolve a proper tone
-        // from a transparent color — dark mode then rendered the title
-        // near-invisible (diagnosed 2026-10-18). onBackground is legible
-        // in both themes at every collapse fraction.
+        // No separate polygon: the header is fully transparent at every
+        // collapse fraction, so the title + gear sit directly on the screen
+        // background (Garrett's directive 2026-10-18 — the tinted/tonal
+        // header read as a separate darker shape). Explicit content color so
+        // the title stays legible in both themes.
+        color = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
-        tonalElevation = if (collapse > 0.6f) 2.dp else 0.dp,
     ) {
         Row(
             modifier = Modifier

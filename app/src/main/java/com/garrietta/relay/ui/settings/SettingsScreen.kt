@@ -130,10 +130,25 @@ fun SettingsScreen(
             // from here, so the app captures its own uncaught exceptions
             // (see CrashReporter) and surfaces the last one here.
             val lastCrash = remember { CrashReporter.lastCrashSummary(context) }
-            if (lastCrash != null) {
-                var dismissed by remember { mutableStateOf(false) }
-                if (!dismissed) {
-                    SettingsCard(title = "Diagnostics", icon = Icons.Filled.Warning) {
+            // RCS transport state, refreshed on a ticker while the screen is
+            // visible — the sync-timeout debug round's diagnosability core.
+            var transportState by remember { mutableStateOf(viewModel.transportDiagnostics()) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    kotlinx.coroutines.delay(2000)
+                    transportState = viewModel.transportDiagnostics()
+                }
+            }
+            SettingsCard(title = "Diagnostics", icon = Icons.Filled.Warning) {
+                SettingsRow(
+                    title = "RCS transport",
+                    subtitle = transportState,
+                    actionLabel = "Refresh",
+                    onAction = { transportState = viewModel.transportDiagnostics() },
+                )
+                if (lastCrash != null) {
+                    var dismissed by remember { mutableStateOf(false) }
+                    if (!dismissed) {
                         SettingsRow(
                             title = "Last crash",
                             subtitle = lastCrash,

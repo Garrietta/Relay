@@ -6,7 +6,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -69,9 +68,11 @@ import kotlinx.coroutines.withContext
  *
  * Layout: a near-full-screen bottom sheet (~92% height) with the search
  * field pinned near the top and the results list filling everything below
- * it, so matches are visible while typing. The keyboard is raised on open
- * (focus request) and the sheet rides above it via imePadding — the list
- * compresses, the search field never hides.
+ * it — full-height and scrollable BEHIND the keyboard (never compressed
+ * into the space above it), so matches are visible while typing. The Cancel
+ * button floats pinned above the keyboard via imePadding and stays
+ * reachable; the list's bottom content padding clears it so no result is
+ * ever clipped underneath.
  *
  * Keyboard bug fix: the field is KeyboardType.Text (a TEXT keyboard), not
  * Phone — the dial-pad was wrong for name search.
@@ -163,12 +164,12 @@ fun NewConversationDialog(
             contentAlignment = Alignment.BottomCenter,
         ) {
             Surface(
-                // imePadding FIRST (outermost): the keyboard insets are
-                // consumed before the 92% height is measured, so the sheet
-                // rides above the keyboard and the list compresses instead
-                // of hiding behind it.
+                // NO imePadding here: the sheet is full-height and the result
+                // list extends BEHIND the keyboard (Garrett's directive —
+                // "the list should simply go behind the keyboard"), not
+                // compressed into the cramped space above it. Only the Cancel
+                // button carries imePadding, pinned above the keyboard.
                 modifier = Modifier
-                    .imePadding()
                     .fillMaxWidth()
                     .fillMaxHeight(0.92f)
                     .graphicsLayer(scaleX = scale, scaleY = scale)
@@ -182,92 +183,97 @@ fun NewConversationDialog(
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 6.dp,
             ) {
-                Column(
-                    // fillMaxSize (not wrap-content): the end-aligned Cancel
-                    // row below must measure against the real sheet width —
-                    // without this the row could overflow past the screen's
-                    // right edge (diagnosed 2026-10-18: "Cance" clipped).
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                ) {
-                    // Compact header — the search field sits near the top so
-                    // results are visible while typing.
-                    Text(
-                        "New message",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        placeholder = { Text("Name or number") },
-                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Text,
-                            imeAction = ImeAction.Search,
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onSearch = { keyboardController?.hide() },
-                        ),
-                        singleLine = true,
-                        shape = RoundedCornerShape(24.dp),
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    // Results list: fills everything below the search field,
-                    // compresses when the keyboard is up.
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
+                            .fillMaxSize()
+                            .padding(horizontal = 24.dp, vertical = 16.dp),
                     ) {
-                        if (showRawNumberRow) {
-                            item(key = "raw:$queryDigits") {
-                                RawNumberRow(
-                                    number = queryDigits,
-                                    onClick = { onStart(queryDigits) },
-                                )
-                            }
-                        }
-                        items(matches, key = { it.number }) { match ->
-                            ContactMatchRow(
-                                match = match,
-                                onClick = { onStart(match.number) },
-                            )
-                        }
-                        if (searching) {
-                            item(key = "searching") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 24.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    SevenShapeLoadingIndicator(
-                                        diameter = 32.dp,
-                                        color = MaterialTheme.colorScheme.primary,
+                        // Compact header — the search field sits near the top so
+                        // results are visible while typing.
+                        Text(
+                            "New message",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            placeholder = { Text("Name or number") },
+                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Search,
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onSearch = { keyboardController?.hide() },
+                            ),
+                            singleLine = true,
+                            shape = RoundedCornerShape(24.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        // Results list: full-height, scrolls BEHIND the
+                        // keyboard. Bottom content padding clears the
+                        // floating Cancel button so the last result is never
+                        // clipped underneath it.
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentPadding = PaddingValues(bottom = 88.dp),
+                        ) {
+                            if (showRawNumberRow) {
+                                item(key = "raw:$queryDigits") {
+                                    RawNumberRow(
+                                        number = queryDigits,
+                                        onClick = { onStart(queryDigits) },
                                     )
                                 }
                             }
-                        } else if (query.isNotBlank() && matches.isEmpty() && !showRawNumberRow) {
-                            item(key = "empty") {
-                                Text(
-                                    "No contacts match \"$query\"",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(vertical = 20.dp, horizontal = 4.dp),
+                            items(matches, key = { it.number }) { match ->
+                                ContactMatchRow(
+                                    match = match,
+                                    onClick = { onStart(match.number) },
                                 )
+                            }
+                            if (searching) {
+                                item(key = "searching") {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 24.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        SevenShapeLoadingIndicator(
+                                            diameter = 32.dp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                            } else if (query.isNotBlank() && matches.isEmpty() && !showRawNumberRow) {
+                                item(key = "empty") {
+                                    Text(
+                                        "No contacts match \"$query\"",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 20.dp, horizontal = 4.dp),
+                                    )
+                                }
                             }
                         }
                     }
+                    // Cancel floats above the keyboard (imePadding), pinned to
+                    // the bottom-end — reachable without compressing the list.
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .imePadding()
+                            .padding(end = 24.dp, bottom = 16.dp),
                     ) {
                         // Tonal button in a cookie shape — dialog actions are
                         // part of the shape family too, not default pills.

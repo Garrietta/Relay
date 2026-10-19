@@ -7,10 +7,10 @@ import com.garrietta.relay.rcs.net.RelayApi
 import com.garrietta.relay.rcs.net.postRpc
 import com.garrietta.relay.rcs.net.postRpcCancellable
 import com.garrietta.relay.rcs.proto.DeviceInfo
-import com.garrietta.relay.rcs.pblite.PValue
-import com.garrietta.relay.rcs.pblite.Pblite
-import com.garrietta.relay.rcs.pblite.msg
-import com.garrietta.relay.rcs.pblite.str
+import com.garrietta.relay.rcs.proto.FieldVal
+import com.garrietta.relay.rcs.proto.ProtoCodec
+import com.garrietta.relay.rcs.proto.firstMsg
+import com.garrietta.relay.rcs.proto.firstStr
 import com.garrietta.relay.rcs.proto.PollPayload
 import com.garrietta.relay.rcs.proto.RcsConversation
 import com.garrietta.relay.rcs.proto.RcsMessage
@@ -18,7 +18,6 @@ import com.garrietta.relay.rcs.proto.RcsParticipant
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
 import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
-import com.garrietta.relay.rcs.proto.msgArr
 import com.garrietta.relay.rcs.proto.UpdateEvent
 import com.garrietta.relay.rcs.proto.buildOutgoingRpcPblite
 import com.garrietta.relay.rcs.proto.decodeConversationsResponse
@@ -121,6 +120,53 @@ class RcsSession(context: Context) {
      */
     @Volatile private var pollLastError: String? = null
 
+    // ---------- transport diagnostics (Settings → Diagnostics) ----------
+    /** Last RPC action sent (Rpc.ACTION_*), for the Diagnostics screen. */
+    @Volatile private var lastRpcAction: Int? = null
+    /** Wall-clock ms when the last RPC was sent. 0 = none yet. */
+    @Volatile private var lastRpcTimeMs: Long = 0L
+    /** Wall-clock ms when the last correlated RPC response arrived. 0 = none yet. */
+    @Volatile private var lastResponseTimeMs: Long = 0L
+    /** Request id of the last correlated response (null = none yet). */
+    @Volatile private var lastResponseRequestId: String? = null
+
+    /**
+     * One-line transport state for the Diagnostics screen and verbose
+     * timeout errors: session running? long-poll alive? last RPC (action +
+     * age)? last response (age, correlated?)? last poll error?
+     */
+    fun diagnostics(): String {
+        val now = System.currentTimeMillis()
+        fun age(ms: Long) = if (ms <= 0) "never" else "${(now - ms) / 1000}s ago"
+        val pollState = when {
+            scope == null -> "not running"
+            pollReady.isCompleted -> "alive"
+            pollLastError != null -> "failed"
+            else -> "connecting"
+        }
+        return "session=${if (scope != null) "running" else "stopped"}, " +
+            "poll=$pollState, " +
+            "lastRpc=${lastRpcAction?.let { "${Rpc.actionName(it)}@${age(lastRpcTimeMs)}" } ?: "none"}, " +
+            "lastResponse=${lastResponseRequestId?.let { "correlated@${age(lastResponseTimeMs)}" } ?: "none"}, " +
+            "lastPollError=${pollLastError ?: "none"}"
+    }
+
+    /** True while the session coroutine scope is up. */
+    fun isSessionRunning(): Boolean = scope != null
+
+    /** True once the long-poll channel has been established. */
+    fun isPollAlive(): Boolean = scope != null && pollReady.isCompleted
+
+    /** Last long-poll failure detail, if any. */
+    fun lastPollError(): String? = pollLastError
+
+    /** Last RPC action sent (Rpc.ACTION_*), or null if none. */
+    fun lastRpc(): Pair<Int, Long>? = lastRpcAction?.let { it to lastRpcTimeMs }
+
+    /** Last correlated response (request id + arrival time), or null if none. */
+    fun lastResponse(): Pair<String, Long>? =
+        lastResponseRequestId?.let { it to lastResponseTimeMs }
+
     /**
      * Injects auth state without persisting (pairing handshake: the provisional
      * session lives in memory until CLIENT_FINISHED succeeds). Null clears it.
@@ -220,14 +266,26 @@ class RcsSession(context: Context) {
      * long-poll (correlated by requestID) or 60s elapse. Returns the inner
      * pblite response string.
      */
-    private suspend fun rpc(action: Int, payloadPblite: String): String {
+    /**
+     * Sends one encrypted RPC and awaits the correlated response as raw
+     * bytes.
+     *
+     * The sealed inner payload is BINARY protobuf (the reference
+     * proto.Marshals the request message before encrypting); the decrypted
+     * response bytes are returned raw for the caller to decode with
+     * ProtoCodec. Timeouts carry live session diagnostics so a failure on
+     * Garrett's device says exactly what was (not) happening.
+     */
+    private suspend fun rpc(action: Int, payloadProto: ByteArray): ByteArray {
         val a = currentAuth() ?: throw RcsException("not paired")
         val requestId = UUID.randomUUID().toString()
-        val sealed = RcsCrypto.seal(a.aesKey, a.hmacKey, payloadPblite.toByteArray(Charsets.UTF_8))
+        val sealed = RcsCrypto.seal(a.aesKey, a.hmacKey, payloadProto)
         val rpcData = encodeOutgoingRpcData(requestId, action, sealed, a.sessionId)
         val body = buildOutgoingRpcPblite(mobile, requestId, rpcData, a.tachyonToken, a.sessionId)
         val waiter = CompletableDeferred<ByteArray>()
         waiters[requestId] = waiter
+        lastRpcAction = action
+        lastRpcTimeMs = System.currentTimeMillis()
         try {
             // Cookie-authenticated sessions go to the Gaia host (reference:
             // makeProtobufHTTPRequest picks the Google host when HasCookies).
@@ -241,7 +299,14 @@ class RcsSession(context: Context) {
                 postRpc(rpcClient, RelayApi.PATH_SEND_MESSAGE, RelayApi.CT_PBLITE, body.toByteArray())
             }
             if (!res.isOk()) throw RcsException("uplink HTTP ${res.code}: ${res.text.take(200)}")
-            return withTimeout(60_000) { waiter.await().toString(Charsets.UTF_8) }
+            try {
+                return withTimeout(60_000) { waiter.await() }
+            } catch (e: TimeoutCancellationException) {
+                throw TimeoutCancellationException(
+                    "Timed out waiting for 60000 ms (${diagnostics()})",
+                    e,
+                )
+            }
         } finally {
             waiters.remove(requestId)
         }
@@ -527,12 +592,15 @@ class RcsSession(context: Context) {
                                 if (waiter != null) {
                                     Log.d(TAG, "response correlated: responseId=${msg.responseId} " +
                                             "rpcSessionId=${rpcData.sessionId}")
+                                    lastResponseRequestId = msg.responseId.ifEmpty { rpcData.sessionId }
+                                    lastResponseTimeMs = System.currentTimeMillis()
                                     waiter.complete(innerBytes)
                                     return
                                 }
-                                // Otherwise: push event (UpdateEvents).
-                                val inner = innerBytes.toString(Charsets.UTF_8)
-                                val update = runCatching { decodeUpdateEvents(decodePbliteMap(inner)) }.getOrNull()
+                                // Otherwise: push event (UpdateEvents, binary protobuf).
+                                val update = runCatching {
+                                    decodeUpdateEvents(ProtoCodec.decode(innerBytes))
+                                }.getOrNull()
                                 when (update) {
                                     is UpdateEvent.Messages -> update.messages.forEach { _incoming.emit(it) }
                                     is UpdateEvent.Conversations -> _events.emit(SessionEvent.ConversationsChanged(update.conversations))
@@ -550,8 +618,6 @@ class RcsSession(context: Context) {
             }
         }
     }
-
-    private fun decodePbliteMap(text: String): Map<Int, PValue> = Pblite.decode(text)
 
     // ---------- ack loop (decoupled; 5s ticker + threshold flush) ----------
 
@@ -605,16 +671,15 @@ class RcsSession(context: Context) {
 }
 
 /** Minimal pblite for GetOrCreateConversation{2:[ContactNumber{2:number}]}. */
-private fun encodeGetOrCreateConversation(number: String): String {
-    val contactNumber = msgArr(2 to PValue.Str(number))
-    return Pblite.encode(mapOf(2 to PValue.Arr(listOf(contactNumber))))
+private fun encodeGetOrCreateConversation(number: String): ByteArray {
+    val contactNumber = FieldVal.Msg(mapOf(2 to FieldVal.Str(number)))
+    return ProtoCodec.encode(mapOf(2 to FieldVal.Rep(listOf(contactNumber))))
 }
 
-private fun decodeGetOrCreateConversation(inner: String): String? {
+private fun decodeGetOrCreateConversation(inner: ByteArray): String? {
     // GetOrCreateConversationResponse{2: Conversation{1: conversationID}}
-    val m = com.garrietta.relay.rcs.pblite.Pblite.decode(inner)
-    val conv = m.msg(2) ?: return null
-    return conv.str(1)
+    val m = ProtoCodec.decode(inner)
+    return m.firstMsg(2)?.firstStr(1)
 }
 
 sealed interface SessionEvent {

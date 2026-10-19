@@ -62,4 +62,11 @@ class SettingsViewModel(
         }
         runCatching { context.startActivity(intent) }
     }
+
+    /**
+     * Live RCS transport state for the Diagnostics card. Polled (not a
+     * Flow) — the screen refreshes it on a short ticker while visible.
+     */
+    fun transportDiagnostics(): String =
+        repository.rcsTransport.transportDiagnostics()
 }

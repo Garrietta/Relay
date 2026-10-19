@@ -85,6 +85,17 @@ class RcsTransport(context: Context) : Transport {
     /** Last-good server conversation list — the paired inbox's source. */
     fun currentRcsConversations(): List<RcsConversation> = _rcsConversations.value
 
+    /**
+     * Live transport state for Settings → Diagnostics: session running?
+     * long-poll alive? last RPC (action + age)? last response (age,
+     * correlated?)? last poll error? — so a sync failure on Garrett's
+     * device can be diagnosed without logcat.
+     */
+    fun transportDiagnostics(): String {
+        val pairing = _pairingState.value
+        return "pairing=$pairing, ${session.diagnostics()}"
+    }
+
     /** Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim. */
     suspend fun refreshConversations() {
         try {

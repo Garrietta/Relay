@@ -40,6 +40,18 @@ object Rpc {
 
     // conversations.ConversationType
     const val CONV_TYPE_RCS = 2
+
+    /** Human-readable action name for diagnostics. */
+    fun actionName(action: Int): String = when (action) {
+        ACTION_LIST_CONVERSATIONS -> "LIST_CONVERSATIONS"
+        ACTION_LIST_MESSAGES -> "LIST_MESSAGES"
+        ACTION_SEND_MESSAGE -> "SEND_MESSAGE"
+        ACTION_GET_OR_CREATE_CONVERSATION -> "GET_OR_CREATE_CONVERSATION"
+        ACTION_MESSAGE_READ -> "MESSAGE_READ"
+        ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT -> "GAIA_CLIENT_INIT"
+        ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED -> "GAIA_CLIENT_FINISHED"
+        else -> "ACTION_$action"
+    }
 }
 
 /** Builds a positional pblite array node from field-number → value pairs. */
@@ -81,14 +93,14 @@ data class RcsParticipant(
     val isMe: Boolean,
 )
 
-fun decodeRcsParticipant(m: Map<Int, PValue>): RcsParticipant {
-    val id = m.msg(1)
+fun decodeRcsParticipant(m: Map<Int, List<FieldVal>>): RcsParticipant {
+    val id = m.firstMsg(1)
     return RcsParticipant(
-        participantId = id?.str(3).orEmpty(),
-        number = id?.str(2).orEmpty(),
-        firstName = m.str(2).orEmpty(),
-        fullName = m.str(3).orEmpty(),
-        isMe = m.bool(6) ?: false,
+        participantId = id?.firstStr(3).orEmpty(),
+        number = id?.firstStr(2).orEmpty(),
+        firstName = m.firstStr(2).orEmpty(),
+        fullName = m.firstStr(3).orEmpty(),
+        isMe = m.firstBool(6) ?: false,
     )
 }
 
@@ -251,18 +263,36 @@ fun encodeOutgoingRpcDataUnencrypted(
     ),
 )
 
-// ---------- action payloads (pblite request bodies, sealed before sending) ----------
-
-/** client.ListConversationsRequest{2:count, 4:folder} as pblite (pre-encryption). */
-fun encodeListConversationsRequest(count: Long, folder: Int = Rpc.FOLDER_INBOX): String =
-    Pblite.encode(mapOf(2 to PValue.Num(count), 4 to PValue.Num(folder.toLong())))
-
-/** client.ListMessagesRequest{2:conversationID, 3:count} as pblite. */
-fun encodeListMessagesRequest(conversationId: String, count: Long): String =
-    Pblite.encode(mapOf(2 to PValue.Str(conversationId), 3 to PValue.Num(count)))
+// ---------- action payloads (binary protobuf request bodies, sealed before sending) ----------
 
 /**
- * client.SendMessageRequest{2:conversationID, 3:messagePayload, 5:tmpID, 6:forceRCS}.
+ * client.ListConversationsRequest{2:count, 4:folder} as BINARY protobuf.
+ *
+ * The reference proto.Marshals the request message before encrypting — the
+ * sealed inner payload is binary protobuf, NOT pblite JSON. We shipped
+ * pblite-JSON inners; the server couldn't parse them and never responded
+ * (the 60s "Conversations sync failed" timeout, diagnosed 2026-10-18).
+ */
+fun encodeListConversationsRequest(count: Long, folder: Int = Rpc.FOLDER_INBOX): ByteArray =
+    ProtoCodec.encode(
+        mapOf(
+            2 to FieldVal.Varint(count),
+            4 to FieldVal.Varint(folder.toLong()),
+        ),
+    )
+
+/** client.ListMessagesRequest{2:conversationID, 3:count} as binary protobuf. */
+fun encodeListMessagesRequest(conversationId: String, count: Long): ByteArray =
+    ProtoCodec.encode(
+        mapOf(
+            2 to FieldVal.Str(conversationId),
+            3 to FieldVal.Varint(count),
+        ),
+    )
+
+/**
+ * client.SendMessageRequest{2:conversationID, 3:messagePayload, 5:tmpID, 6:forceRCS}
+ * as binary protobuf.
  * messagePayload = MessagePayload{1:tmpID, 6:content{1:MessageContent{1:text}},
  * 7:conversationID, 10:[MessageInfo{2:MessageContent{1:text}}]}.
  */
@@ -271,28 +301,32 @@ fun encodeSendMessageRequest(
     tmpId: String,
     text: String,
     forceRcs: Boolean = true,
-): String {
-    val content = msgArr(1 to PValue.Str(text))
-    val messageInfo = PValue.Arr(listOf(msgArr(2 to content)))
-    val payload = msgArr(
-        1 to PValue.Str(tmpId),
-        6 to msgArr(1 to content),
-        7 to PValue.Str(conversationId),
-        10 to messageInfo,
+): ByteArray {
+    val content = mapOf(1 to FieldVal.Str(text))
+    val payload = mapOf(
+        1 to FieldVal.Str(tmpId),
+        6 to FieldVal.Msg(mapOf(1 to FieldVal.Msg(content))),
+        7 to FieldVal.Str(conversationId),
+        10 to FieldVal.Rep(listOf(FieldVal.Msg(mapOf(2 to FieldVal.Msg(content))))),
     )
-    return Pblite.encode(
+    return ProtoCodec.encode(
         mapOf(
-            2 to PValue.Str(conversationId),
-            3 to payload,
-            5 to PValue.Str(tmpId),
-            6 to PValue.Bool(forceRcs),
+            2 to FieldVal.Str(conversationId),
+            3 to FieldVal.Msg(payload),
+            5 to FieldVal.Str(tmpId),
+            6 to FieldVal.Varint(if (forceRcs) 1 else 0),
         ),
     )
 }
 
-/** client.MessageReadRequest{2:conversationID, 3:messageID} as pblite. */
-fun encodeMessageReadRequest(conversationId: String, messageId: String): String =
-    Pblite.encode(mapOf(2 to PValue.Str(conversationId), 3 to PValue.Str(messageId)))
+/** client.MessageReadRequest{2:conversationID, 3:messageID} as binary protobuf. */
+fun encodeMessageReadRequest(conversationId: String, messageId: String): ByteArray =
+    ProtoCodec.encode(
+        mapOf(
+            2 to FieldVal.Str(conversationId),
+            3 to FieldVal.Str(messageId),
+        ),
+    )
 
 /** client.ReceiveMessagesRequest{1:auth, 4:unknown} as pblite (long-poll). */
 fun encodeReceiveMessagesRequest(requestId: String, tachyonToken: ByteArray): String {
@@ -433,30 +467,49 @@ fun isWeirdPreResponse(rpcData: RpcMessageData, hasCookies: Boolean): Boolean =
         rpcData.encryptedData == null &&
         rpcData.unencryptedData != null
 
-// ---------- conversations & messages (decode) ----------
+// ---------- conversations & messages (decode, binary protobuf) ----------
 
-private fun decodeMessageInfo(m: Map<Int, PValue>): String? {
+/** Repeated nested messages at field [n]. */
+fun Map<Int, List<FieldVal>>.repMsgs(n: Int): List<Map<Int, List<FieldVal>>> =
+    this[n]?.mapNotNull { (it as? FieldVal.Bytes)?.let { b -> ProtoCodec.decode(b.v) } }
+        ?: emptyList()
+
+/** Repeated strings at field [n]. */
+fun Map<Int, List<FieldVal>>.repStrs(n: Int): List<String> =
+    this[n]?.mapNotNull {
+        when (it) {
+            is FieldVal.Str -> it.v
+            is FieldVal.Bytes -> it.v.toString(Charsets.UTF_8)
+            else -> null
+        }
+    } ?: emptyList()
+
+/** Bool (varint 0/1) at field [n]. */
+fun Map<Int, List<FieldVal>>.firstBool(n: Int): Boolean? =
+    (this[n]?.firstOrNull() as? FieldVal.Varint)?.v?.let { it != 0L }
+
+private fun decodeMessageInfo(m: Map<Int, List<FieldVal>>): String? {
     // MessageInfo oneof{2:messageContent, 3:mediaContent, 5:locationContent}
-    m.msg(2)?.str(1)?.let { return it }
+    m.firstMsg(2)?.firstStr(1)?.let { return it }
     return null
 }
 
 fun decodeRcsMessage(
-    m: Map<Int, PValue>,
+    m: Map<Int, List<FieldVal>>,
     participants: List<RcsParticipant> = emptyList(),
     fallbackFromMe: Boolean = false,
 ): RcsMessage {
-    val infos = m.rep(10).mapNotNull { (it as? PValue.Arr)?.asMsg()?.let(::decodeMessageInfo) }
+    val infos = m.repMsgs(10).mapNotNull(::decodeMessageInfo)
     return RcsMessage(
-        id = m.str(1).orEmpty(),
-        conversationId = m.str(7).orEmpty(),
+        id = m.firstStr(1).orEmpty(),
+        conversationId = m.firstStr(7).orEmpty(),
         body = infos.firstOrNull().orEmpty(),
-        timestampMs = m.num(5) ?: 0L,
+        timestampMs = m.firstVarint(5) ?: 0L,
         fromMe = resolveFromMe(m, participants, fallbackFromMe),
-        status = m.msg(4)?.num(2)?.toInt() ?: 0,
-        tmpId = m.str(12).orEmpty(),
-        participantId = m.str(9).orEmpty(),
-        msgTransportType = m.num(11)?.toInt() ?: 0,
+        status = m.firstMsg(4)?.firstVarint(2)?.toInt() ?: 0,
+        tmpId = m.firstStr(12).orEmpty(),
+        participantId = m.firstStr(9).orEmpty(),
+        msgTransportType = m.firstVarint(11)?.toInt() ?: 0,
     )
 }
 
@@ -469,26 +522,25 @@ fun decodeRcsMessage(
  * (108=delivered, 109=displayed).
  */
 fun resolveFromMe(
-    m: Map<Int, PValue>,
+    m: Map<Int, List<FieldVal>>,
     participants: List<RcsParticipant>,
     fallback: Boolean,
 ): Boolean {
-    val pid = m.str(9)
+    val pid = m.firstStr(9)
     if (!pid.isNullOrEmpty()) {
         participants.firstOrNull { it.participantId == pid }?.let { return it.isMe }
     }
-    val status = m.msg(4)?.num(2)?.toInt() ?: 0
+    val status = m.firstMsg(4)?.firstVarint(2)?.toInt() ?: 0
     if (status != 0) return status < 100
     return fallback
 }
 
 /** events.MessageEvent{2:[Message]} → messages. */
 fun decodeMessageEvent(
-    m: Map<Int, PValue>,
+    m: Map<Int, List<FieldVal>>,
     participants: List<RcsParticipant> = emptyList(),
 ): List<RcsMessage> =
-    m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }
-        .map { decodeRcsMessage(it, participants) }
+    m.repMsgs(2).map { decodeRcsMessage(it, participants) }
 
 /** events.UpdateEvents oneof{2:conversationEvent, 3:messageEvent, 4:typingEvent}. */
 sealed interface UpdateEvent {
@@ -498,57 +550,52 @@ sealed interface UpdateEvent {
     data object Other : UpdateEvent
 }
 
-fun decodeUpdateEvents(m: Map<Int, PValue>): UpdateEvent {
-    m.msg(3)?.let { return UpdateEvent.Messages(decodeMessageEvent(it)) }
-    m.msg(2)?.let { ce ->
-        return UpdateEvent.Conversations(
-            ce.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }.map(::decodeConversation),
-        )
+fun decodeUpdateEvents(m: Map<Int, List<FieldVal>>): UpdateEvent {
+    m.firstMsg(3)?.let { return UpdateEvent.Messages(decodeMessageEvent(it)) }
+    m.firstMsg(2)?.let { ce ->
+        return UpdateEvent.Conversations(ce.repMsgs(2).map(::decodeConversation))
     }
-    m.msg(4)?.let { te ->
-        val d = te.msg(2)
+    m.firstMsg(4)?.let { te ->
+        val d = te.firstMsg(2)
         return UpdateEvent.Typing(
-            conversationId = d?.str(1).orEmpty(),
-            typing = d?.num(3)?.toInt() == 1,
+            conversationId = d?.firstStr(1).orEmpty(),
+            typing = d?.firstVarint(3)?.toInt() == 1,
         )
     }
     return UpdateEvent.Other
 }
 
-fun decodeConversation(m: Map<Int, PValue>): RcsConversation {
-    val latest = m.msg(4)
+fun decodeConversation(m: Map<Int, List<FieldVal>>): RcsConversation {
+    val latest = m.firstMsg(4)
     return RcsConversation(
-        id = m.str(1).orEmpty(),
-        name = m.str(2).orEmpty(),
-        snippet = latest?.str(1).orEmpty(),
-        timestampMs = m.num(5) ?: 0L,
-        unread = m.bool(6) ?: false,
-        isGroup = m.bool(10) ?: false,
-        type = m.num(22)?.toInt() ?: 0,
-        pinned = m.bool(26) ?: false,
-        participants = m.rep(20)
-            .mapNotNull { (it as? PValue.Arr)?.asMsg() }
-            .map(::decodeRcsParticipant),
-        otherParticipantIds = m.rep(21).mapNotNull { (it as? PValue.Str)?.v },
+        id = m.firstStr(1).orEmpty(),
+        name = m.firstStr(2).orEmpty(),
+        snippet = latest?.firstStr(1).orEmpty(),
+        timestampMs = m.firstVarint(5) ?: 0L,
+        unread = m.firstBool(6) ?: false,
+        isGroup = m.firstBool(10) ?: false,
+        type = m.firstVarint(22)?.toInt() ?: 0,
+        pinned = m.firstBool(26) ?: false,
+        participants = m.repMsgs(20).map(::decodeRcsParticipant),
+        otherParticipantIds = m.repStrs(21),
     )
 }
 
 /** client.ListConversationsResponse{2:[Conversation], 5:cursor?} → conversations. */
-fun decodeConversationsResponse(pbliteBody: String): List<RcsConversation> {
-    val m = Pblite.decode(pbliteBody)
-    return m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }.map(::decodeConversation)
+fun decodeConversationsResponse(bytes: ByteArray): List<RcsConversation> {
+    val m = ProtoCodec.decode(bytes)
+    return m.repMsgs(2).map(::decodeConversation)
 }
 
 /** client.ListMessagesResponse{2:[Message]} → messages. */
 fun decodeMessagesResponse(
-    pbliteBody: String,
+    bytes: ByteArray,
     participants: List<RcsParticipant> = emptyList(),
 ): List<RcsMessage> {
-    val m = Pblite.decode(pbliteBody)
-    return m.rep(2).mapNotNull { (it as? PValue.Arr)?.asMsg() }
-        .map { decodeRcsMessage(it, participants) }
+    val m = ProtoCodec.decode(bytes)
+    return m.repMsgs(2).map { decodeRcsMessage(it, participants) }
 }
 
 /** client.SendMessageResponse{3:status}. */
-fun decodeSendMessageStatus(pbliteBody: String): Int =
-    Pblite.decode(pbliteBody).num(3)?.toInt() ?: 0
+fun decodeSendMessageStatus(bytes: ByteArray): Int =
+    ProtoCodec.decode(bytes).firstVarint(3)?.toInt() ?: 0

@@ -13,27 +13,57 @@ import org.junit.Test
 
 class RpcModelsTest {
 
-    @Test fun `list conversations request encodes`() {
-        assertEquals("[null,20,null,1]", encodeListConversationsRequest(20))
+    /** Builds a binary-protobuf message node from field-number → value pairs. */
+    private fun bmsg(vararg fields: Pair<Int, FieldVal>): ByteArray =
+        ProtoCodec.encode(mapOf(*fields))
+
+    @Test fun `list conversations request encodes as binary protobuf`() {
+        val bytes = encodeListConversationsRequest(20)
+        val m = ProtoCodec.decode(bytes)
+        assertEquals(20L, m.firstVarint(2))
+        assertEquals(Rpc.FOLDER_INBOX.toLong(), m.firstVarint(4))
+    }
+
+    @Test fun `list conversations request round-trips through decode`() {
+        // The sealed inner must be binary protobuf, not pblite JSON: the
+        // reference proto.Marshals the request, and pblite-JSON inners got
+        // no server response (60s sync timeout, diagnosed 2026-10-18).
+        val bytes = encodeListConversationsRequest(20)
+        assertTrue(!String(bytes, Charsets.UTF_8).startsWith("["))
     }
 
     @Test fun `send message request shape`() {
         val body = encodeSendMessageRequest("conv1", "tmp-1", "hello", true)
-        val m = Pblite.decode(body)
-        assertEquals("conv1", m.str(2))
-        assertEquals("tmp-1", m.str(5))
-        val payload = m.msg(3)!!
-        assertEquals("tmp-1", payload.str(1))
-        assertEquals("conv1", payload.str(7))
+        val m = ProtoCodec.decode(body)
+        assertEquals("conv1", m.firstStr(2))
+        assertEquals("tmp-1", m.firstStr(5))
+        val payload = m.firstMsg(3)!!
+        assertEquals("tmp-1", payload.firstStr(1))
+        assertEquals("conv1", payload.firstStr(7))
+        assertEquals(1L, m.firstVarint(6))
     }
 
     @Test fun `send message request messageInfo decodes to text`() {
         val body = encodeSendMessageRequest("conv1", "tmp-1", "hello", true)
-        val payload = Pblite.decode(body).msg(3)!!
-        val infos = ((payload.entries.first { it.key == 10 }.value) as PValue.Arr).asList()
+        val payload = ProtoCodec.decode(body).firstMsg(3)!!
+        val infos = payload.repMsgs(10)
         assertEquals(1, infos.size)
-        val info = (infos[0] as PValue.Arr).asMsg()
-        assertEquals("hello", info.msg(2)!!.str(1))
+        assertEquals("hello", infos[0].firstMsg(2)!!.firstStr(1))
+    }
+
+    @Test fun `conversations response decodes from binary`() {
+        val conv = bmsg(
+            1 to FieldVal.Str("c1"),
+            2 to FieldVal.Str("Alice"),
+            5 to FieldVal.Varint(1700000000000L),
+            6 to FieldVal.Varint(1),
+        )
+        val body = ProtoCodec.encode(mapOf(2 to FieldVal.Rep(listOf(FieldVal.Bytes(conv)))))
+        val list = decodeConversationsResponse(body)
+        assertEquals(1, list.size)
+        assertEquals("c1", list[0].id)
+        assertEquals("Alice", list[0].name)
+        assertEquals(true, list[0].unread)
     }
 
     @Test fun `outgoing envelope has expected top-level fields`() {
@@ -68,15 +98,16 @@ class RpcModelsTest {
 
     @Test fun `message event decodes messages`() {
         // UpdateEvents{3: MessageEvent{2: [Message{1:id, 5:ts, 7:conv, 10:[MessageInfo{2:Content{1:text}}], 12:tmp}]}}
-        val msg = msgArr(
-            1 to PValue.Str("m1"),
-            5 to PValue.Num(1700000000000L),
-            7 to PValue.Str("c1"),
-            10 to PValue.Arr(listOf(msgArr(2 to msgArr(1 to PValue.Str("hi there"))))),
-            12 to PValue.Str("tmp-9"),
+        val content = bmsg(1 to FieldVal.Str("hi there"))
+        val msg = bmsg(
+            1 to FieldVal.Str("m1"),
+            5 to FieldVal.Varint(1700000000000L),
+            7 to FieldVal.Str("c1"),
+            10 to FieldVal.Rep(listOf(FieldVal.Bytes(bmsg(2 to FieldVal.Bytes(content))))),
+            12 to FieldVal.Str("tmp-9"),
         )
-        val body = Pblite.encode(mapOf(3 to msgArr(2 to PValue.Arr(listOf(msg)))))
-        val ev = decodeUpdateEvents(Pblite.decode(body))
+        val body = bmsg(3 to FieldVal.Bytes(bmsg(2 to FieldVal.Rep(listOf(FieldVal.Bytes(msg))))))
+        val ev = decodeUpdateEvents(ProtoCodec.decode(body))
         val msgs = (ev as UpdateEvent.Messages).messages
         assertEquals(1, msgs.size)
         assertEquals("hi there", msgs[0].body)
@@ -85,15 +116,15 @@ class RpcModelsTest {
     }
 
     @Test fun `conversation decodes`() {
-        val conv = msgArr(
-            1 to PValue.Str("c1"),
-            2 to PValue.Str("Alice"),
-            4 to msgArr(1 to PValue.Str("see you"), 2 to PValue.Num(1)),
-            5 to PValue.Num(1700000000000L),
-            6 to PValue.Bool(true),
-            22 to PValue.Num(2),
+        val conv = bmsg(
+            1 to FieldVal.Str("c1"),
+            2 to FieldVal.Str("Alice"),
+            4 to FieldVal.Bytes(bmsg(1 to FieldVal.Str("see you"), 2 to FieldVal.Varint(1))),
+            5 to FieldVal.Varint(1700000000000L),
+            6 to FieldVal.Varint(1),
+            22 to FieldVal.Varint(2),
         )
-        val c = decodeConversation(conv.asMsg())
+        val c = decodeConversation(ProtoCodec.decode(conv))
         assertEquals("Alice", c.name)
         assertEquals("see you", c.snippet)
         assertEquals(true, c.unread)
@@ -112,28 +143,28 @@ class RpcModelsTest {
 
     // ---------- participant parsing (field 20/21) ----------
 
-    private fun participantArr(pid: String, number: String, name: String, isMe: Boolean) =
-        msgArr(
-            1 to msgArr(2 to PValue.Str(number), 3 to PValue.Str(pid)),
-            2 to PValue.Str(name),
-            3 to PValue.Str(name),
-            6 to PValue.Bool(isMe),
+    private fun participantBytes(pid: String, number: String, name: String, isMe: Boolean) =
+        bmsg(
+            1 to FieldVal.Bytes(bmsg(2 to FieldVal.Str(number), 3 to FieldVal.Str(pid))),
+            2 to FieldVal.Str(name),
+            3 to FieldVal.Str(name),
+            6 to FieldVal.Varint(if (isMe) 1 else 0),
         )
 
     @Test fun `conversation decodes participants and otherParticipantIds`() {
-        val conv = msgArr(
-            1 to PValue.Str("c1"),
-            2 to PValue.Str("Alice, Bob"),
-            10 to PValue.Bool(true),
-            20 to PValue.Arr(
+        val conv = bmsg(
+            1 to FieldVal.Str("c1"),
+            2 to FieldVal.Str("Alice, Bob"),
+            10 to FieldVal.Varint(1),
+            20 to FieldVal.Rep(
                 listOf(
-                    participantArr("p-me", "+15550001111", "Me", true),
-                    participantArr("p-alice", "+15550002222", "Alice", false),
+                    FieldVal.Bytes(participantBytes("p-me", "+15550001111", "Me", true)),
+                    FieldVal.Bytes(participantBytes("p-alice", "+15550002222", "Alice", false)),
                 )
             ),
-            21 to PValue.Arr(listOf(PValue.Str("p-alice"))),
+            21 to FieldVal.Rep(listOf(FieldVal.Str("p-alice"))),
         )
-        val c = decodeConversation(conv.asMsg())
+        val c = decodeConversation(ProtoCodec.decode(conv))
         assertEquals(2, c.participants.size)
         val alice = c.participants.first { it.participantId == "p-alice" }
         assertEquals("+15550002222", alice.number)
@@ -148,29 +179,29 @@ class RpcModelsTest {
             RcsParticipant("p-me", "+15550001111", "Me", "Me", true),
             RcsParticipant("p-alice", "+15550002222", "Alice", "Alice", false),
         )
-        val mine = msgArr(1 to PValue.Str("m1"), 9 to PValue.Str("p-me"))
-        val theirs = msgArr(1 to PValue.Str("m2"), 9 to PValue.Str("p-alice"))
-        assertEquals(true, decodeRcsMessage(mine.asMsg(), parts).fromMe)
-        assertEquals(false, decodeRcsMessage(theirs.asMsg(), parts).fromMe)
+        val mine = bmsg(1 to FieldVal.Str("m1"), 9 to FieldVal.Str("p-me"))
+        val theirs = bmsg(1 to FieldVal.Str("m2"), 9 to FieldVal.Str("p-alice"))
+        assertEquals(true, decodeRcsMessage(ProtoCodec.decode(mine), parts).fromMe)
+        assertEquals(false, decodeRcsMessage(ProtoCodec.decode(theirs), parts).fromMe)
     }
 
     @Test fun `message direction falls back to status code`() {
         // No participants (push path): OUTGOING_* (<100) = mine, INCOMING_* (>=100) = theirs.
-        val out = msgArr(1 to PValue.Str("m1"), 4 to msgArr(2 to PValue.Num(2)))
-        val inc = msgArr(1 to PValue.Str("m2"), 4 to msgArr(2 to PValue.Num(108)))
-        val unk = msgArr(1 to PValue.Str("m3"))
-        assertEquals(true, decodeRcsMessage(out.asMsg()).fromMe)
-        assertEquals(false, decodeRcsMessage(inc.asMsg()).fromMe)
-        assertEquals(false, decodeRcsMessage(unk.asMsg()).fromMe)
+        val out = bmsg(1 to FieldVal.Str("m1"), 4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(2))))
+        val inc = bmsg(1 to FieldVal.Str("m2"), 4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(108))))
+        val unk = bmsg(1 to FieldVal.Str("m3"))
+        assertEquals(true, decodeRcsMessage(ProtoCodec.decode(out)).fromMe)
+        assertEquals(false, decodeRcsMessage(ProtoCodec.decode(inc)).fromMe)
+        assertEquals(false, decodeRcsMessage(ProtoCodec.decode(unk)).fromMe)
     }
 
     @Test fun `message decodes participantId and transport type`() {
-        val m = msgArr(
-            1 to PValue.Str("m1"),
-            9 to PValue.Str("p-alice"),
-            11 to PValue.Num(4),
+        val m = bmsg(
+            1 to FieldVal.Str("m1"),
+            9 to FieldVal.Str("p-alice"),
+            11 to FieldVal.Varint(4),
         )
-        val decoded = decodeRcsMessage(m.asMsg())
+        val decoded = decodeRcsMessage(ProtoCodec.decode(m))
         assertEquals("p-alice", decoded.participantId)
         assertEquals(4, decoded.msgTransportType)
     }

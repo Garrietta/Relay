@@ -116,6 +116,20 @@ class RcsTransport(context: Context) : Transport {
     private val renditionSizeMismatch = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
+     * Downloads rejected by the splice guards (Garrett 2026-10-20: a
+     * photo in the Haley chat still rendered corrupt). A resume answered
+     * from a different rendition of the same mediaId — or at a drifting
+     * offset — concatenates two different encrypted streams; at a chunk
+     * boundary every 64 KiB chunk still authenticates (AAD binds the
+     * chunk INDEX, which a same-geometry rendition shares), so GCM alone
+     * cannot see the splice and the band-spliced image renders. The
+     * guards: Content-Range start/total verification on 206, resumed
+     * size must equal the declared size, and the decoded image must
+     * consume its byte stream exactly (isSingleCompleteImage).
+     */
+    private val splicesRejected = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
      * Remote typing state (Garrett 2026-10-19): the paired web protocol
      * delivers `UpdateEvents.typingEvent` on the long-poll — the wire
      * carries it, but nothing consumed it until now. Emitted as
@@ -140,7 +154,8 @@ class RcsTransport(context: Context) : Transport {
         val pairing = _pairingState.value
         return "pairing=$pairing, ${session.diagnostics()}, " +
             "noDownloadIdImages=${noDownloadIdImages.get()}, " +
-            "renditionSizeMismatch=${renditionSizeMismatch.get()}, ${ghostScanDiagnostics()}"
+            "renditionSizeMismatch=${renditionSizeMismatch.get()}, " +
+            "splicesRejected=${splicesRejected.get()}, ${ghostScanDiagnostics()}"
     }
 
     /** Tachyon token expiry (epoch ms) for Diagnostics; null when not paired. */
@@ -810,8 +825,10 @@ class RcsTransport(context: Context) : Transport {
      * When a mediaId exists we ALWAYS download the authoritative bytes;
      * the inline thumbnail is used only when there is nothing to download.
      *
-     * Corruption guards (2026-10-19): the cache is versioned (v3) so stale
-     * bytes from earlier builds are never served; every byte payload —
+     * Corruption guards (2026-10-19): the cache is versioned (v4 since the
+     * 2026-10-20 splice round — v3 bytes were accepted under rules that
+     * could not see a rendition splice, so they are never served again);
+     * every byte payload —
      * cached, downloaded, or inline — must pass the image magic check when
      * the attachment claims to be an image; downloaded payloads must FULLY
      * DECODE (not just pass the magic sniff — a valid header over garbage
@@ -889,6 +906,9 @@ class RcsTransport(context: Context) : Transport {
                 }
                 if (!hasIntactImageTrailer(inline)) {
                     throw IllegalStateException("media unavailable: inline image is truncated")
+                }
+                if (!isSingleCompleteImage(inline)) {
+                    throw IllegalStateException("media unavailable: inline bytes are not a single complete image")
                 }
                 if (!hasSaneImageDimensions(inline)) {
                     throw IllegalStateException("media unavailable: inline image dimensions unusable")
@@ -997,12 +1017,11 @@ class RcsTransport(context: Context) : Transport {
             ?: throw IllegalStateException(
                 "media unavailable: upload returned no media ID (${respText.take(200)})",
             )
-        // Seed the v3 download cache with the plaintext: the server echo
+        // Seed the v4 download cache with the plaintext: the server echo
         // of this message carries the same mediaId, and MediaBubble renders
         // it from cache instantly instead of re-downloading our own upload.
-        val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v3")
-        cacheDir.mkdirs()
-        java.io.File(cacheDir, mediaId.sanitizeFileName()).writeBytes(bytes)
+        val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v4")
+        writeCacheAtomically(java.io.File(cacheDir, mediaId.sanitizeFileName()), bytes)
         UploadedMediaRef(
             mediaId = mediaId,
             decryptionKey = key,
@@ -1093,6 +1112,21 @@ class RcsTransport(context: Context) : Transport {
      * resumed; 200 = server ignored Range (fresh full body must then be
      * complete); 416 = resume rejected (fail retryable). Anything else
      * follows the existing transient/deterministic split.
+     *
+     * SPLICE GUARD (Garrett 2026-10-20): the append is no longer blind.
+     * The server picks a rendition per request (Build #130 evidence: one
+     * mediaId serving 614 KB and ~3.1 MB variants), so the resume can be
+     * answered from a DIFFERENT rendition than the truncated GET — and
+     * because the wire chunks are 64 KiB and each authenticates under an
+     * AAD of (index, last-flag) that a same-key rendition shares,
+     * prefix-of-A + tail-of-B decrypts cleanly and renders as a
+     * band-spliced corrupt photo. So: a 206 must carry a Content-Range
+     * whose start is EXACTLY the requested offset, and the assembled
+     * total must equal the range total when one is declared. The caller
+     * adds a second layer: a resumed wire must equal the declared size
+     * when one is known (see downloadValidatedById). An unverifiable or
+     * mismatched resume throws retryable — the retry loop then fetches
+     * ONE whole rendition in a single body, which cannot splice.
      */
     private fun resumeDownload(
         baseReq: okhttp3.Request,
@@ -1107,12 +1141,33 @@ class RcsTransport(context: Context) : Transport {
         mediaHttpClient().newCall(req).execute().use { resp ->
             when {
                 resp.code == 206 -> {
+                    val range = parseContentRange(resp.header("Content-Range"))
+                    if (!resumeOffsetAcceptable(range, partial.size.toLong())) {
+                        splicesRejected.incrementAndGet()
+                        throw RetryableMediaException(
+                            "media unavailable: resume offset mismatch " +
+                                "(range starts at ${range?.start}, expected ${partial.size})",
+                        )
+                    }
                     val rest = readBodyFully(resp.body!!)
-                    return partial + rest
+                    val assembled = partial + rest
+                    if (!resumeTotalAcceptable(range, assembled.size.toLong())) {
+                        splicesRejected.incrementAndGet()
+                        throw RetryableMediaException(
+                            "media unavailable: resumed size ${assembled.size} " +
+                                "!= range total ${range?.total}",
+                        )
+                    }
+                    return assembled
                 }
                 resp.isSuccessful -> {
+                    // 200: the server ignored Range and sent a fresh full
+                    // body. It replaces the partial wholesale (never
+                    // appends), and readBodyFully has already proven it
+                    // matches its own declared length — accept only if it
+                    // is at least the partial we already hold.
                     val fresh = readBodyFully(resp.body!!)
-                    if (fresh.size >= partial.size) return fresh
+                    if (resumeFreshBodyAcceptable(fresh.size, partial.size)) return fresh
                     throw RetryableMediaException(
                         "media unavailable: server serves short body (got ${fresh.size} bytes)",
                     )
@@ -1141,7 +1196,7 @@ class RcsTransport(context: Context) : Transport {
         isImage: Boolean,
     ): ByteArray {
         return withContext(Dispatchers.IO) {
-            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v3")
+            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v4")
             val cacheFile = java.io.File(cacheDir, id.sanitizeFileName())
             if (cacheFile.exists()) {
                 val cached = cacheFile.readBytes()
@@ -1181,6 +1236,7 @@ class RcsTransport(context: Context) : Transport {
                     .header("sec-fetch-mode", "cors")
                     .header("sec-fetch-dest", "empty")
                     .build()
+                var usedResume = false
                 val encrypted = try {
                     mediaHttpClient().newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) {
@@ -1196,6 +1252,7 @@ class RcsTransport(context: Context) : Transport {
                 } catch (e: TruncatedBodyException) {
                     // The stream died mid-body: resume from the partial
                     // bytes instead of re-downloading from zero.
+                    usedResume = true
                     resumeDownload(req, e.partial)
                 }
                 // Wire-integrity accounting (deep-dive 2026-10-19): parse the
@@ -1206,6 +1263,20 @@ class RcsTransport(context: Context) : Transport {
                 val wireChunk = 1 shl (encrypted[1].toInt() and 0xFF)
                 if (wireChunk <= 28) {
                     throw IllegalStateException("media unavailable: bad media chunk size")
+                }
+                // SPLICE GUARD, second layer (Garrett 2026-10-20): a
+                // RESUMED wire must land exactly on the declared size when
+                // one is known. A different total means the two halves
+                // came from different renditions of the same mediaId —
+                // reject so the retry loop fetches one whole rendition in
+                // a single body. Single-body downloads keep the #130
+                // smaller-rendition acceptance further below; this check
+                // is about byte-integrity of the join, not about size.
+                if (!resumedWireSizeAcceptable(usedResume, encrypted.size.toLong(), declaredWireSize)) {
+                    splicesRejected.incrementAndGet()
+                    throw RetryableMediaException(
+                        "media unavailable: resumed size ${encrypted.size} != declared $declaredWireSize",
+                    )
                 }
                 // The declared size (MediaContent field 5) is USUALLY the
                 // encrypted wire size — but the server sometimes serves a
@@ -1237,6 +1308,20 @@ class RcsTransport(context: Context) : Transport {
                     }
                     if (!hasIntactImageTrailer(plain)) {
                         throw RetryableMediaException("media unavailable: downloaded image is truncated")
+                    }
+                    // One image, whole stream (Garrett 2026-10-20): a
+                    // band-spliced file keeps a valid header AND a valid
+                    // trailer — they come from different renditions — so
+                    // verify the first image consumes the entire byte
+                    // stream before the decode gate. BitmapFactory is
+                    // lenient enough to "decode" a splice into a corrupt
+                    // bitmap, so this structural walk is the gate that
+                    // actually sees it.
+                    if (!isSingleCompleteImage(plain)) {
+                        splicesRejected.incrementAndGet()
+                        throw RetryableMediaException(
+                            "media unavailable: downloaded bytes are not a single complete image",
+                        )
                     }
                     if (!hasSaneImageDimensions(plain)) {
                         throw IllegalStateException("media unavailable: downloaded image dimensions unusable")
@@ -1277,8 +1362,7 @@ class RcsTransport(context: Context) : Transport {
                     delay(1000L * attempt)
                 }
             }
-            cacheDir.mkdirs()
-            cacheFile.writeBytes(plain)
+            writeCacheAtomically(cacheFile, plain)
             plain
         }
     }
@@ -1286,6 +1370,34 @@ class RcsTransport(context: Context) : Transport {
     /** Strips path-unsafe characters from a cache file name. */
     private fun String.sanitizeFileName(): String =
         replace(Regex("[^A-Za-z0-9._-]"), "_").take(128).ifBlank { "media" }
+
+    /**
+     * Atomic cache write (Garrett 2026-10-20): bytes land in a sibling
+     * temp file and RENAME into place. The old direct writeBytes let a
+     * concurrent reader observe a half-written file, and two in-flight
+     * downloads of the same mediaId (bubble + details + fullscreen all
+     * fetch independently) serving different renditions could interleave
+     * their writes into a spliced cache file — header from one write,
+     * trailer from the other — which the cache-hit revalidation then
+     * happily served forever. A same-directory rename is atomic: readers
+     * see the old complete file or the new complete file, never a join.
+     * Falls back to a direct write if the rename itself fails.
+     */
+    private fun writeCacheAtomically(target: java.io.File, bytes: ByteArray) {
+        val dir = target.parentFile
+        dir?.mkdirs()
+        val tmp = java.io.File(dir, target.name + ".tmp-" + System.nanoTime())
+        try {
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(target)) {
+                target.writeBytes(bytes)
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            tmp.delete()
+            throw e
+        }
+    }
 
     /** Saved Google session cookies, if a Gaia sign-in was captured. */
     fun loadGaiaCookies(): String? =
@@ -1414,12 +1526,16 @@ fun hasSaneImageDimensions(bytes: ByteArray, minPx: Int = 24): Boolean {
 }
 
 /**
- * Cheap revalidation for cache hits: magic + trailer + bounds. Skips the
- * full pixel decode (it passed at download time); poisoned bytes are
- * deleted and re-fetched by the caller.
+ * Cheap revalidation for cache hits: magic + trailer + bounds + the
+ * single-image consumption walk. Skips the full pixel decode (it passed
+ * at download time); poisoned bytes are deleted and re-fetched by the
+ * caller. The consumption walk is what evicts a spliced file — it has a
+ * valid header and trailer by construction, so the older checks alone
+ * would serve it forever.
  */
 fun isCacheableImageBytes(bytes: ByteArray): Boolean =
-    isValidImageBytes(bytes) && hasIntactImageTrailer(bytes) && hasSaneImageDimensions(bytes)
+    isValidImageBytes(bytes) && hasIntactImageTrailer(bytes) &&
+        hasSaneImageDimensions(bytes) && isSingleCompleteImage(bytes)
 
 /**
  * Expected decrypted plaintext size for an AES-GCM chunked media stream,
@@ -1434,6 +1550,270 @@ fun wireExpectedPlaintext(encrypted: ByteArray): Long {
     require(wireChunk > 28) { "bad media chunk size" }
     val numChunks = (encrypted.size - 2 + wireChunk - 1) / wireChunk
     return (encrypted.size - 2 - numChunks * 28L).coerceAtLeast(0)
+}
+
+/** Parsed HTTP Content-Range header: byte range [start]..[end] of [total] (null total when the server sends the star form). */
+data class ContentRange(val start: Long, val end: Long, val total: Long?)
+
+/**
+ * Parses a Content-Range response header — the form "bytes
+ * <start>-<end>/<total>", where the total may be a star. Returns null
+ * for an absent or malformed value; callers treat null as
+ * "unverifiable" and lean on their other integrity checks (the caller
+ * in downloadValidatedById still pins a resumed wire to the declared
+ * size). Pure-Kotlin, JVM-testable.
+ */
+fun parseContentRange(value: String?): ContentRange? {
+    if (value.isNullOrBlank()) return null
+    val m = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""").find(value.trim()) ?: return null
+    val start = m.groupValues[1].toLongOrNull() ?: return null
+    val end = m.groupValues[2].toLongOrNull() ?: return null
+    if (m.groupValues[3] == "*") return ContentRange(start, end, null)
+    val total = m.groupValues[3].toLongOrNull() ?: return null
+    return ContentRange(start, end, total)
+}
+
+/**
+ * A 206 resume may be appended ONLY when its declared range starts
+ * exactly at the requested offset. A null range (server omitted the
+ * header) is tolerated here — the total and declared-size checks still
+ * apply — but a present-and-wrong start is positive evidence of a
+ * splice. Pure-Kotlin, JVM-testable.
+ */
+fun resumeOffsetAcceptable(range: ContentRange?, requestedOffset: Long): Boolean =
+    range == null || range.start == requestedOffset
+
+/**
+ * When the 206 declares a total, the assembled wire must equal it
+ * exactly — a different total means the two halves describe different
+ * renditions. Pure-Kotlin, JVM-testable.
+ */
+fun resumeTotalAcceptable(range: ContentRange?, assembledSize: Long): Boolean =
+    range?.total == null || range.total == assembledSize
+
+/**
+ * A 200 answer to a resume request replaces the partial wholesale; it
+ * is acceptable only when it is at least as long as the partial already
+ * held (readBodyFully has separately proven it matches its own
+ * declared length). Pure-Kotlin, JVM-testable.
+ */
+fun resumeFreshBodyAcceptable(freshSize: Int, partialSize: Int): Boolean =
+    freshSize >= partialSize
+
+/**
+ * Second splice layer at the caller: when a resume was used and the
+ * media's declared wire size is known, the assembled wire must equal
+ * it exactly. Single-body downloads (usedResume = false) and the
+ * thumbnail path (declaredWireSize = 0, size describes the full
+ * rendition) are unaffected — the Build #130 smaller-rendition
+ * acceptance lives there, and this check never fires for them.
+ * Pure-Kotlin, JVM-testable.
+ */
+fun resumedWireSizeAcceptable(
+    usedResume: Boolean,
+    assembledSize: Long,
+    declaredWireSize: Long,
+): Boolean = !usedResume || declaredWireSize <= 0L || assembledSize == declaredWireSize
+
+private fun u16be(bytes: ByteArray, off: Int): Int =
+    ((bytes[off].toInt() and 0xFF) shl 8) or (bytes[off + 1].toInt() and 0xFF)
+
+private fun u32be(bytes: ByteArray, off: Int): Long =
+    ((bytes[off].toLong() and 0xFF) shl 24) or
+        ((bytes[off + 1].toLong() and 0xFF) shl 16) or
+        ((bytes[off + 2].toLong() and 0xFF) shl 8) or
+        (bytes[off + 3].toLong() and 0xFF)
+
+private fun u64be(bytes: ByteArray, off: Int): Long =
+    (u32be(bytes, off) shl 32) or u32be(bytes, off + 4)
+
+/**
+ * True when [bytes] are exactly ONE complete image: the first image's
+ * own structure consumes the entire byte stream, with no second image
+ * spliced in or appended. A band splice keeps a valid header (from one
+ * rendition) and a valid trailer (from another), so the magic and
+ * trailer gates are blind to it — this walk is not. Pure-Kotlin,
+ * JVM-testable. Conservative per format, favoring false-accepts over
+ * rejecting a genuine image:
+ * - PNG: the chunk chain must parse cleanly and IEND must end exactly
+ *   at the file end (APNG rides the same chunk chain — still one file).
+ * - HEIC/HEIF: the top-level box chain must end exactly at the file end.
+ * - JPEG: entropy-coded data can never contain an unstuffed FF D8
+ *   (byte stuffing; restart markers are FF D0–D7), so a second SOI
+ *   after SOS is a spliced-in image header. EXIF thumbnails live in
+ *   APP segments BEFORE SOS and stay legal.
+ * - GIF: block-walk to the trailer; a second GIF signature after the
+ *   trailer is an appended image. Structural surprises pass — only the
+ *   positive second-image signal fails.
+ * - WebP/BMP: the trailer check already pins the declared size to the
+ *   file size exactly, so nothing can trail unnoticed.
+ */
+fun isSingleCompleteImage(bytes: ByteArray): Boolean {
+    if (bytes.size < 12) return false
+    return when (imageKindOf(bytes)) {
+        ImageKind.PNG -> pngChunksConsumeAll(bytes)
+        ImageKind.HEIC -> heicBoxesConsumeAll(bytes)
+        ImageKind.JPEG -> !jpegHasSecondSoiAfterSos(bytes)
+        ImageKind.GIF -> !gifHasAppendedSecondImage(bytes)
+        ImageKind.WEBP, ImageKind.BMP -> hasIntactImageTrailer(bytes)
+        ImageKind.UNKNOWN -> false
+    }
+}
+
+/** PNG chunk walk: 8-byte signature, then length-prefixed chunks; IEND must end exactly at the file end. */
+private fun pngChunksConsumeAll(bytes: ByteArray): Boolean {
+    var pos = 8 // signature
+    var first = true
+    while (pos + 8 <= bytes.size) {
+        val len = u32be(bytes, pos)
+        if (len > bytes.size) return false
+        val type = String(bytes, pos + 4, 4, Charsets.US_ASCII)
+        if (first && type != "IHDR") return false
+        first = false
+        val next = pos + 8L + len + 4L // chunk header + data + CRC
+        if (next > bytes.size) return false
+        pos = next.toInt()
+        if (type == "IEND") return pos == bytes.size
+    }
+    return false
+}
+
+/** ISOBMFF box walk (HEIC/HEIF): size+type headers; the chain must end exactly at the file end. */
+private fun heicBoxesConsumeAll(bytes: ByteArray): Boolean {
+    var pos = 0
+    var sawFtyp = false
+    while (pos + 8 <= bytes.size) {
+        var size = u32be(bytes, pos)
+        val type = String(bytes, pos + 4, 4, Charsets.US_ASCII)
+        if (pos == 0) sawFtyp = type == "ftyp"
+        var header = 8L
+        when {
+            size == 1L -> {
+                // 64-bit largesize follows the type.
+                if (pos + 16 > bytes.size) return false
+                size = u64be(bytes, pos + 8)
+                header = 16L
+            }
+            size == 0L -> {
+                // Box extends to end of file — legal only as the last box.
+                return sawFtyp && pos > 0
+            }
+        }
+        if (size < header || pos + size > bytes.size) return false
+        pos += size.toInt()
+        if (pos == bytes.size) return sawFtyp
+    }
+    return false
+}
+
+/**
+ * Marker-walks a JPEG to its SOS segment, then scans the entropy data
+ * for a second SOI (FF D8). Entropy bytes are stuffed (an FF payload
+ * byte is always followed by 00; restart markers are FF D0–D7), so an
+ * FF D8 after SOS can only be a spliced-in second image header.
+ * Returns false when the walk is inconclusive — the decode gate owns
+ * malformed files; only the positive signal fails here.
+ */
+private fun jpegHasSecondSoiAfterSos(bytes: ByteArray): Boolean {
+    var pos = 2 // SOI already matched by the magic check
+    while (pos + 4 <= bytes.size) {
+        if (bytes[pos] != 0xFF.toByte()) return false
+        val marker = bytes[pos + 1].toInt() and 0xFF
+        when {
+            // Standalone markers carry no length: TEM, RST0-7, SOI.
+            marker == 0x01 || marker in 0xD0..0xD8 -> pos += 2
+            marker == 0xD9 -> return false // EOI before SOS: no scan data
+            marker == 0xDA -> { // SOS: segment, then entropy data to EOI
+                val segLen = u16be(bytes, pos + 2)
+                var scan = pos + 2 + segLen
+                while (scan + 1 < bytes.size) {
+                    if (bytes[scan] == 0xFF.toByte() &&
+                        bytes[scan + 1] == 0xD8.toByte()
+                    ) return true
+                    scan++
+                }
+                return false
+            }
+            else -> {
+                val segLen = u16be(bytes, pos + 2)
+                if (segLen < 2) return false
+                pos += 2 + segLen
+            }
+        }
+    }
+    return false
+}
+
+/**
+ * GIF block walk: 6-byte header + 7-byte logical screen descriptor
+ * (+ global color table), then extension and image blocks — each a
+ * chain of data sub-blocks — to the 3B trailer. If bytes remain after
+ * the trailer and contain a second GIF signature, a whole second GIF
+ * was appended. Structural surprises return false (tolerant); only the
+ * positive second-image signal fails the gate.
+ */
+private fun gifHasAppendedSecondImage(bytes: ByteArray): Boolean {
+    fun subBlockEnd(start: Int): Int {
+        var p = start
+        while (p < bytes.size) {
+            val n = bytes[p].toInt() and 0xFF
+            p++
+            if (n == 0) return p
+            p += n
+            if (p > bytes.size) return -1
+        }
+        return -1
+    }
+    return try {
+        var pos = 6 // "GIF8xa" header
+        if (pos + 7 > bytes.size) return false
+        val packed = bytes[pos + 4].toInt() and 0xFF
+        pos += 7
+        if (packed and 0x80 != 0) {
+            pos += 3 * (1 shl ((packed and 0x07) + 1))
+        }
+        while (pos < bytes.size) {
+            when (bytes[pos].toInt() and 0xFF) {
+                0x3B -> { // trailer: the first GIF ends here
+                    val rest = bytes.copyOfRange(pos + 1, bytes.size)
+                    return indexOfGifSignature(rest) >= 0
+                }
+                0x21 -> { // extension: label byte, then sub-blocks
+                    val end = subBlockEnd(pos + 2)
+                    if (end < 0) return false
+                    pos = end
+                }
+                0x2C -> { // image descriptor: 9 bytes + optional local
+                    // color table + LZW minimum code size + sub-blocks
+                    if (pos + 10 > bytes.size) return false
+                    val ipacked = bytes[pos + 9].toInt() and 0xFF
+                    var p = pos + 10
+                    if (ipacked and 0x80 != 0) {
+                        p += 3 * (1 shl ((ipacked and 0x07) + 1))
+                    }
+                    if (p >= bytes.size) return false
+                    val end = subBlockEnd(p + 1)
+                    if (end < 0) return false
+                    pos = end
+                }
+                else -> return false
+            }
+        }
+        false
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/** Offset of a "GIF8" signature in [bytes], or -1. */
+private fun indexOfGifSignature(bytes: ByteArray): Int {
+    if (bytes.size < 4) return -1
+    for (i in 0..bytes.size - 4) {
+        if (bytes[i] == 0x47.toByte() && bytes[i + 1] == 0x49.toByte() &&
+            bytes[i + 2] == 0x46.toByte() && bytes[i + 3] == 0x38.toByte()
+        ) return i
+    }
+    return -1
 }
 
 /** Marker for media failures worth retrying (transient, not deterministic). */

@@ -213,7 +213,7 @@ class SettingsViewModel(
 
     /**
      * On-disk cache sizes for Diagnostics: the RCS media cache
-     * (cacheDir/rcs_media/v3) and the chat-history LRU (filesDir/chat_history).
+     * (cacheDir/rcs_media/v4) and the chat-history LRU (filesDir/chat_history).
      * Blocking file walk — call off the main thread.
      */
     fun storageStats(): StorageStats {
@@ -229,7 +229,7 @@ class SettingsViewModel(
             }
             return files to bytes
         }
-        val media = walk(java.io.File(context.cacheDir, "rcs_media/v3"))
+        val media = walk(java.io.File(context.cacheDir, "rcs_media/v4"))
         val history = walk(java.io.File(context.filesDir, "chat_history"))
         return StorageStats(media.first, media.second, history.first, history.second)
     }

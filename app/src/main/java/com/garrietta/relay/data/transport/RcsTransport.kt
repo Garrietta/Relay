@@ -142,6 +142,10 @@ class RcsTransport(context: Context) : Transport {
             "renditionSizeMismatch=${renditionSizeMismatch.get()}, ${ghostScanDiagnostics()}"
     }
 
+    /** Tachyon token expiry (epoch ms) for Diagnostics; null when not paired. */
+    fun tachyonExpiryMs(): Long? =
+        session.currentAuth()?.tachyonExpiryMs?.takeIf { it > 0 }
+
     /**
      * Ghost backstop (Garrett 2026-10-19): scans every known RCS
      * conversation's RAW participant names for anything containing

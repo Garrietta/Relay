@@ -1,5 +1,6 @@
 package com.garrietta.relay.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
@@ -47,10 +49,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.garrietta.relay.CrashReporter
 import com.garrietta.relay.data.model.ThemeMode
 import com.garrietta.relay.data.model.isUnknownNumber
 import com.garrietta.relay.data.repo.CategoryStore
@@ -67,7 +67,18 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsState()
     val rcsState by viewModel.rcsPairingState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val context = LocalContext.current
+
+    // Diagnostics is its own screen now (Garrett 2026-10-20), reached from
+    // the single row further down; system back returns here first.
+    var showDiagnostics by remember { mutableStateOf(false) }
+    if (showDiagnostics) {
+        BackHandler { showDiagnostics = false }
+        DiagnosticsScreen(
+            viewModel = viewModel,
+            onBack = { showDiagnostics = false },
+        )
+        return
+    }
 
     LaunchedEffect(Unit) {
         viewModel.userMessages.collect { snackbarHostState.showSnackbar(it) }
@@ -157,48 +168,43 @@ fun SettingsScreen(
                 )
             }
 
-            // Crash diagnosability: Garrett's device has no logcat access
-            // from here, so the app captures its own uncaught exceptions
-            // (see CrashReporter) and surfaces the last one here.
-            val lastCrash = remember { CrashReporter.lastCrashSummary(context) }
-            // RCS transport state, refreshed on a ticker while the screen is
-            // visible — the sync-timeout debug round's diagnosability core.
-            var transportState by remember { mutableStateOf(viewModel.transportDiagnostics()) }
-            var notifState by remember { mutableStateOf(viewModel.notificationDiagnostics()) }
-            LaunchedEffect(Unit) {
-                while (true) {
-                    kotlinx.coroutines.delay(2000)
-                    transportState = viewModel.transportDiagnostics()
-                    notifState = viewModel.notificationDiagnostics()
-                }
-            }
-            SettingsCard(title = "Diagnostics", icon = Icons.Filled.Warning) {
-                SettingsRow(
-                    title = "RCS transport",
-                    subtitle = transportState,
-                    actionLabel = "Refresh",
-                    onAction = { transportState = viewModel.transportDiagnostics() },
+            // Diagnostics moved to its own screen (Garrett 2026-10-20):
+            // the Settings list keeps just this entry row, its subtitle
+            // carrying the live RCS connection state. All diagnostic
+            // content (transport, notifications, last crash, plus app /
+            // session / storage stats) lives in DiagnosticsScreen.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .clickable { showDiagnostics = true }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
                 )
-                SettingsRow(
-                    title = "Notifications",
-                    subtitle = notifState,
-                    actionLabel = "Refresh",
-                    onAction = { notifState = viewModel.notificationDiagnostics() },
-                )
-                if (lastCrash != null) {
-                    var dismissed by remember { mutableStateOf(false) }
-                    if (!dismissed) {
-                        SettingsRow(
-                            title = "Last crash",
-                            subtitle = lastCrash,
-                            actionLabel = "Clear",
-                            onAction = {
-                                CrashReporter.clear(context)
-                                dismissed = true
-                            },
-                        )
-                    }
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Diagnostics", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        when (rcsState) {
+                            RcsPairingState.NOT_PAIRED -> "RCS not paired"
+                            RcsPairingState.PAIRING -> "RCS pairing…"
+                            RcsPairingState.PAIRED -> "RCS connected"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
+                Icon(
+                    Icons.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Spacer(Modifier.height(8.dp))
@@ -456,7 +462,7 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
 }
 
 @Composable
-private fun SettingsCard(
+fun SettingsCard(
     title: String,
     icon: ImageVector?,
     content: @Composable () -> Unit,
@@ -542,7 +548,7 @@ private fun ThemeMode.label(): String = when (this) {
 }
 
 @Composable
-private fun SettingsRow(
+fun SettingsRow(
     title: String,
     subtitle: String,
     actionLabel: String?,

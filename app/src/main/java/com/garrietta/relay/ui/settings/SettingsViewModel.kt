@@ -2,6 +2,8 @@ package com.garrietta.relay.ui.settings
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.RelayApp
@@ -137,4 +139,78 @@ class SettingsViewModel(
         com.garrietta.relay.notifications.MessageNotifications.diagnostics(
             context.applicationContext,
         )
+
+    /** Tachyon token expiry (epoch ms) for Diagnostics; null when unpaired. */
+    fun tachyonExpiryMs(): Long? = repository.rcsTransport.tachyonExpiryMs()
+
+    /** Server-side conversation count (the paired inbox's source list). */
+    fun rcsConversationCount(): Int =
+        repository.rcsTransport.currentRcsConversations().size
+
+    data class AppInfo(
+        val versionName: String,
+        val versionCode: Long,
+        /** "debug" or "release" — the two have separate install identities. */
+        val buildType: String,
+        val packageName: String,
+        val androidRelease: String,
+        val apiLevel: Int,
+        val device: String,
+        val firstInstallMs: Long,
+        val lastUpdateMs: Long,
+    )
+
+    /** Static app/device facts for the Diagnostics screen. All from the OS. */
+    fun appInfo(): AppInfo {
+        val pi = context.packageManager.getPackageInfo(context.packageName, 0)
+        @Suppress("DEPRECATION")
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pi.longVersionCode
+        } else {
+            pi.versionCode.toLong()
+        }
+        val debuggable =
+            (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        return AppInfo(
+            versionName = pi.versionName ?: "?",
+            versionCode = code,
+            buildType = if (debuggable) "debug" else "release",
+            packageName = context.packageName,
+            androidRelease = Build.VERSION.RELEASE ?: "?",
+            apiLevel = Build.VERSION.SDK_INT,
+            device = "${Build.MANUFACTURER} ${Build.MODEL}",
+            firstInstallMs = pi.firstInstallTime,
+            lastUpdateMs = pi.lastUpdateTime,
+        )
+    }
+
+    data class StorageStats(
+        val mediaFiles: Int,
+        val mediaBytes: Long,
+        val historyFiles: Int,
+        val historyBytes: Long,
+    )
+
+    /**
+     * On-disk cache sizes for Diagnostics: the RCS media cache
+     * (cacheDir/rcs_media/v3) and the chat-history LRU (filesDir/chat_history).
+     * Blocking file walk — call off the main thread.
+     */
+    fun storageStats(): StorageStats {
+        fun walk(dir: java.io.File): Pair<Int, Long> {
+            if (!dir.exists()) return 0 to 0L
+            var files = 0
+            var bytes = 0L
+            dir.walkTopDown().forEach { f ->
+                if (f.isFile) {
+                    files++
+                    bytes += f.length()
+                }
+            }
+            return files to bytes
+        }
+        val media = walk(java.io.File(context.cacheDir, "rcs_media/v3"))
+        val history = walk(java.io.File(context.filesDir, "chat_history"))
+        return StorageStats(media.first, media.second, history.first, history.second)
+    }
 }

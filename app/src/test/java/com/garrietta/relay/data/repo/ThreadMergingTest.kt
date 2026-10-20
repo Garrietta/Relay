@@ -4,6 +4,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.allRcsIds
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

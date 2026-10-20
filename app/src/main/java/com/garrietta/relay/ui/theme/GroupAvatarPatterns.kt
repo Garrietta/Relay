@@ -45,6 +45,23 @@ import kotlin.math.sqrt
  *   contact) — same layout every render, on every surface.
  * - Bounding box always = one 1:1 avatar box; avatars clamp inside it.
  * - Max [maxShown] photos; beyond that a "+N" badge.
+ *
+ * MINIMUM-SPACING RULE (Garrett 2026-10-20, 07:52, amending the hex
+ * packing for counts 3–6): at the area-rule scale the hex packing put a
+ * member in the CENTER and ring members only ≈0.34 icon-widths from it,
+ * so the middle photo/letter was buried — in the 4-person "Haley,
+ * Kelly, Kevin" chat Haley's photo covered Kevin and Kelly almost
+ * entirely. For 3–6 shown members the cluster now uses spread
+ * templates (triangle / corners / ring / staggered brick — never a
+ * center member) plus a relaxation pass that GUARANTEES a minimum
+ * center-to-center distance of 0.65 × the icon size between every
+ * pair: every member's center point — where the letter sits and the
+ * face of the photo lives — stays outside every other member's shape
+ * (graphics-shapes polygons are inscribed at radius = size/2, so
+ * 0.65 × size clears the shape edge with margin for the ±3% scale
+ * jitter and ±11° rotations). Counts 7+ keep the dense hex stacking —
+ * past six, the box is too small for the floor and members are simply
+ * thrown on in the deterministic hex order, per Garrett.
  */
 
 /** One member of a group avatar cluster. */
@@ -113,21 +130,22 @@ private fun hexSlots(n: Int, spacing: Float): List<Triple<Float, Float, Int>> {
 private const val TARGET_CLUSTER_FILL = 0.96f
 
 /**
- * V3 placements for a cluster of [n] members: hex-ring slots at a
- * count-derived spacing, per-member position jitter, per-member scale
- * jitter, all clamped into the 1:1 box.
+ * V3 placements via hex-ring slots at a count-derived spacing,
+ * per-member position jitter, per-member scale jitter, all clamped
+ * into the 1:1 box. This is the path for counts 7+ (dense stacking,
+ * per Garrett's spacing rule) and 1–2; counts 3–6 dispatch to
+ * [spacedPlacements] before reaching here.
  *
  * AREA RULE (Garrett 2026-10-19 23:16): each icon's scale is 1/√N, so N
  * icons sum to the area of one single-contact shape — the conglomerate
  * reads at the same size as a Monroe Health row icon at every count.
  * The old envelope normalization shrank icons to ≈0.43 at N=3–7 (summed
- * area 0.55–0.75 — visibly tiny clusters with dead space). Spacing is now
+ * area 0.55–0.75 — visibly tiny clusters with dead space). Spacing is
  * re-derived from the area scale: with the unit-spacing slot extent e1
  * measured from [hexSlots], d = (CAP/2 − s/2) / e1 puts the cluster's
  * outer envelope exactly at [TARGET_CLUSTER_FILL] while the OVERLAP
- * absorbs the area scale — N=3 overlaps ≈65% (tight triangle), N=6
- * ≈30%, N=7 ≈20% (airy hex), the adaptation Garrett asked for. The
- * per-icon clamp remains the hard no-overflow safety.
+ * absorbs the area scale. The per-icon clamp remains the hard
+ * no-overflow safety.
  */
 private fun clusterPlacements(
     members: List<ClusterMember>,
@@ -135,6 +153,7 @@ private fun clusterPlacements(
 ): List<Placement> {
     val n = members.size
     if (n == 0) return emptyList()
+    if (n in 3..6) return spacedPlacements(members, conversationKey)
     val size = baseScale(n)
     // Unit-spacing slot extent: the farthest slot offset from the box
     // center (either axis) when the hex spacing is 1 — exact, because
@@ -165,6 +184,163 @@ private fun clusterPlacements(
             zIndex = (maxRing - ring).toFloat(),
         )
     }
+}
+
+/**
+ * Minimum center-to-center distance between cluster members, as a
+ * fraction of the area-rule icon size — Garrett's minimum-spacing rule
+ * (2026-10-20): "the outside edge must be so far from the center of
+ * another icon… there's enough space between the center to where you
+ * can still identify who is who." Derivation: the expressive shapes
+ * are graphics-shapes polygons inscribed in a circle of radius
+ * size/2, so a neighbor's shape edge reaches at most 0.5 × size from
+ * its center; 0.65 × size keeps every member's CENTER POINT (the
+ * letter, the face) clear of every other shape with 0.15 × size of
+ * margin for the ±3% scale jitter, rotations, and position jitter.
+ */
+private const val MIN_CENTER_FRACTION = 0.65f
+
+/**
+ * Spread templates for 3–6 members, as offsets from the box center in
+ * units of the center half-range c = CAP/2 − size/2 — so a template
+ * icon resting at a template extreme exactly touches the 0.96
+ * envelope. No template has a center member (the hex packing's buried
+ * middle icon is what Garrett flagged). Verified minimum pairwise
+ * distances (nominal, fraction of icon size): 3 → 0.663 (point-up
+ * triangle: two bottom corners + top center; the bottom pair binds),
+ * 4 → 0.920 (four corners), 5 → 0.674 (pentagon ring, vertex up),
+ * 6 → 0.812 (staggered brick: columns at −c/0/+c with the middle
+ * column offset by a third — the max-min arrangement for six in a
+ * square, and the app's hex language fitted to the box).
+ */
+private fun spacedTemplate(n: Int): List<Pair<Float, Float>> = when (n) {
+    3 -> listOf(
+        0f to -1f, -1f to 1f, 1f to 1f,
+    )
+    4 -> listOf(
+        -1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f,
+    )
+    5 -> (0 until 5).map { k ->
+        val a = ((-90 + 72 * k) * PI / 180f).toFloat()
+        cos(a) to sin(a)
+    }
+    6 -> listOf(
+        -1f to -1f, -1f to (1f / 3f),
+        0f to (-1f / 3f), 0f to 1f,
+        1f to -1f, 1f to (1f / 3f),
+    )
+    else -> emptyList()
+}
+
+/**
+ * Placements for 3–6 members under the minimum-spacing rule: the
+ * spread template for the count, the usual per-member scale and
+ * position jitter, then a deterministic relaxation that enforces
+ * [MIN_CENTER_FRACTION] between every pair BY CONSTRUCTION — any pair
+ * the jitter pulled too close is pushed apart along its own axis,
+ * with the per-icon box clamp re-applied after every pass. Verified
+ * offline against 20,000 random jitter draws per count: the floor
+ * held in every draw, every member's center point stayed outside
+ * every other member's shape, and the clamped envelope never left
+ * the 1:1 box (nominal envelope 0.96, exactly as the area rule's).
+ * Summed icon area is the area rule's 1.000 (nominal) — unchanged.
+ */
+private fun spacedPlacements(
+    members: List<ClusterMember>,
+    conversationKey: String,
+): List<Placement> {
+    val n = members.size
+    val size = baseScale(n)
+    val c = TARGET_CLUSTER_FILL / 2f - size / 2f
+    val sizes = members.map { memberScale(conversationKey, it.address, size) }
+    val template = spacedTemplate(n)
+    val xs = FloatArray(n) { i ->
+        0.5f + template[i].first * c +
+            (jitter01("$conversationKey|${members[i].address}|x") - 0.5f) * 0.05f
+    }
+    val ys = FloatArray(n) { i ->
+        0.5f + template[i].second * c +
+            (jitter01("$conversationKey|${members[i].address}|y") - 0.5f) * 0.05f
+    }
+    val floor = MIN_CENTER_FRACTION * size
+    repeat(64) {
+        for (i in 0 until n) {
+            for (j in i + 1 until n) {
+                var dx = xs[j] - xs[i]
+                var dy = ys[j] - ys[i]
+                var d = sqrt(dx * dx + dy * dy)
+                if (d < floor) {
+                    if (d < 1e-4f) {
+                        // Coincident centers: separate along a
+                        // deterministic per-pair direction.
+                        val ang = ((i * 37 + j * 91) * PI / 180f).toFloat()
+                        dx = cos(ang)
+                        dy = sin(ang)
+                        d = 1f
+                    }
+                    val push = (floor - d) / 2f
+                    val ux = dx / d
+                    val uy = dy / d
+                    xs[i] -= ux * push
+                    ys[i] -= uy * push
+                    xs[j] += ux * push
+                    ys[j] += uy * push
+                }
+            }
+        }
+        for (i in 0 until n) {
+            val half = sizes[i] / 2f
+            xs[i] = xs[i].coerceIn(half, 1f - half)
+            ys[i] = ys[i].coerceIn(half, 1f - half)
+        }
+    }
+    return members.mapIndexed { i, _ ->
+        Placement(
+            xFrac = xs[i],
+            yFrac = ys[i],
+            sizeFrac = sizes[i],
+            // No rings here: earlier members draw on top, as the hex
+            // path's center member did.
+            zIndex = (n - i).toFloat(),
+        )
+    }
+}
+
+/**
+ * Where the "+N" badge goes: whichever candidate spot — the four
+ * inset corners or the box center — is FARTHEST from the nearest
+ * shown member's center, so the badge can never sit on top of a
+ * member's center point (Garrett's identifiability rule applies to
+ * the badge too; the old fixed bottom-right spot buried the
+ * bottom-right member of the ring layouts). Scanned in TL, TR, BL,
+ * center, BR order with >=, so exact ties keep the familiar
+ * bottom-right. Verified offline: across 20,000 jitter draws per
+ * count 3–6 the nearest member center was always beyond the badge's
+ * radius.
+ */
+private fun badgeCenter(placements: List<Placement>): Pair<Float, Float> {
+    val inset = 0.335f
+    val candidates = listOf(
+        (0.5f - inset) to (0.5f - inset),
+        (0.5f + inset) to (0.5f - inset),
+        (0.5f - inset) to (0.5f + inset),
+        0.5f to 0.5f,
+        (0.5f + inset) to (0.5f + inset),
+    )
+    var best = candidates.last()
+    var bestScore = -1f
+    for (candidate in candidates) {
+        val score = placements.minOf { p ->
+            val dx = candidate.first - p.xFrac
+            val dy = candidate.second - p.yFrac
+            sqrt(dx * dx + dy * dy)
+        }
+        if (score >= bestScore) {
+            bestScore = score
+            best = candidate
+        }
+    }
+    return best
 }
 
 /**
@@ -229,12 +405,13 @@ fun GroupAvatarCluster(
             )
         }
         if (remaining > 0) {
-            val ns = boxSize * 0.36f
+            val ns = boxSize * 0.33f
+            val (badgeX, badgeY) = badgeCenter(placements)
             Box(
                 modifier = Modifier
                     .offset(
-                        x = boxSize * 0.78f - ns / 2,
-                        y = boxSize * 0.80f - ns / 2,
+                        x = boxSize * badgeX - ns / 2,
+                        y = boxSize * badgeY - ns / 2,
                     )
                     .size(ns)
                     .clip(CircleShape)

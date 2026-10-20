@@ -92,8 +92,8 @@ fun ContactAvatar(
     // visual mass off-center, so box-centered letters looked lost in
     // them. The photo is NOT offset: it fills the clip as before.
     // Shapes outside the vocabulary keep box centering (offset 0).
-    val anchorX = namedShape?.let { (it.opticalAnchor.first - 0.5f) * shapeWidth } ?: 0.dp
-    val anchorY = namedShape?.let { (it.opticalAnchor.second - 0.5f) * shapeHeight } ?: 0.dp
+    val anchorX = namedShape?.let { shapeWidth * (it.opticalAnchor.first - 0.5f) } ?: 0.dp
+    val anchorY = namedShape?.let { shapeHeight * (it.opticalAnchor.second - 0.5f) } ?: 0.dp
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(

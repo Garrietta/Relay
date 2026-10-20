@@ -14,6 +14,8 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -60,6 +62,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -71,7 +74,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Forward
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
@@ -134,13 +139,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.RelayApp
+import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
+import com.garrietta.relay.ui.TopSearchPopup
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -202,6 +210,14 @@ fun ChatScreen(
     val seedColor by viewModel.seedColor.collectAsState()
     val photoUri by viewModel.photoUri.collectAsState()
     val selectedIds by viewModel.selectedIds.collectAsState()
+    // Multi-message forwarding (Garrett 2026-10-20, feature queue 4/7):
+    // the selection bar's Forward action opens the conversation picker
+    // (the shared TopSearchPopup scaffold); the batch outcome lands as a
+    // one-shot snackbar message, same pattern as sendError.
+    val forwarding by viewModel.forwarding.collectAsState()
+    val forwardResult by viewModel.forwardResult.collectAsState()
+    val forwardTargets by viewModel.conversations.collectAsState()
+    var showForwardPicker by remember { mutableStateOf(false) }
     val participants by viewModel.participants.collectAsState()
     val others by viewModel.others.collectAsState()
     val isTyping by viewModel.isTyping.collectAsState()
@@ -369,6 +385,12 @@ fun ChatScreen(
             viewModel.clearError()
         }
     }
+    LaunchedEffect(forwardResult) {
+        forwardResult?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearForwardResult()
+        }
+    }
     // Scroll restore (Garrett 2026-10-19: reopening a chat must NOT jump
     // back to the top — it restores the exact position where he left off).
     // The old LaunchedEffect(messages.size) slammed scrollToItem(0) on EVERY
@@ -515,6 +537,9 @@ fun ChatScreen(
                                     message = message,
                                     media = media,
                                     loadMedia = { att -> viewModel.mediaBytes(att) },
+                                    selected = message.id in selectedIds,
+                                    selectionActive = selectedIds.isNotEmpty(),
+                                    onToggleSelect = { viewModel.toggleSelect(message.id) },
                                     // Images get a UNIFORM preview width
                                     // matching Google Messages (Garrett
                                     // 2026-10-19 evening: measured 0.676 of
@@ -583,6 +608,27 @@ fun ChatScreen(
                         }
                         }
                     }
+                    // Selection action bar (Garrett 2026-10-20, feature
+                    // queue 4/7: multi-message forwarding): slides in
+                    // above the composer while any bubble is selected —
+                    // the count, a clear (X), and Forward, which opens
+                    // the conversation picker. Media bubbles select too
+                    // (long-press menu → Select), so attachments can be
+                    // forwarded, not just text.
+                    AnimatedVisibility(
+                        visible = selectedIds.isNotEmpty(),
+                        enter = slideInVertically(RelaySprings.bouncy()) { it } +
+                            fadeIn(tween(120)),
+                        exit = slideOutVertically(tween(160)) { it } +
+                            fadeOut(tween(120)),
+                    ) {
+                        SelectionBar(
+                            count = selectedIds.size,
+                            forwarding = forwarding,
+                            onClear = { viewModel.clearSelection() },
+                            onForward = { showForwardPicker = true },
+                        )
+                    }
                     Composer(
                         sending = sending,
                         onSend = { viewModel.send(recipient, it) },
@@ -620,6 +666,24 @@ fun ChatScreen(
         )
     }
 
+    // Forward picker (Garrett 2026-10-20, feature queue 4/7): the shared
+    // TopSearchPopup card listing conversations; the current conversation
+    // is excluded (forwarding into the chat you're reading is a no-op),
+    // and merged duplicates match on ANY of their server ids.
+    if (showForwardPicker) {
+        ForwardPickerPopup(
+            conversations = forwardTargets,
+            currentRcsConversationId = rcsConversationId,
+            currentThreadId = threadId,
+            currentThreadIds = threadIds,
+            onDismiss = { showForwardPicker = false },
+            onPick = { target ->
+                showForwardPicker = false
+                viewModel.forwardSelected(target)
+            },
+        )
+    }
+
     // Who-reacted dialog (Garrett 2026-10-19): tapping an inline reaction
     // badge lists every reactor with their emoji.
     reactionDetail?.let { reacted ->
@@ -648,6 +712,188 @@ fun ChatScreen(
                 TextButton(onClick = { reactionDetail = null }) { Text("Close") }
             },
         )
+    }
+}
+
+/**
+ * Selection action bar (Garrett 2026-10-20, feature queue 4/7): shown
+ * above the composer while any message is selected — clear (X), the
+ * selected count, and the Forward action that opens the conversation
+ * picker. While a forward batch is sending, Forward disables and reads
+ * "Forwarding…" so the batch can't be double-fired.
+ */
+@Composable
+private fun SelectionBar(
+    count: Int,
+    forwarding: Boolean,
+    onClear: () -> Unit,
+    onForward: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 3.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClear) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Clear selection",
+                )
+            }
+            Text(
+                text = "$count selected",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onForward,
+                enabled = count > 0 && !forwarding,
+            ) {
+                Icon(
+                    Icons.Filled.Forward,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (forwarding) "Forwarding…" else "Forward")
+            }
+        }
+    }
+}
+
+/**
+ * Forward target picker (Garrett 2026-10-20, feature queue 4/7): the
+ * shared [TopSearchPopup] scaffold — the same top-center bouncy card as
+ * New message and inbox Search — listing the inbox's conversations with
+ * live search (name, address, or snippet). The conversation being read
+ * is excluded: an RCS row matches on ANY of its duplicate-merged server
+ * ids, a Telephony row on any of its merged thread ids. Tapping a row
+ * runs the popup's animated exit first, then fires [onPick].
+ */
+@Composable
+private fun ForwardPickerPopup(
+    conversations: List<Conversation>,
+    currentRcsConversationId: String?,
+    currentThreadId: Long,
+    currentThreadIds: List<Long>,
+    onDismiss: () -> Unit,
+    onPick: (Conversation) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val targets = remember(
+        conversations, query, currentRcsConversationId, currentThreadId, currentThreadIds,
+    ) {
+        val q = query.trim()
+        conversations.filter { conv ->
+            val isCurrent =
+                (currentRcsConversationId != null &&
+                    currentRcsConversationId in conv.allRcsIds()) ||
+                    conv.threadId == currentThreadId ||
+                    conv.threadIds.any { it in currentThreadIds }
+            !isCurrent
+        }.filter { conv ->
+            q.isEmpty() ||
+                conv.displayName.contains(q, ignoreCase = true) ||
+                conv.address.contains(q, ignoreCase = true) ||
+                conv.snippet.contains(q, ignoreCase = true)
+        }
+    }
+    TopSearchPopup(
+        title = "Forward to",
+        query = query,
+        onQueryChange = { query = it },
+        placeholder = "Search conversations",
+        onDismiss = onDismiss,
+    ) { requestExit ->
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp),
+        ) {
+            items(targets, key = { it.threadId }) { conv ->
+                ForwardTargetRow(
+                    conversation = conv,
+                    onClick = { requestExit { onPick(conv) } },
+                )
+            }
+            if (targets.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        if (query.isBlank()) "No other conversations"
+                        else "No conversations match \"${query.trim()}\"",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 20.dp, horizontal = 4.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One forward target row: the conversation's avatar (group cluster for
+ * groups, per-contact shape otherwise), its name, and its latest
+ * snippet — the inbox search row's content without list machinery.
+ */
+@Composable
+private fun ForwardTargetRow(
+    conversation: Conversation,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (conversation.participants.size > 1) {
+            GroupAvatarCluster(
+                members = conversation.participants
+                    .filterNot { it.isUnknownSenderGhost() }
+                    .map {
+                        ClusterMember(
+                            photoUri = it.photoUri,
+                            name = it.displayName.ifBlank { it.address },
+                            address = it.address,
+                        )
+                    },
+                conversationKey = conversation.rcsConversationId
+                    ?: "tel:${conversation.threadId}",
+                boxSize = 48.dp,
+            )
+        } else {
+            ContactAvatar(
+                photoUri = conversation.photoUri,
+                name = conversation.displayName,
+                size = 48.dp,
+                shapeKey = conversation.address.ifBlank { conversation.displayName },
+                textStyle = MaterialTheme.typography.titleMedium,
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                conversation.displayName,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                conversation.snippet.ifBlank { "No messages" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -1120,6 +1366,13 @@ private fun MediaBubble(
     bubblePair: ChatBubblePair? = null,
     /** Tapping the sender's avatar opens their details page. */
     onAvatarClick: (Participant) -> Unit = {},
+    /** Multi-select (Garrett 2026-10-20, forwarding): media messages are
+     * selectable exactly like text bubbles — the long-press menu's Select
+     * enters selection mode, taps toggle while it's active, and the
+     * selected media carries a tint overlay. */
+    selected: Boolean = false,
+    selectionActive: Boolean = false,
+    onToggleSelect: () -> Unit = {},
 ) {
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
@@ -1168,7 +1421,11 @@ private fun MediaBubble(
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                 .combinedClickable(
                     onClick = {
-                        if (error != null) {
+                        if (selectionActive) {
+                            // Selection mode: a tap toggles this message,
+                            // exactly like text bubbles (Garrett 2026-10-20).
+                            onToggleSelect()
+                        } else if (error != null) {
                             // Tap-to-retry (Garrett 2026-10-19 evening):
                             // clearing the error and bumping retryNonce
                             // re-arms the LaunchedEffect above, which runs a
@@ -1337,6 +1594,19 @@ private fun MediaBubble(
                 }
             }
         }
+            // Selected state (Garrett 2026-10-20): a translucent primary
+            // wash over the media so a selected attachment reads exactly
+            // like a selected (squared-off, tinted) text bubble.
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                        ),
+                )
+            }
             ReactionBadgeOverlay(message, onShowReactions)
         }
         if (message.body.isNotBlank()) {
@@ -1416,8 +1686,15 @@ private fun MediaBubble(
     }
 
     // Long-press reaction menu (Garrett 2026-10-19: reactions both ways).
+    // Select joins the menu (Garrett 2026-10-20): media messages enter
+    // multi-select exactly like text bubbles, so they can be forwarded.
     ReactionPickerMenu(
         expanded = showReactMenu,
+        onDismiss = { showReactMenu = false },
+        onReact = onReact,
+        onSelect = onToggleSelect,
+    )
+}
         onDismiss = { showReactMenu = false },
         onReact = onReact,
     )

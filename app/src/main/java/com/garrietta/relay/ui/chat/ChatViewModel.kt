@@ -3,10 +3,12 @@ package com.garrietta.relay.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.MessageReaction
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
@@ -59,6 +61,8 @@ class ChatViewModel(
         const val MAX_HISTORY_COUNT = 2000L
         /** Remote typing indicator auto-clear (server may never send false). */
         const val TYPING_TIMEOUT_MS = 15_000L
+        /** Pacing between forwarded sends so the target thread keeps order. */
+        const val FORWARD_PACING_MS = 300L
     }
 
     private var activeThreadId: Long = threadId
@@ -109,6 +113,190 @@ class ChatViewModel(
 
     fun clearSelection() {
         _selectedIds.value = emptySet()
+    }
+
+    /** Inbox conversations (newest first) — the forward picker's targets. */
+    val conversations: StateFlow<List<Conversation>> = repository.conversations
+
+    /** True while a forward batch is sending (the selection bar shows it). */
+    private val _forwarding = MutableStateFlow(false)
+    val forwarding: StateFlow<Boolean> = _forwarding
+
+    /**
+     * One-shot forward outcome for the snackbar ("Forwarded 3 to Dad",
+     * "Forwarded 2 of 5 … — stopped: <verbatim reason>"). The screen
+     * shows it once and clears it, same pattern as [sendError].
+     */
+    private val _forwardResult = MutableStateFlow<String?>(null)
+    val forwardResult: StateFlow<String?> = _forwardResult
+
+    fun clearForwardResult() {
+        _forwardResult.value = null
+    }
+
+    /**
+     * Multi-message forwarding (Garrett 2026-10-20, feature queue 4/7 —
+     * the Google Messages most-requested batch forward). Sends every
+     * selected message into [target], OLDEST first, as ordinary messages
+     * through the existing send paths: RCS targets via
+     * [UnifiedInboxRepository.sendRcs] (which routes duplicate-merged
+     * conversations to the canonical server id, #148), SMS/Telephony
+     * targets via the SMS transport — the same routing the composer uses
+     * for that conversation (a server conversation typed SMS (type 1)
+     * sends as SMS even while paired). Media messages re-send their
+     * attachment through the #131 upload pipeline (decrypted bytes from
+     * the mediaBytes choke point, caption riding along); where media
+     * can't ride (non-RCS target, download/upload failure) the caption
+     * still forwards as text and the attachment is COUNTED in the
+     * outcome summary — never silently dropped. A failed text send
+     * stops the batch and reports how many landed before it, with the
+     * verbatim reason. Reactions are badges on their targets, not
+     * messages — they never forward; transport system notices are
+     * excluded up front.
+     */
+    fun forwardSelected(target: Conversation) {
+        if (_forwarding.value) return
+        val batch = _messages.value
+            .filter { it.id in _selectedIds.value }
+            .filterNot { isTransportSystemNotice(it.body) }
+            .sortedBy { it.date }
+        if (batch.isEmpty()) {
+            clearSelection()
+            return
+        }
+        _forwarding.value = true
+        viewModelScope.launch {
+            val targetRcsId = target.rcsConversationId
+            // Same routing rule as send(): only a server conversation NOT
+            // typed SMS takes the RCS session; everything else is SMS.
+            val targetIsRcs = targetRcsId != null &&
+                repository.rcsConversationType(targetRcsId) != 1
+            var landed = 0
+            var attachmentsLost = 0
+            var mediaFailure: String? = null
+            var stopFailure: String? = null
+            try {
+                for ((index, msg) in batch.withIndex()) {
+                    if (index > 0) kotlinx.coroutines.delay(FORWARD_PACING_MS)
+                    val att = msg.media
+                    if (att == null) {
+                        val err = forwardText(target, targetIsRcs, targetRcsId, msg.body)
+                        if (err != null) {
+                            stopFailure = err
+                            break
+                        }
+                        landed++
+                        continue
+                    }
+                    // Media message: the full re-send first (RCS targets
+                    // only — Relay never sends MMS).
+                    var mediaSent = false
+                    if (targetIsRcs && targetRcsId != null) {
+                        val (ok, reason) = forwardMedia(targetRcsId, msg, att)
+                        mediaSent = ok
+                        if (!ok && mediaFailure == null) mediaFailure = reason
+                    } else if (mediaFailure == null) {
+                        mediaFailure = "Attachments need an RCS chat"
+                    }
+                    if (mediaSent) {
+                        landed++
+                    } else {
+                        attachmentsLost++
+                        // The caption still forwards as a plain text.
+                        if (msg.body.isNotBlank()) {
+                            val err = forwardText(target, targetIsRcs, targetRcsId, msg.body)
+                            if (err != null) {
+                                stopFailure = err
+                                break
+                            }
+                            landed++
+                        }
+                    }
+                }
+            } finally {
+                _forwarding.value = false
+            }
+            // Selection clears on every completed attempt: the landed
+            // messages can't be un-sent, and leaving them selected invites
+            // an accidental duplicate re-forward.
+            clearSelection()
+            _forwardResult.value = when {
+                stopFailure != null ->
+                    if (landed > 0) {
+                        "Forwarded $landed of ${batch.size} to ${target.displayName} — stopped: $stopFailure"
+                    } else {
+                        "Couldn't forward to ${target.displayName}: $stopFailure"
+                    }
+                landed == 0 && mediaFailure != null ->
+                    "Couldn't forward to ${target.displayName}: $mediaFailure"
+                attachmentsLost > 0 ->
+                    "Forwarded $landed to ${target.displayName} — " +
+                        "$attachmentsLost attachment${if (attachmentsLost == 1) "" else "s"} " +
+                        "couldn't be forwarded"
+                else -> "Forwarded $landed to ${target.displayName}"
+            }
+        }
+    }
+
+    /**
+     * Sends one text body into [target] over the conversation's own send
+     * path. Returns the VERBATIM failure reason, or null on success.
+     */
+    private suspend fun forwardText(
+        target: Conversation,
+        targetIsRcs: Boolean,
+        targetRcsId: String?,
+        body: String,
+    ): String? {
+        if (body.isBlank()) return null
+        return if (targetIsRcs && targetRcsId != null) {
+            when (val outcome = repository.sendRcs(
+                targetRcsId, body, java.util.UUID.randomUUID().toString(),
+            )) {
+                is UnifiedInboxRepository.RcsSendOutcome.Sent -> null
+                is UnifiedInboxRepository.RcsSendOutcome.Failed -> outcome.reason
+            }
+        } else {
+            when (val result = repository.smsTransport.sendMessage(target.address, body)) {
+                is SendResult.Sent -> null
+                is SendResult.Failed -> result.reason
+                is SendResult.Unavailable -> result.reason
+            }
+        }
+    }
+
+    /**
+     * Re-sends [msg]'s attachment into the RCS conversation [targetRcsId]:
+     * decrypted bytes via the mediaBytes choke point, re-uploaded through
+     * the #131 file-transfer pipeline, the caption riding as the media
+     * message's text, the source dimensions carried over. Returns
+     * (sent, verbatim failure reason when not sent).
+     */
+    private suspend fun forwardMedia(
+        targetRcsId: String,
+        msg: Message,
+        att: com.garrietta.relay.rcs.proto.RcsMediaAttachment,
+    ): Pair<Boolean, String?> {
+        return try {
+            val bytes = repository.mediaBytes(att)
+            if (bytes.isEmpty()) return false to "media unavailable: empty attachment"
+            val ext = android.webkit.MimeTypeMap.getSingleton()
+                .getExtensionFromMimeType(att.mimeType)?.ifBlank { null } ?: "bin"
+            val uploaded = repository.uploadRcsMedia(
+                bytes, att.mimeType, "forwarded.$ext",
+            ) {}
+            when (val outcome = repository.sendRcsMedia(
+                targetRcsId,
+                uploaded.copy(width = att.width, height = att.height),
+                msg.body,
+                java.util.UUID.randomUUID().toString(),
+            )) {
+                is UnifiedInboxRepository.RcsSendOutcome.Sent -> true to null
+                is UnifiedInboxRepository.RcsSendOutcome.Failed -> false to outcome.reason
+            }
+        } catch (e: Exception) {
+            false to (e.message ?: "media unavailable: ${e.javaClass.simpleName}")
+        }
     }
 
     /**

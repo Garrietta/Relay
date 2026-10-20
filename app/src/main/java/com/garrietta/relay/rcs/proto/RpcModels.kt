@@ -975,7 +975,7 @@ fun Map<Int, List<FieldVal>>.firstBool(n: Int): Boolean? =
 fun normalizeServerTimestamp(raw: Long): Long =
     if (raw > 100_000_000_000_000L) raw / 1000 else raw
 
-private fun decodeMessageInfo(m: Map<Int, List<FieldVal>>): String? {
+fun decodeMessageInfo(m: Map<Int, List<FieldVal>>): String? {
     // MessageInfo oneof{2:messageContent, 3:mediaContent, 5:locationContent}
     m.firstMsg(2)?.firstStr(1)?.let { return it }
     return null

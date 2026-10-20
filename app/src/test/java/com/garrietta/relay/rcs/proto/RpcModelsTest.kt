@@ -474,9 +474,8 @@ class RpcModelsTest {
         assertEquals(40.7128, loc.latitude, 0.0)
         assertEquals(-74.006, loc.longitude, 0.0)
         assertEquals("Central Park", loc.name)
-        // Second info: the human-fallback link as message text
-        // (MessageContent field 1; decodeMessageInfo itself is private).
-        assertEquals(link, infos[1].firstMsg(2)!!.firstStr(1))
+        // Second info: the human-fallback link as message text.
+        assertEquals(link, decodeMessageInfo(infos[1]))
     }
 
     @Test fun `send location request omits a blank name`() {

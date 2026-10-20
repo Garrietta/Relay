@@ -102,7 +102,7 @@ class RelayApp : Application() {
                     if (android.os.Build.VERSION.SDK_INT >= 28) {
                         add(coil.decode.ImageDecoderDecoder.Factory())
                     } else {
-                        add(coil.gif.GifDecoder.Factory())
+                        add(coil.decode.GifDecoder.Factory())
                     }
                 }
                 .build(),

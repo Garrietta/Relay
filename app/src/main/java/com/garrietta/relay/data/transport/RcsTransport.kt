@@ -23,6 +23,7 @@ import com.garrietta.relay.rcs.proto.encodeUploadMediaRequest
 import com.garrietta.relay.rcs.proto.UploadedMediaRef
 import com.garrietta.relay.rcs.media.aesGcmDecryptChunked
 import com.garrietta.relay.rcs.media.aesGcmEncryptChunked
+import okhttp3.MediaType.Companion.toMediaType
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
 import com.garrietta.relay.rcs.session.RcsSession
@@ -864,7 +865,7 @@ class RcsTransport(context: Context) : Transport {
         )
         val body = object : okhttp3.RequestBody() {
             override fun contentType(): okhttp3.MediaType? =
-                okhttp3.MediaType.parse("application/octet-stream")
+                "application/octet-stream".toMediaType()
             override fun contentLength(): Long = encrypted.size.toLong()
             override fun writeTo(sink: okio.BufferedSink) {
                 val total = encrypted.size.toLong()

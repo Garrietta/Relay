@@ -186,12 +186,11 @@ private fun modulatedBlobReferencePath(waves: Int, amplitude: Float): android.gr
 }
 
 /**
- * Pure fit math for the vocabulary fits below (floats only, unit-tested):
+ * Pure fit math for the vocabulary fit below (floats only, unit-tested):
  * the scale + translation mapping a reference path's bounds onto a
- * [width] x [height] box, centered. With [uniform] the scale is the
- * largest single value fitting BOTH dimensions (the avatar ratio lock);
- * without it each axis scales independently so the bounds land EXACTLY
- * on the box (the wide fit). Returns null for degenerate input.
+ * [width] x [height] box, centered. The scale is the largest single
+ * value fitting BOTH dimensions (the avatar ratio lock). Returns null
+ * for degenerate input.
  */
 internal data class PathFit(
     val scaleX: Float,
@@ -207,20 +206,15 @@ internal fun pathFit(
     boundsBottom: Float,
     width: Float,
     height: Float,
-    uniform: Boolean,
 ): PathFit? {
     val boundsWidth = boundsRight - boundsLeft
     val boundsHeight = boundsBottom - boundsTop
     if (width <= 0f || height <= 0f || boundsWidth <= 0f || boundsHeight <= 0f) {
         return null
     }
-    var scaleX = width / boundsWidth
-    var scaleY = height / boundsHeight
-    if (uniform) {
-        val s = minOf(scaleX, scaleY)
-        scaleX = s
-        scaleY = s
-    }
+    val s = minOf(width / boundsWidth, height / boundsHeight)
+    val scaleX = s
+    val scaleY = s
     val centerX = (boundsLeft + boundsRight) / 2f
     val centerY = (boundsTop + boundsBottom) / 2f
     return PathFit(
@@ -242,22 +236,6 @@ internal fun pathFit(
 private fun androidx.compose.ui.graphics.Path.addFitted(
     ref: android.graphics.Path,
     size: Size,
-) = addFit(ref, size, uniform = true)
-
-/**
- * Fits [ref] into [size] with INDEPENDENT axis scales so the shape's
- * bounds land exactly on the box — the vocabulary shape stretched to a
- * wide surface (see [expressiveStretchedShape]).
- */
-private fun androidx.compose.ui.graphics.Path.addStretched(
-    ref: android.graphics.Path,
-    size: Size,
-) = addFit(ref, size, uniform = false)
-
-private fun androidx.compose.ui.graphics.Path.addFit(
-    ref: android.graphics.Path,
-    size: Size,
-    uniform: Boolean,
 ) {
     if (size.height <= 0f || size.width <= 0f) return
     val src = android.graphics.Path(ref)
@@ -266,7 +244,7 @@ private fun androidx.compose.ui.graphics.Path.addFit(
     if (bounds.height() <= 0f || bounds.width() <= 0f) return
     val fit = pathFit(
         bounds.left, bounds.top, bounds.right, bounds.bottom,
-        size.width, size.height, uniform,
+        size.width, size.height,
     ) ?: return
     val matrix = android.graphics.Matrix()
     matrix.setScale(fit.scaleX, fit.scaleY)
@@ -342,19 +320,3 @@ val ExpressiveAvatarShapes: List<NamedShape> = listOf(
 fun expressiveShape(name: String): Shape =
     ExpressiveAvatarShapes.firstOrNull { it.name == name }?.shape ?: WavyBlobShape
 
-/**
- * Wide variant of [expressiveShape]: the SAME vocabulary shape with its
- * reference path stretched to fill whatever box it is drawn into (each
- * axis scaled independently, so the shape's bounds land exactly on the
- * box) instead of the avatar uniform fit, which would paint it as a
- * small centered 1:1 blob inside a wide box. For wide surfaces that
- * carry the vocabulary language — the inbox selection highlight spans
- * its row's full width this way (Garrett 2026-10-20), the "Puffy" wave
- * reading as long soft scallops along the row's edges. Falls back to
- * the uniform-fit shape when the name is unknown.
- */
-fun expressiveStretchedShape(name: String): Shape {
-    val named = ExpressiveAvatarShapes.firstOrNull { it.name == name }
-        ?: return expressiveShape(name)
-    return GenericShape { size, _ -> addStretched(named.referencePath, size) }
-}

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Relay launcher background: deep green sampled from the generated
-         icon art, so the adaptive foreground blends seamlessly. -->
-    <color name="ic_launcher_background">#01AD41</color>
+    <!-- Relay launcher background: white, matching the approved icon design
+         (green two-tone bubble with KitKat smiley on white). -->
+    <color name="ic_launcher_background">#FFFFFF</color>
 </resources>

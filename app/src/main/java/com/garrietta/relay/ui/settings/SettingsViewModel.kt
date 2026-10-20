@@ -234,6 +234,13 @@ class SettingsViewModel(
 
     fun participantAnomalyTitles(): List<String> = repository.participantAnomalyTitles()
 
+    /**
+     * Ground-truth membership dump (Garrett 2026-10-20 deep dive): raw
+     * field 20 / field 21 per server conversation next to the derived
+     * membership the UI renders — see UnifiedInboxRepository.
+     */
+    suspend fun membershipDump(): String = repository.membershipDumpText()
+
     data class AppInfo(
         val versionName: String,
         val versionCode: Long,

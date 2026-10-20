@@ -4,9 +4,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -30,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.CrashReporter
 import com.garrietta.relay.data.model.isUnknownNumber
@@ -79,6 +83,15 @@ fun DiagnosticsScreen(
     var storageNonce by remember { mutableStateOf(0) }
     LaunchedEffect(storageNonce) {
         storage = withContext(Dispatchers.IO) { viewModel.storageStats() }
+    }
+
+    // Membership ground truth (Garrett 2026-10-20 deep dive): raw
+    // field 20 / field 21 per server conversation, built off the main
+    // thread on entry and on demand, like the storage walk.
+    var membership by remember { mutableStateOf<String?>(null) }
+    var membershipNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(membershipNonce) {
+        membership = withContext(Dispatchers.IO) { viewModel.membershipDump() }
     }
 
     val appInfo = remember { viewModel.appInfo() }
@@ -242,6 +255,30 @@ fun DiagnosticsScreen(
                     actionLabel = "Refresh",
                     onAction = { storageNonce++ },
                 )
+            }
+
+            SettingsCard(title = "Conversation membership", icon = null) {
+                SettingsRow(
+                    title = "Membership dump",
+                    subtitle = "Raw participants (field 20) vs the server's " +
+                        "membership list (field 21) per conversation, with " +
+                        "the derived result the UI renders. Marked " +
+                        "conversations first. No message bodies.",
+                    actionLabel = "Refresh",
+                    onAction = { membershipNonce++ },
+                )
+                Spacer(Modifier.height(8.dp))
+                SelectionContainer {
+                    Text(
+                        text = membership ?: "Loading…",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 440.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
             }
 
             if (lastCrash != null) {

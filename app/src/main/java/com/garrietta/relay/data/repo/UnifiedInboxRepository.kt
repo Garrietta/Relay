@@ -569,6 +569,73 @@ class UnifiedInboxRepository(
         participantAnomalies.values.sorted()
 
     /**
+     * The anomaly detector's own last inputs per conversation
+     * (claimedOthers, distinctOtherSenders, incomingMessages), recorded
+     * on every message load alongside the anomaly verdict. Diagnostics'
+     * membership dump prints them next to the raw wire fields so a
+     * screenshot adjudicates the payload (Garrett 2026-10-20 deep dive).
+     */
+    @Volatile
+    private var participantAnomalyInputs: Map<String, Triple<Int, Int, Int>> =
+        emptyMap()
+
+    /**
+     * Ground-truth membership dump for Settings → Diagnostics
+     * (Garrett 2026-10-20): for each server conversation, the RAW
+     * decoded field 20 / field 21 / field 10 / field 22 next to the
+     * derived others + group flag the UI renders, the anomaly flag,
+     * and the detector's own inputs. Marked conversations (anomaly or
+     * field-set mismatch) come first; see MembershipDump.kt.
+     */
+    suspend fun membershipDumpText(): String {
+        val anomalies = participantAnomalies
+        val inputs = participantAnomalyInputs
+        val snapshots = rcsTransport.currentRcsConversations().map { c ->
+            val derived = cleanRcsParticipants(c.participants, c.otherParticipantIds)
+                .filterNot { it.isUnknownSenderGhost() }
+            val title = _conversations.value.firstOrNull { row ->
+                row.rcsConversationId == c.id
+            }?.displayName?.ifBlank { null }
+                ?: c.name.ifBlank { c.id }
+            val inp = inputs[c.id]
+            MembershipSnapshot(
+                conversationId = c.id,
+                title = title,
+                timestampMs = c.timestampMs,
+                type = c.type,
+                serverIsGroup = c.isGroup,
+                field21 = c.otherParticipantIds,
+                field20 = c.participants.map { p ->
+                    MembershipEntry(
+                        participantId = p.participantId,
+                        number = p.number,
+                        isMe = p.isMe,
+                        name = p.fullName.ifBlank { p.firstName },
+                    )
+                },
+                derivedOthers = derived.map { p ->
+                    MembershipEntry(
+                        participantId = p.participantId,
+                        number = p.number,
+                        isMe = p.isMe,
+                        name = p.fullName.ifBlank { p.firstName },
+                    )
+                },
+                derivedIsGroup = deriveRcsIsGroup(
+                    c.isGroup, c.otherParticipantIds, derived.size,
+                ),
+                anomaly = c.id in anomalies,
+                detectorClaimedOthers = inp?.first,
+                detectorDistinctSenders = inp?.second,
+                detectorIncoming = inp?.third,
+            )
+        }
+        return formatMembershipDump(
+            selectMembershipSnapshots(snapshots), snapshots.size,
+        )
+    }
+
+    /**
      * True direction-metadata contradictions counted in
      * [rcsMessagesSingle] (Garrett 2026-10-20): messages whose sender
      * entry — resolved against the conversation's OWN participant
@@ -635,6 +702,11 @@ class UnifiedInboxRepository(
                 ?: conv?.name?.ifBlank { null }
                 ?: conversationId
             synchronized(participantAnomalyLock) {
+                // The detector's own inputs, kept for the Diagnostics
+                // membership dump — the verdict alone doesn't show WHY.
+                participantAnomalyInputs = participantAnomalyInputs +
+                    (conversationId to
+                        Triple(otherNumbers.size, distinctSenders, incoming.size))
                 participantAnomalies = when {
                     participantAnomaly(
                         otherNumbers.size, distinctSenders, incoming.size,

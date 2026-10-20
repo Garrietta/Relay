@@ -2,6 +2,7 @@ package com.garrietta.relay.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
@@ -56,6 +57,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -438,22 +440,25 @@ fun ChatScreen(
     // chat simply has no morph target on its side — the entrance/exit
     // degrade cleanly to the surface slide, the exact reverse both
     // ways — while a chat reopened at the newest message starts
-    // expanded and morphs exactly as before. A saved position IS the
-    // newest message at offset 0 exactly when the chat was left at the
-    // bottom; anything else means it reopens scrolled.
+    // expanded and morphs exactly as before.
+    //
+    // The decision is ChatHeaderLogic.initialHeaderCollapsed: with a
+    // live emission in hand it reads the anchor against the list (the
+    // tail-grew case included); with NO emission yet — the common
+    // cold open — it reads the snapshot's own save-time newest
+    // fields. The earlier form sampled messages.firstOrNull() here
+    // and read a missing emission as "opens scrolled", so a chat
+    // left AT THE BOTTOM reopened collapsed whenever its first list
+    // emission lagged the first frame (Garrett 2026-10-20: the group
+    // cluster absent at rest after an at-bottom open, then a spurious
+    // expand-then-collapse when the post-restore driver corrected it
+    // on his first scroll).
     var headerCollapsed by remember(viewModel) {
         val saved = viewModel.savedScrollPosition()
         val newest = messages.firstOrNull()
-        // Opens at the newest message — and so starts expanded — when
-        // there is no saved position to restore, when the restore IS
-        // the newest message, and (Garrett 2026-10-20) when the tail
-        // grew after the position was saved: that open lands at the
-        // new bottom under the same rule the restore effect applies,
-        // so the header must start in the state the landing implies.
-        val opensAtNewest = saved != null && newest != null &&
-            (ChatScrollLogic.hasNewerThanSaved(saved, newest.id, newest.date) ||
-                (saved.messageId == newest.id && saved.scrollOffset == 0))
-        mutableStateOf(saved != null && !opensAtNewest)
+        mutableStateOf(
+            ChatHeaderLogic.initialHeaderCollapsed(saved, newest?.id, newest?.date),
+        )
     }
     /** Message whose reaction badge was tapped — shows the who-reacted dialog. */
     var reactionDetail by remember { mutableStateOf<Message?>(null) }
@@ -1844,7 +1849,7 @@ private fun OneToOneHeader(
  *
  * The cluster's own scroll-exit is back (Garrett 2026-10-20, his
  * clarification of the height directive): on vertical scroll it slides
- * away to the LEFT — a horizontal-only AnimatedVisibility inside the
+ * away to the LEFT — a horizontal-only collapse inside the
  * pinned-height row — and returns at the top. The height cannot move
  * in any frame of the exit: the row is pinned outright, the animation
  * changes only the cluster slot's width, and the names column absorbs
@@ -1855,6 +1860,19 @@ private fun OneToOneHeader(
  * collapsed 1:1 header. The driver is frozen until the open-time
  * scroll restore lands, so the cluster can never appear or vanish
  * mid-transition.
+ *
+ * The collapse is LAYER-DRIVEN, not an AnimatedVisibility size
+ * animation (Garrett 2026-10-20): a size animation clips its content
+ * to the animated window while it runs, the window's left/bottom
+ * edges sat exactly on the cluster box's edges, and the 2-person
+ * tiles reach ~1.1dp past those edges — so the running clip shaved
+ * the overhang flat (Mom's "M" tile losing its bottom-left corner
+ * mid-scroll). Here a spring fraction animates the slot's WIDTH
+ * only; the content is measured once at its full extent and never
+ * re-laid, so its position is constant at every frame — horizontal
+ * motion only, no path onto the names column — and while the spring
+ * runs, the clip is extended past the tiles' full extent on the
+ * fixed edges (see ClusterCollapseGeometry).
  */
 @Composable
 private fun GroupHeader(
@@ -1898,44 +1916,93 @@ private fun GroupHeader(
         // height is pinned above, so this animation is height-neutral
         // by construction (the #169 guarantee): no frame of it can
         // change the Scaffold's top inset or shift the message list.
-        AnimatedVisibility(
-            visible = !clusterCollapsed,
-            enter = expandHorizontally(
-                animationSpec = RelaySprings.bouncy(),
-                expandFrom = Alignment.Start,
-            ),
-            exit = shrinkHorizontally(
-                animationSpec = RelaySprings.bouncy(),
-                shrinkTowards = Alignment.Start,
-            ),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                // Header tap opens the details page (Garrett 2026-10-19).
-                modifier = Modifier.clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onOpenDetails,
-                ),
-            ) {
-                GroupAvatarCluster(
-                    members = visibleOthers.map {
-                        ClusterMember(
-                            photoUri = it.photoUri,
-                            name = it.displayName.ifBlank { it.address },
-                            address = it.address,
-                        )
-                    },
-                    conversationKey = patternKey,
-                    boxSize = 76.dp,
-                    // Morph target matching the inbox group row's
-                    // cluster (Garrett 2026-10-20: same picture movement
-                    // for group chats as for 1:1, in both directions).
-                    modifier = Modifier.motionSharedAvatar(
-                        SharedElementKeys.avatar(threadId),
+        //
+        // Layer-driven (see the KDoc above and
+        // ClusterCollapseGeometry): a spring fraction animates the
+        // slot's WIDTH; the content Row is measured once at its full
+        // extent (requiredSize) and never re-laid, so the cluster's
+        // position is constant at every frame of the animation.
+        // While the spring runs, the slot is offset by -margin and
+        // the content by +margin (they cancel — the settled layout is
+        // bit-exact) and the slot's clip bounds are extended by the
+        // margin on the fixed edges, so the sweeping clip can never
+        // shave a tile: the only edge that ever crosses a tile is the
+        // right-hand sweep, which IS the reveal. At rest the slot is
+        // the plain unclipped box the old AnimatedVisibility settled
+        // into; fully collapsed, the content leaves composition (the
+        // morph-target degradation the KDoc describes).
+        val clusterBoxDp = 76f
+        val slotFullWidthDp = clusterBoxDp + 10f
+        val collapseFraction = remember(threadId) {
+            Animatable(if (clusterCollapsed) 0f else 1f)
+        }
+        LaunchedEffect(clusterCollapsed) {
+            val target = if (clusterCollapsed) 0f else 1f
+            if (collapseFraction.value != target) {
+                collapseFraction.animateTo(target, RelaySprings.bouncy())
+            }
+        }
+        val fraction = collapseFraction.value
+        // Settled = the spring is at rest exactly on the state the
+        // driver asked for. Anything else (mid-flight, overshoot, the
+        // frame the driver flips before the effect starts) takes the
+        // extended-clip structure.
+        val settled = !collapseFraction.isRunning &&
+            fraction == if (clusterCollapsed) 0f else 1f
+        if (fraction > 0f || !clusterCollapsed) {
+            val margin = ClusterCollapseGeometry.clipMarginDp(clusterBoxDp).dp
+            Box(
+                modifier = Modifier
+                    .width(
+                        ClusterCollapseGeometry
+                            .slotWidthDp(fraction, slotFullWidthDp).dp,
+                    )
+                    .then(
+                        if (settled) {
+                            Modifier.height(clusterBoxDp.dp)
+                        } else {
+                            Modifier
+                                .offset(x = -margin)
+                                .requiredHeight(clusterBoxDp.dp + margin * 2)
+                                .clipToBounds()
+                        },
                     ),
-                )
-                Spacer(Modifier.width(10.dp))
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    // Header tap opens the details page (Garrett 2026-10-19).
+                    modifier = Modifier
+                        .requiredSize(slotFullWidthDp.dp, clusterBoxDp.dp)
+                        .then(
+                            if (settled) Modifier
+                            else Modifier.offset(x = margin),
+                        )
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpenDetails,
+                        ),
+                ) {
+                    GroupAvatarCluster(
+                        members = visibleOthers.map {
+                            ClusterMember(
+                                photoUri = it.photoUri,
+                                name = it.displayName.ifBlank { it.address },
+                                address = it.address,
+                            )
+                        },
+                        conversationKey = patternKey,
+                        boxSize = clusterBoxDp.dp,
+                        // Morph target matching the inbox group row's
+                        // cluster (Garrett 2026-10-20: same picture movement
+                        // for group chats as for 1:1, in both directions).
+                        modifier = Modifier.motionSharedAvatar(
+                            SharedElementKeys.avatar(threadId),
+                        ),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                }
             }
         }
         Column(

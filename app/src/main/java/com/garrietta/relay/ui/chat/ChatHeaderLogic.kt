@@ -1,5 +1,8 @@
 package com.garrietta.relay.ui.chat
 
+import com.garrietta.relay.data.repo.ChatScrollLogic
+import com.garrietta.relay.data.repo.ScrollPosition
+
 /**
  * Pure header-layout decisions for the chat screen (Garrett 2026-10-20).
  *
@@ -59,6 +62,58 @@ object ChatHeaderLogic {
      */
     fun groupClusterCollapsed(isGroup: Boolean, scrollCollapsed: Boolean): Boolean =
         isGroup && scrollCollapsed
+
+    /**
+     * Whether the saved position ITSELF says the chat was left at the
+     * newest message: the snapshot's anchor IS the save-time newest
+     * message, at offset 0. [ScrollPosition] records the newest
+     * message's id + date when the position is saved (current
+     * format: newestMessageDate >= 0), so this is decidable from the
+     * snapshot alone — no live message list needed. Legacy snapshots
+     * (no newest fields) cannot prove it and read false.
+     */
+    fun savedAtBottom(saved: ScrollPosition): Boolean =
+        saved.newestMessageDate >= 0L &&
+            saved.messageId == saved.newestMessageId &&
+            saved.scrollOffset == 0
+
+    /**
+     * The header's collapse state at a chat's first composition —
+     * the state the open's landing implies, decided BEFORE the
+     * scroll-restore lands (the collapse driver stays frozen until
+     * then, so this value is what renders at rest in the meantime).
+     *
+     * When a live emission is already in hand ([loadedNewestId] /
+     * [loadedNewestDate] non-null — a retained ViewModel), the exact
+     * reading applies: expanded when the saved anchor is the newest
+     * message, or when the tail grew past the snapshot (that open
+     * lands at the new bottom).
+     *
+     * When NO emission has landed yet — the common cold open, where
+     * the ViewModel's first list arrives a beat after the first
+     * frame — the decision falls back to the snapshot's own
+     * save-time fields ([savedAtBottom]). The previous initializer
+     * read this case as "opens scrolled" for EVERY chat with a saved
+     * position: a chat left exactly at the bottom reopened with its
+     * header already collapsed (Garrett 2026-10-20 — the group
+     * cluster missing at rest after an at-bottom open), and the
+     * wrong state could only correct once the restore landed, in
+     * practice surfacing on his first scroll as a spurious
+     * expand-then-collapse of the cluster.
+     */
+    fun initialHeaderCollapsed(
+        saved: ScrollPosition?,
+        loadedNewestId: Long?,
+        loadedNewestDate: Long?,
+    ): Boolean {
+        if (saved == null) return false
+        return if (loadedNewestId != null && loadedNewestDate != null) {
+            !(ChatScrollLogic.hasNewerThanSaved(saved, loadedNewestId, loadedNewestDate) ||
+                (saved.messageId == loadedNewestId && saved.scrollOffset == 0))
+        } else {
+            !savedAtBottom(saved)
+        }
+    }
 
     /**
      * What tapping "Add contact?" prefills in the system Contacts

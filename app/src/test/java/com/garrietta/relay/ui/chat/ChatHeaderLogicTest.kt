@@ -1,5 +1,6 @@
 package com.garrietta.relay.ui.chat
 
+import com.garrietta.relay.data.repo.ScrollPosition
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -187,5 +188,103 @@ class ChatHeaderLogicTest {
         // state, opposite cluster verdicts would be a coupling bug.
         assertTrue(ChatHeaderLogic.groupClusterCollapsed(true, true))
         assertFalse(ChatHeaderLogic.groupClusterCollapsed(true, false))
+    }
+
+    // ---- Initial collapse state (Garrett 2026-10-20) ----
+    //
+    // The repro: a chat left AT the newest message reopened with the
+    // header already collapsed (the group cluster missing at rest),
+    // because the initializer sampled the message list before its
+    // first emission landed and read "no emission yet" as "opens
+    // scrolled" for every saved chat. The snapshot records the
+    // save-time newest message, so "left at the bottom" is decidable
+    // without the live list.
+
+    @Test
+    fun `savedAtBottom - the snapshot's anchor is its save-time newest at offset zero`() {
+        assertTrue(
+            ChatHeaderLogic.savedAtBottom(
+                ScrollPosition(messageId = 42L, scrollOffset = 0, newestMessageId = 42L, newestMessageDate = 1_000L),
+            ),
+        )
+        // Anchor is an older message: left mid-history.
+        assertFalse(
+            ChatHeaderLogic.savedAtBottom(
+                ScrollPosition(messageId = 7L, scrollOffset = 0, newestMessageId = 42L, newestMessageDate = 1_000L),
+            ),
+        )
+        // Anchor is the newest but left mid-bounce (offset non-zero):
+        // the landing's own driver state is collapsed, so the header
+        // starts collapsed to match it.
+        assertFalse(
+            ChatHeaderLogic.savedAtBottom(
+                ScrollPosition(messageId = 42L, scrollOffset = 30, newestMessageId = 42L, newestMessageDate = 1_000L),
+            ),
+        )
+        // Legacy snapshot (no newest fields recorded): cannot prove
+        // bottom — reads false even when the anchor might be it.
+        assertFalse(
+            ChatHeaderLogic.savedAtBottom(
+                ScrollPosition(messageId = 42L, scrollOffset = 0, newestMessageId = -1L, newestMessageDate = -1L),
+            ),
+        )
+    }
+
+    @Test
+    fun `initial state - no saved position starts expanded`() {
+        assertFalse(ChatHeaderLogic.initialHeaderCollapsed(null, null, null))
+        assertFalse(ChatHeaderLogic.initialHeaderCollapsed(null, 42L, 1_000L))
+    }
+
+    @Test
+    fun `initial state - no emission yet, left at the bottom starts EXPANDED`() {
+        // Garrett's repro: first emission lags the first frame, the
+        // chat was left at the newest message. Old code: collapsed.
+        val saved = ScrollPosition(
+            messageId = 42L, scrollOffset = 0,
+            newestMessageId = 42L, newestMessageDate = 1_000L,
+        )
+        assertFalse(ChatHeaderLogic.initialHeaderCollapsed(saved, null, null))
+    }
+
+    @Test
+    fun `initial state - no emission yet, left scrolled starts collapsed`() {
+        val scrolled = ScrollPosition(
+            messageId = 7L, scrollOffset = 0,
+            newestMessageId = 42L, newestMessageDate = 1_000L,
+        )
+        assertTrue(ChatHeaderLogic.initialHeaderCollapsed(scrolled, null, null))
+        // Legacy snapshot without an emission: conservative, as before.
+        val legacy = ScrollPosition(
+            messageId = 7L, scrollOffset = 0,
+            newestMessageId = -1L, newestMessageDate = -1L,
+        )
+        assertTrue(ChatHeaderLogic.initialHeaderCollapsed(legacy, null, null))
+    }
+
+    @Test
+    fun `initial state - live emission readings are unchanged`() {
+        val bottom = ScrollPosition(
+            messageId = 42L, scrollOffset = 0,
+            newestMessageId = 42L, newestMessageDate = 1_000L,
+        )
+        // Anchor is the live newest: expanded.
+        assertFalse(ChatHeaderLogic.initialHeaderCollapsed(bottom, 42L, 1_000L))
+        // Tail grew after the save: the open lands at the new bottom,
+        // so expanded even though the anchor is no longer the newest.
+        assertFalse(ChatHeaderLogic.initialHeaderCollapsed(bottom, 99L, 2_000L))
+        // Scrolled anchor, no growth: collapsed.
+        val scrolled = ScrollPosition(
+            messageId = 7L, scrollOffset = 0,
+            newestMessageId = 42L, newestMessageDate = 1_000L,
+        )
+        assertTrue(ChatHeaderLogic.initialHeaderCollapsed(scrolled, 42L, 1_000L))
+        // Bottom anchor at a non-zero offset: collapsed, matching the
+        // landing's driver state (the long-standing offset rule).
+        val bounced = ScrollPosition(
+            messageId = 42L, scrollOffset = 30,
+            newestMessageId = 42L, newestMessageDate = 1_000L,
+        )
+        assertTrue(ChatHeaderLogic.initialHeaderCollapsed(bounced, 42L, 1_000L))
     }
 }

@@ -17,7 +17,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,7 +27,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -36,20 +34,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -65,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,7 +71,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
@@ -88,6 +84,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
+import com.garrietta.relay.ui.TopSearchPopup
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -140,9 +137,13 @@ fun InboxScreen(
     // list at the top, and the header-collapse + bottom-bar effects below
     // re-key on it.
     val listState = remember(selectedCategoryId) { LazyListState() }
-    // Search lives behind the bottom-right expressive button now; tapping
-    // it swaps the category bar slot for the search field.
+    // Search lives behind the bottom-right expressive button; tapping it
+    // opens the shared top-center search popup (see ConversationSearchPopup
+    // below). The button also CLOSES the popup: it stays visible above the
+    // popup's scrim, and a tap increments searchDismissSignal, which the
+    // popup turns into its normal animated exit.
     var searchOpen by remember { mutableStateOf(false) }
+    var searchDismissSignal by remember { mutableIntStateOf(0) }
     // Search query must NEVER persist: Garrett's bug — type "haley", exit
     // the app, come back, and the inbox is still filtered. Leaving the
     // inbox (background) or returning to it always resets to the default
@@ -229,51 +230,25 @@ fun InboxScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
+        // Outer full-window box: the search popup overlays the WHOLE
+        // window (header included) from here, exactly like the new-chat
+        // popup at the activity level, and the bottom cluster stays
+        // above the popup's scrim. The padded inner box holds only the
+        // list column.
+        Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Search bar: POP-UP entrance (Garrett 2026-10-19: "i expect
-                // like a pop up animation, take inspiration from popular
-                // apps"). The bar blooms into place from the search button:
-                // scale-up + rise + fade on the bouncy spring — a pop, not a
-                // drop. The category pill bar STAYS visible below it while
-                // searching — search and category filter COMBINE, so he can
-                // flip All/W/T mid-search to re-filter the results.
-                AnimatedVisibility(
-                    visible = searchOpen,
-                    enter = fadeIn(animationSpec = tween(180)) +
-                        scaleIn(
-                            animationSpec = RelaySprings.bouncy(),
-                            initialScale = 0.9f,
-                        ) +
-                        slideInVertically(
-                            animationSpec = RelaySprings.bouncy(),
-                            // Surges in OVER THE TOP of the screen, not a
-                            // bloom in place (Garrett 2026-10-19).
-                            initialOffsetY = { -it },
-                        ),
-                    exit = fadeOut(tween(150)) +
-                        slideOutVertically(
-                            animationSpec = tween(180),
-                            targetOffsetY = { -it / 2 },
-                        ),
-                    label = "searchBar",
-                ) {
-                    // Search mode: the field sits above the category bar,
-                    // with a back affordance to close it. Entered from the
-                    // bottom-right expressive search button.
-                    SearchField(
-                        query = query,
-                        onQueryChange = viewModel::setQuery,
-                        onClose = {
-                            searchOpen = false
-                            viewModel.setQuery("")
-                        },
-                    )
-                }
+                // Search is the shared top-center popup now (Garrett
+                // 2026-10-20: the search button gets "the same popup as
+                // the new chat button") — composed as an overlay at the
+                // root Box below, NOT an inline bar. The category filter
+                // still COMBINES with the query: the popup's results are
+                // `conversations`, which the view model already filters
+                // by selected category AND query together.
                 // Category bar — music-app style chips (no container pill).
                 // Rendered when custom categories exist or the built-in
                 // Unknown tab is on; otherwise the inbox shows no bar.
@@ -369,6 +344,32 @@ fun InboxScreen(
                 }
             }
             }
+        }
+            // Conversation search popup — the SAME TopSearchPopup as the
+            // new-chat button (Garrett 2026-10-20). Composed BEFORE the
+            // bottom cluster so the pill + search button render ABOVE the
+            // popup's scrim and stay tappable: the search button remains
+            // the toggle that closes the popup. Results are the already
+            // category-filtered `conversations` (query applied by the view
+            // model), so search and category combine exactly as before.
+            if (searchOpen) {
+                ConversationSearchPopup(
+                    query = query,
+                    onQueryChange = viewModel::setQuery,
+                    results = conversations,
+                    selectedThreadId = selectedThreadId,
+                    dismissSignal = searchDismissSignal,
+                    onDismiss = {
+                        searchOpen = false
+                        viewModel.setQuery("")
+                    },
+                    onOpenChat = { conversation ->
+                        searchOpen = false
+                        viewModel.setQuery("")
+                        onOpenChat(conversation)
+                    },
+                )
+            }
             // Bottom cluster: the new-conversation pill (cropped width-wise to
             // make room) + the expressive search button at the bottom-right.
             // Both slide down off the bottom of the phone on scroll-down and
@@ -400,7 +401,7 @@ fun InboxScreen(
                     // Search: a distinctive expressive shape (Sunny star) —
                     // deliberately NOT a circle, per the expressive brief.
                     // Press-pop: the button itself bounces when tapped, so
-                    // the tap feels connected to the search bar blooming in.
+                    // the tap feels connected to the search popup popping in.
                     val searchInteraction = remember { MutableInteractionSource() }
                     val searchPressed by searchInteraction.collectIsPressedAsState()
                     val searchPop by animateFloatAsState(
@@ -420,13 +421,15 @@ fun InboxScreen(
                             .clickable(
                                 interactionSource = searchInteraction,
                                 indication = null,
-                                // Tapping the search button while search is open
-                                // DISMISSES it (Garrett 2026-10-19) — the
-                                // button is a toggle, not a one-way door.
+                                // Tapping the search button while the popup is
+                                // open DISMISSES it (Garrett 2026-10-19) — the
+                                // button is a toggle, not a one-way door. The
+                                // close goes through the popup's dismiss
+                                // signal so it plays the same animated exit as
+                                // Cancel/back/scrim instead of vanishing.
                                 onClick = {
                                     if (searchOpen) {
-                                        searchOpen = false
-                                        viewModel.setQuery("")
+                                        searchDismissSignal++
                                     } else {
                                         searchOpen = true
                                     }
@@ -449,75 +452,173 @@ fun InboxScreen(
 }
 
 /**
- * The search field, shown in the category bar's slot while search mode is
- * open (entered from the bottom-right expressive search button). Compact
- * 48dp pill with a back affordance to close; clear button appears when
- * there's a query.
+ * Conversation search as the shared [TopSearchPopup] — Garrett 2026-10-20:
+ * the search button gets the same popup as the new-chat button. Same
+ * card, same top-center anchor, same bouncy entrance, same bottom edge
+ * parked above the keyboard.
+ *
+ * Results are the inbox's own `conversations` flow, which the view model
+ * has ALREADY filtered by the selected category AND the query — search
+ * and category combine, exactly as the old inline search bar behaved.
+ * Idle state (blank query) lists the current category's conversations;
+ * tapping one opens the chat (after the popup's exit animation, via
+ * requestExit). The query is cleared by the caller on every exit path,
+ * so a stale filter can never persist.
  */
 @Composable
-private fun SearchField(
+private fun ConversationSearchPopup(
     query: String,
     onQueryChange: (String) -> Unit,
-    onClose: () -> Unit,
+    results: List<Conversation>,
+    selectedThreadId: Long?,
+    dismissSignal: Int,
+    onDismiss: () -> Unit,
+    onOpenChat: (Conversation) -> Unit,
 ) {
-    Surface(
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-            .heightIn(min = 48.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+    TopSearchPopup(
+        title = "Search",
+        query = query,
+        onQueryChange = onQueryChange,
+        placeholder = "Search conversations",
+        onDismiss = onDismiss,
+        dismissSignal = dismissSignal,
+    ) { requestExit ->
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp),
         ) {
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier.size(32.dp),
-            ) {
-                Icon(
-                    Icons.Filled.ArrowBack,
-                    contentDescription = "Close search",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
+            items(
+                items = results,
+                key = { it.threadId },
+                contentType = { "conversation" },
+            ) { conversation ->
+                SearchResultRow(
+                    conversation = conversation,
+                    isSelected = conversation.threadId == selectedThreadId,
+                    onClick = { requestExit { onOpenChat(conversation) } },
                 )
             }
-            Spacer(Modifier.width(4.dp))
-            BasicTextField(
-                value = query,
-                onValueChange = onQueryChange,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = MaterialTheme.colorScheme.onSurface,
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                decorationBox = { inner ->
-                    if (query.isEmpty()) {
-                        Text(
-                            "Search conversations",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                        )
-                    }
-                    inner()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            if (query.isNotEmpty()) {
-                IconButton(
-                    onClick = { onQueryChange("") },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        Icons.Filled.Close,
-                        contentDescription = "Clear search",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
+            if (results.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        if (query.isBlank()) "No conversations"
+                        else "No conversations match \"$query\"",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 20.dp, horizontal = 4.dp),
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * One search result: the inbox row's content (avatar, name, time,
+ * snippet, transport chip) without the list-only machinery — no swipe
+ * actions and no shared-element morph inside a popup.
+ */
+@Composable
+private fun SearchResultRow(
+    conversation: Conversation,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                if (isSelected) MaterialTheme.colorScheme.secondaryContainer
+                else Color.Transparent,
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SearchResultAvatar(conversation)
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    conversation.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (conversation.unread) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    formatTime(conversation.date),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (conversation.unread)
+                        MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (conversation.unread) {
+                    Box(
+                        modifier = Modifier
+                            .size(width = 12.dp, height = 8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    conversation.snippet.ifBlank { "No messages" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (conversation.unread) FontWeight.Medium else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.width(8.dp))
+                TransportChip(conversation.transportLabel)
+            }
+        }
+    }
+}
+
+/**
+ * The inbox [Avatar] minus its shared-element morph and press scale —
+ * inside the search popup both would fight the popup's own animation.
+ * Same slot, same per-contact shapes, same group cluster.
+ */
+@Composable
+private fun SearchResultAvatar(conversation: Conversation) {
+    AvatarSlot {
+        if (conversation.participants.size > 1) {
+            GroupAvatarCluster(
+                members = conversation.participants.filterNot { it.isUnknownSenderGhost() }.map {
+                    ClusterMember(
+                        photoUri = it.photoUri,
+                        name = it.displayName.ifBlank { it.address },
+                        address = it.address,
+                    )
+                },
+                conversationKey = conversation.rcsConversationId
+                    ?: "tel:${conversation.threadId}",
+                boxSize = 60.dp,
+            )
+        } else {
+            val shapeKey = conversation.address.ifBlank { conversation.displayName }
+            val overlayShape = remember(shapeKey) {
+                AvatarShapeAssigner.namedShapeFor(shapeKey).shape
+            }
+            ContactAvatar(
+                photoUri = conversation.photoUri,
+                name = conversation.displayName,
+                shapeKey = shapeKey,
+                size = 56.dp,
+                shape = overlayShape,
+            )
         }
     }
 }

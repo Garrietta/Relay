@@ -278,3 +278,43 @@ fun senderBubbleColors(
     val nameTone = Color(ensureContrast(s, threadBackground.toArgb()))
     return Triple(container, onContainer, nameTone)
 }
+
+/**
+ * Resolved bubble colors for a user-picked per-chat COLORWAY (Garrett
+ * 2026-10-20, feature queue 3/7): both directions derived from the one
+ * seed the user chose in Chat Details, with the same tonal discipline
+ * as [senderBubbleColors] and every text pair verified against WCAG AA
+ * (4.5:1) via [ensureContrast].
+ *
+ * GROUP RULE: with no colorway picked, group chats keep their
+ * per-sender photo-derived bubble colors untouched. Picking a colorway
+ * is an explicit override — incoming bubbles for EVERY sender take the
+ * colorway's incoming pair (uniform, readable), while each sender's
+ * NAME keeps its per-sender tone, so identity survives the override.
+ * Outgoing bubbles take the colorway in 1:1 and group chats alike.
+ */
+data class ChatBubblePair(
+    val outgoing: Color,
+    val onOutgoing: Color,
+    val incoming: Color,
+    val onIncoming: Color,
+)
+
+fun chatBubblePair(seed: Color, darkTheme: Boolean): ChatBubblePair {
+    val s = seed.toArgb()
+    val white = android.graphics.Color.WHITE
+    val black = android.graphics.Color.BLACK
+    fun blendTo(target: Int, ratio: Float) = Color(ColorUtils.blendARGB(s, target, ratio))
+    // Outgoing carries the hue with presence; incoming is the same hue
+    // as a quieter pastel (light) / deeper tint (dark) so the two
+    // directions stay distinguishable at a glance.
+    val outgoing = if (!darkTheme) blendTo(white, 0.42f) else blendTo(black, 0.30f)
+    val incoming = if (!darkTheme) blendTo(white, 0.78f) else blendTo(black, 0.58f)
+    val onBase = if (!darkTheme) black else white
+    return ChatBubblePair(
+        outgoing = outgoing,
+        onOutgoing = Color(ensureContrast(onBase, outgoing.toArgb())),
+        incoming = incoming,
+        onIncoming = Color(ensureContrast(onBase, incoming.toArgb())),
+    )
+}

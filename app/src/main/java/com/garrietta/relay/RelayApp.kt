@@ -6,6 +6,7 @@ import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatScrollStore
+import com.garrietta.relay.data.repo.ChatThemeStore
 import com.garrietta.relay.data.repo.MuteStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
@@ -42,6 +43,9 @@ class RelayApp : Application() {
 
     /** Per-conversation true mute for notifications (see MuteStore). */
     val muteStore: MuteStore by lazy { MuteStore(this) }
+
+    /** Per-conversation chat themes — local presentation (see ChatThemeStore). */
+    val chatThemeStore: ChatThemeStore by lazy { ChatThemeStore(this) }
 
     /**
      * Application-scoped coroutine scope: survives Activity destruction.

@@ -2,6 +2,7 @@ package com.garrietta.relay.ui.chat
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -115,6 +116,7 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.graphicsLayer
@@ -131,9 +133,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.garrietta.relay.RelayApp
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
@@ -142,11 +146,16 @@ import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
+import com.garrietta.relay.ui.theme.ChatBubblePair
 import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.GroupAvatarCluster
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
 import com.garrietta.relay.ui.theme.WavyBlobShape
+import com.garrietta.relay.ui.theme.chatBackgroundOption
+import com.garrietta.relay.ui.theme.chatBackgroundTones
+import com.garrietta.relay.ui.theme.chatBubblePair
+import com.garrietta.relay.ui.theme.chatColorwayOption
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import com.garrietta.relay.ui.theme.senderBubbleColors
 import android.content.Context
@@ -247,6 +256,43 @@ fun ChatScreen(
     // group always gets the same cluster arrangement (spiral/grid/zigzag).
     val patternKey = rcsConversationId ?: "tel:$threadId"
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    // Per-chat theme (Garrett 2026-10-20, feature queue 3/7): LOCAL
+    // presentation only — a background gradient + bubble colorway for
+    // THIS conversation, picked in Chat Details and stored in
+    // ChatThemeStore under the same conversation key as the mute.
+    // A null option renders EXACTLY today's look; nothing here touches
+    // the wire, the inbox, or other conversations.
+    val themeStore = remember { (chatContext.applicationContext as RelayApp).chatThemeStore }
+    val chatThemes by themeStore.themes.collectAsState()
+    val themeKey = remember(rcsConversationId, threadId) {
+        CategoryStore.conversationKey(rcsConversationId, threadId)
+    }
+    val chatTheme = chatThemes[themeKey]
+    val bgOption = chatBackgroundOption(chatTheme?.backgroundId)
+    val bubblePair = remember(chatTheme?.colorwayId, darkTheme) {
+        chatColorwayOption(chatTheme?.colorwayId)?.let { chatBubblePair(it.seed, darkTheme) }
+    }
+    // Wallpaper tones crossfade on RelaySprings when the pick (or the
+    // light/dark mode) changes — no hard cut. Unthemed, both stops are
+    // the flat surfaceContainerLow and the gradient IS today's
+    // background; the scaffold/header still read the scheme directly
+    // then, so the unthemed path is untouched.
+    val themedSurfaceLow = MaterialTheme.colorScheme.surfaceContainerLow
+    val bgTop by animateColorAsState(
+        targetValue = bgOption?.let { chatBackgroundTones(it.seed, darkTheme).first }
+            ?: themedSurfaceLow,
+        animationSpec = RelaySprings.gentle(),
+        label = "chatBgTop",
+    )
+    val bgBottom by animateColorAsState(
+        targetValue = bgOption?.let { chatBackgroundTones(it.seed, darkTheme).second }
+            ?: themedSurfaceLow,
+        animationSpec = RelaySprings.gentle(),
+        label = "chatBgBottom",
+    )
+    val bgBrush = remember(bgTop, bgBottom) {
+        Brush.verticalGradient(listOf(bgTop, bgBottom))
+    }
     // Scroll-restore bookkeeping (declared here, above the header state:
     // the header's initial collapse derives from the saved position, and
     // the collapse driver below stays frozen until the restore lands).
@@ -363,8 +409,10 @@ fun ChatScreen(
 
     MaterialTheme(colorScheme = chatScheme) {
         // Inside the seeded scheme: the thread background the sender-name
-        // tones are contrast-checked against.
-        val threadBackground = MaterialTheme.colorScheme.surfaceContainerLow
+        // tones are contrast-checked against — the theme's bottom tone
+        // when a background is picked, the scheme surface otherwise.
+        val threadBackground = if (bgOption != null) bgBottom
+            else MaterialTheme.colorScheme.surfaceContainerLow
         Scaffold(
             topBar = {
                 ChatHeader(
@@ -378,13 +426,18 @@ fun ChatScreen(
                     transportLabel = liveTransportLabel,
                     scrolled = scrolled,
                     patternKey = patternKey,
+                    // The header takes the wallpaper's TOP tone flat:
+                    // the thread container owns the gradient starting
+                    // from that same tone, so the seam is invisible.
+                    backgroundColor = if (bgOption != null) bgTop else null,
                     onBack = onBack,
                     onOpenDetails = onOpenDetails,
                 )
             },
             // Seamless with the thread container below — the header
             // background and the list background are one continuous tone.
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            containerColor = if (bgOption != null) bgBottom
+                else MaterialTheme.colorScheme.surfaceContainerLow,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { padding ->
             // Thread container: the chat reads as one large rounded container
@@ -399,7 +452,16 @@ fun ChatScreen(
                         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                     )
                     .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    // Chat wallpaper (Garrett 2026-10-20): the picked
+                    // background gradient fills the thread; unthemed
+                    // chats keep the flat scheme surface, byte-for-byte
+                    // today's look.
+                    .then(
+                        if (bgOption != null) Modifier.background(bgBrush)
+                        else Modifier.background(
+                            MaterialTheme.colorScheme.surfaceContainerLow,
+                        ),
+                    )
                     .imePadding()
                     // Tap-outside clears the text field's focus: message
                     // bubbles consume their own taps (child clickables win),
@@ -477,6 +539,7 @@ fun ChatScreen(
                                     sender = if (isGroup && !message.isOutgoing)
                                         viewModel.senderFor(message.address) else null,
                                     isGroup = isGroup,
+                                    bubblePair = bubblePair,
                                     onAvatarClick = { sender ->
                                         onOpenDetails(sender.address)
                                     },
@@ -507,6 +570,7 @@ fun ChatScreen(
                                 senderSeed = if (isGroup && !message.isOutgoing)
                                     viewModel.seedFor(message.address) else null,
                                 isGroup = isGroup,
+                                bubblePair = bubblePair,
                                 threadBackground = threadBackground,
                                 darkTheme = darkTheme,
                                 maxBubbleWidth = maxBubbleWidth,
@@ -707,13 +771,19 @@ private fun ChatHeader(
     transportLabel: String,
     scrolled: Boolean,
     patternKey: String,
+    /** Picked chat wallpaper's top tone; the header tints to match the
+     * thread's gradient start so the two read as one surface.
+     * Null = default flat scheme surface. */
+    backgroundColor: Color? = null,
     onBack: () -> Unit,
     onOpenDetails: (focusAddress: String?) -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .background(
+                backgroundColor ?: MaterialTheme.colorScheme.surfaceContainerLow,
+            )
             .windowInsetsPadding(WindowInsets.statusBars),
     ) {
         when (mode) {
@@ -1045,6 +1115,9 @@ private fun MediaBubble(
      * leading edge). Null outside groups. */
     sender: Participant? = null,
     isGroup: Boolean = false,
+    /** Picked per-chat bubble colorway (Garrett 2026-10-20); tints the
+     * caption bubble under the media. Null = scheme colors. */
+    bubblePair: ChatBubblePair? = null,
     /** Tapping the sender's avatar opens their details page. */
     onAvatarClick: (Participant) -> Unit = {},
 ) {
@@ -1274,8 +1347,10 @@ private fun MediaBubble(
                     .widthIn(max = maxBubbleWidth)
                     .clip(RoundedCornerShape(20.dp))
                     .background(
-                        if (message.isOutgoing) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        if (message.isOutgoing) bubblePair?.outgoing
+                            ?: MaterialTheme.colorScheme.primaryContainer
+                        else bubblePair?.incoming
+                            ?: MaterialTheme.colorScheme.surfaceContainerHigh,
                     )
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
@@ -1286,8 +1361,10 @@ private fun MediaBubble(
                     Text(
                         message.body,
                         style = MaterialTheme.typography.bodyLarge,
-                        color = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimaryContainer
-                        else MaterialTheme.colorScheme.onSurface,
+                        color = if (message.isOutgoing) bubblePair?.onOutgoing
+                            ?: MaterialTheme.colorScheme.onPrimaryContainer
+                        else bubblePair?.onIncoming
+                            ?: MaterialTheme.colorScheme.onSurface,
                     )
                 }
             }
@@ -1600,6 +1677,10 @@ private fun MessageBubble(
     sender: Participant? = null,
     senderSeed: Color? = null,
     isGroup: Boolean = false,
+    /** Picked per-chat bubble colorway (Garrett 2026-10-20). Null =
+     * default: outgoing = scheme primaryContainer, 1:1 incoming =
+     * surfaceContainerHigh, group incoming = per-sender colors. */
+    bubblePair: ChatBubblePair? = null,
     threadBackground: Color = Color.Transparent,
     darkTheme: Boolean = false,
     /** Received bubbles keep an empty right margin; sent an empty left one. */
@@ -1625,15 +1706,22 @@ private fun MessageBubble(
         senderBubbleColors(senderSeed, threadBackground, darkTheme, MaterialTheme.colorScheme)
     val containerColor = when {
         selected -> MaterialTheme.colorScheme.secondaryContainer
-        message.isOutgoing -> MaterialTheme.colorScheme.primaryContainer
-        groupIncoming -> senderContainer
-        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+        message.isOutgoing -> bubblePair?.outgoing
+            ?: MaterialTheme.colorScheme.primaryContainer
+        // Colorway override (Garrett 2026-10-20): a picked colorway wins
+        // over per-sender group colors for the bubble FILL — the user's
+        // explicit choice outranks the automatic variety. Unpicked,
+        // group bubbles keep their per-sender colors exactly as before.
+        groupIncoming -> bubblePair?.incoming ?: senderContainer
+        else -> bubblePair?.incoming
+            ?: MaterialTheme.colorScheme.surfaceContainerHigh
     }
     val contentColor = when {
         selected -> MaterialTheme.colorScheme.onSecondaryContainer
-        message.isOutgoing -> MaterialTheme.colorScheme.onPrimaryContainer
-        groupIncoming -> senderOnContainer
-        else -> MaterialTheme.colorScheme.onSurface
+        message.isOutgoing -> bubblePair?.onOutgoing
+            ?: MaterialTheme.colorScheme.onPrimaryContainer
+        groupIncoming -> bubblePair?.onIncoming ?: senderOnContainer
+        else -> bubblePair?.onIncoming ?: MaterialTheme.colorScheme.onSurface
     }
 
     Column(

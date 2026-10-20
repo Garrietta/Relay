@@ -12,10 +12,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -44,6 +46,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -68,6 +71,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -84,12 +88,17 @@ import com.garrietta.relay.RelayApp
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatTheme
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.motion.RelaySprings
+import com.garrietta.relay.ui.theme.ChatBackgroundOptions
+import com.garrietta.relay.ui.theme.ChatColorwayOptions
 import com.garrietta.relay.ui.theme.ClusterMember
 import com.garrietta.relay.ui.theme.ContactAvatar
 import com.garrietta.relay.ui.theme.GroupAvatarCluster
 import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
+import com.garrietta.relay.ui.theme.chatBackgroundBrush
+import com.garrietta.relay.ui.theme.chatBubblePair
 import com.garrietta.relay.ui.theme.expressiveShape
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -141,6 +150,17 @@ fun ChatDetailsScreen(
         CategoryStore.conversationKey(rcsConversationId, threadId)
     }
     val muted = muteKey in mutedKeys
+    // Per-chat theme (Garrett 2026-10-20, feature queue 3/7): the
+    // "chat theme" row the #119 details page skipped is real now — it
+    // never needed a backend, the theme is local presentation stored in
+    // RelayApp's ChatThemeStore under the SAME conversation key as the
+    // mute above. Picked here, applied in ChatScreen only.
+    val themeStore = remember { (context.applicationContext as RelayApp).chatThemeStore }
+    val chatThemes by themeStore.themes.collectAsState()
+    val chatTheme = chatThemes[muteKey]
+    // Swatch previews resolve for the mode the details page itself is
+    // in (same background-luminance inference the chat scheme uses).
+    val themeDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val others by viewModel.others.collectAsState()
     val participants by viewModel.participants.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -579,6 +599,21 @@ fun ChatDetailsScreen(
                                 }
                             }
                         }
+                        item(key = "theme") {
+                            DetailsSectionCard(title = "Chat theme") {
+                                ChatThemePicker(
+                                    theme = chatTheme,
+                                    darkTheme = themeDark,
+                                    onBackground = { id ->
+                                        themeStore.setBackground(muteKey, id)
+                                    },
+                                    onColorway = { id ->
+                                        themeStore.setColorway(muteKey, id)
+                                    },
+                                    onReset = { themeStore.reset(muteKey) },
+                                )
+                            }
+                        }
                         item(key = "options") {
                             DetailsSectionCard(title = "Options") {
                               Column {
@@ -808,6 +843,186 @@ private fun DetailsActionButton(
             text = label,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * Chat theme picker (Garrett 2026-10-20): background gradients + bubble
+ * colorways for THIS conversation, applied on this device only — the
+ * pick never leaves the phone. "Default" restores today's look per
+ * half (background / bubbles are independent picks); Reset clears both.
+ * In groups, a picked colorway overrides the per-sender bubble colors
+ * while sender names keep their per-sender tones (see chatBubblePair).
+ */
+@Composable
+private fun ChatThemePicker(
+    theme: ChatTheme?,
+    darkTheme: Boolean,
+    onBackground: (String?) -> Unit,
+    onColorway: (String?) -> Unit,
+    onReset: () -> Unit,
+) {
+    Text(
+        text = "Background",
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        item(key = "bg-default") {
+            ThemeSwatch(
+                name = "Default",
+                selected = theme?.backgroundId == null,
+                onClick = { onBackground(null) },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow),
+                )
+            }
+        }
+        items(ChatBackgroundOptions, key = { "bg-${it.id}" }) { option ->
+            ThemeSwatch(
+                name = option.name,
+                selected = theme?.backgroundId == option.id,
+                onClick = { onBackground(option.id) },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(chatBackgroundBrush(option.seed, darkTheme)),
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(16.dp))
+    Text(
+        text = "Bubbles",
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        item(key = "cw-default") {
+            ThemeSwatch(
+                name = "Default",
+                selected = theme?.colorwayId == null,
+                onClick = { onColorway(null) },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(20.dp)
+                            .clip(RoundedCornerShape(topStart = 12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                    )
+                }
+            }
+        }
+        items(ChatColorwayOptions, key = { "cw-${it.id}" }) { option ->
+            val pair = remember(option.id, darkTheme) {
+                chatBubblePair(option.seed, darkTheme)
+            }
+            ThemeSwatch(
+                name = option.name,
+                selected = theme?.colorwayId == option.id,
+                onClick = { onColorway(option.id) },
+            ) {
+                // Preview = the outgoing tone with the incoming tone
+                // tucked into the corner: both halves of the pair.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(pair.outgoing),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(20.dp)
+                            .clip(RoundedCornerShape(topStart = 12.dp))
+                            .background(pair.incoming),
+                    )
+                }
+            }
+        }
+    }
+    if (theme != null && !theme.isDefault) {
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onReset,
+                )
+                .padding(vertical = 10.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.Refresh,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = "Reset to default",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        text = "Applies to this chat on this device only.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** One theme swatch: a rounded preview tile + name; primary ring when picked. */
+@Composable
+private fun ThemeSwatch(
+    name: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    preview: @Composable BoxScope.() -> Unit,
+) {
+    val swatchShape = RoundedCornerShape(18.dp)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(swatchShape)
+                .border(
+                    width = if (selected) 3.dp else 1.dp,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant,
+                    shape = swatchShape,
+                )
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick,
+                ),
+        ) {
+            preview()
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
     }

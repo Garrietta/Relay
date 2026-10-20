@@ -31,9 +31,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 
 /**
  * Centralized motion policy: feature code never hand-writes springs/tweens/slides.
@@ -294,6 +298,132 @@ object SharedElementKeys {
 }
 
 /**
+ * The inbox chrome band, in window pixels: the vertical span the
+ * conversation-list surface occupies, between the inbox's top chrome
+ * (the collapsing "Messages" header + the category pill bar) above and
+ * the floating bottom cluster (New conversation pill + search button)
+ * below. [topPx] is the list surface's top edge; [bottomPx] is the
+ * bottom cluster's top edge.
+ *
+ * Written by InboxScreen from layout callbacks — deliberately NOT
+ * snapshot state: the top edge moves 1:1 with list scroll (the header
+ * collapses), and reading it in composition would recompose every row
+ * on every scroll frame. Read by [ChromeBandOverlayClip] once per
+ * overlay frame at draw time, so a transition always clips against the
+ * chrome geometry in effect at that moment — including mid-collapse.
+ *
+ * Coordinates: `positionInWindow` of the measured nodes. The nav
+ * root's SharedTransitionLayout fills the window at its origin in
+ * both hosts, so window coordinates ARE the shared scope's
+ * coordinates — the space [SharedTransitionScope.OverlayClip]'s
+ * bounds arrive in. Until the inbox first lays out, [topPx] = 0 and
+ * [bottomPx] = +infinity, which degenerates to the unclipped shape
+ * clip; the inbox is the start destination, so real values land
+ * before any chat can open.
+ */
+object InboxChromeBand {
+    @Volatile var topPx: Float = 0f
+    @Volatile var bottomPx: Float = Float.POSITIVE_INFINITY
+}
+
+/** Pure span math for [ChromeBandOverlayClip] (unit-tested). */
+object ChromeBandClipMath {
+
+    /**
+     * The [top, bottom] slice of a vertical span that lies inside the
+     * band [bandTopPx, bandBottomPx]: the span clamped to the band.
+     * A span lying entirely outside the band (or a degenerate band)
+     * yields a zero-height slice (bottom == top), never an inverted
+     * one, so callers can build a Rect directly from the result.
+     */
+    fun visibleSpan(
+        top: Float,
+        bottom: Float,
+        bandTopPx: Float,
+        bandBottomPx: Float,
+    ): Pair<Float, Float> {
+        val clippedTop = maxOf(top, bandTopPx)
+        val clippedBottom = minOf(bottom, bandBottomPx)
+        if (clippedBottom >= clippedTop) return clippedTop to clippedBottom
+        // No overlap: park the zero-height slice on the band edge the
+        // span sits beyond — above the band, its top edge; below it,
+        // its bottom edge (a degenerate crossed band also lands here).
+        val park = if (bottom <= bandTopPx) bandTopPx else bandBottomPx
+        return park to park
+    }
+}
+
+/**
+ * Overlay clip for the conversation CONTAINER morph
+ * ([motionSharedBounds]): the element's own shape clip, intersected
+ * with the inbox chrome band ([InboxChromeBand]).
+ *
+ * The SharedTransitionLayout overlay is the topmost surface in the
+ * nav root — it draws above EVERY destination's own chrome. The
+ * container morph's animated bounds sweep between the thread surface
+ * and the tapped row, crossing the band the inbox header occupies,
+ * so unclipped, the returning thread's text painted OVER the
+ * "Messages" title and the category pills for the top row — the only
+ * row whose morph path reaches that band (Garrett's device video,
+ * 2026-10-20 12:37; symmetrically, a morph to/from the last visible
+ * row could cross the floating bottom cluster). Intersecting the
+ * copy with the band makes the traveling surface pass BEHIND the
+ * chrome in both directions: it emerges from under the header line,
+ * lands in its row, and never hovers over the main page's elements —
+ * at any header collapse state, for 1:1 and group rows alike, because
+ * the clip hangs on the shared container registration itself, not on
+ * any row composable.
+ *
+ * Deliberately NOT applied to [motionSharedAvatar]: the avatar's
+ * chat-side endpoint lives in the chat header, ABOVE the band —
+ * band-clipping it would erase the glyph for most of its flight and
+ * kill the picture movement. The band protects the chrome from page
+ * CONTENT (text, images, whole surfaces); the avatar is a compact
+ * pictorial element traveling between two pages' own header/row
+ * slots, which is the morph Garrett asked to keep as-is.
+ */
+private class ChromeBandOverlayClip(
+    private val shape: Shape?,
+) : SharedTransitionScope.OverlayClip {
+
+    private val shapePath = Path()
+    private val bandPath = Path()
+    private val clippedPath = Path()
+
+    override fun getClipPath(
+        sharedContentState: SharedTransitionScope.SharedContentState,
+        bounds: Rect,
+        layoutDirection: LayoutDirection,
+        density: Density,
+    ): Path {
+        shapePath.reset()
+        if (shape != null) {
+            // The framework's own shape-clip construction: the shape's
+            // outline at the animated bounds' size, offset to the
+            // bounds' position in the shared scope.
+            shapePath.addOutline(shape.createOutline(bounds.size, layoutDirection, density))
+            shapePath.translate(bounds.topLeft)
+        } else {
+            shapePath.addRect(bounds)
+        }
+        val bandTop = InboxChromeBand.topPx
+        val bandBottom = InboxChromeBand.bottomPx
+        if (bandTop <= bounds.top && bandBottom >= bounds.bottom) {
+            // Bounds fully inside the band: the shape clip alone is
+            // the answer — the common case for every non-top row.
+            return shapePath
+        }
+        val (visibleTop, visibleBottom) =
+            ChromeBandClipMath.visibleSpan(bounds.top, bounds.bottom, bandTop, bandBottom)
+        bandPath.reset()
+        bandPath.addRect(Rect(bounds.left, visibleTop, bounds.right, visibleBottom))
+        clippedPath.reset()
+        clippedPath.op(shapePath, bandPath, PathOperation.Intersect)
+        return clippedPath
+    }
+}
+
+/**
  * CONTAINER TRANSFORM — put the SAME key on the tapped origin AND the detail target.
  * Pass each side's own [shape] so corners round correctly in the transition overlay.
  *
@@ -316,6 +446,11 @@ object SharedElementKeys {
  * is now the true mirror of open at the shared layer too, matching
  * the pane transforms ([SharedAxisTravel]).
  *
+ * The overlay clip is [ChromeBandOverlayClip]: the element's shape clip
+ * intersected with the inbox chrome band, so the traveling surface
+ * passes BEHIND the main page's header and bottom cluster instead of
+ * painting over them (the top-row hover, Garrett 2026-10-20 12:37).
+ *
  * IMPORTANT: apply at the actual visual endpoint only. Never inside reusable item
  * composables that may also be composed in measurement/offscreen layers — duplicate
  * shared-content registrations break the transition.
@@ -334,40 +469,23 @@ fun Modifier.motionSharedBounds(
 
     return with(sharedScope) {
         val sharedContentState = rememberSharedContentState(key)
-        val overlayClip = shape?.let { OverlayClip(it) }
+        val overlayClip = ChromeBandOverlayClip(shape)
         val resizeMode = scaleToFit?.let { SharedTransitionScope.ResizeMode.scaleToBounds(it) }
-        when {
-            overlayClip != null && resizeMode != null ->
-                this@motionSharedBounds.sharedBounds(
-                    sharedContentState = sharedContentState,
-                    animatedVisibilityScope = animatedScope,
-                    boundsTransform = boundsTransform,
-                    resizeMode = resizeMode,
-                    clipInOverlayDuringTransition = overlayClip,
-                )
-
-            overlayClip != null ->
-                this@motionSharedBounds.sharedBounds(
-                    sharedContentState = sharedContentState,
-                    animatedVisibilityScope = animatedScope,
-                    boundsTransform = boundsTransform,
-                    clipInOverlayDuringTransition = overlayClip,
-                )
-
-            resizeMode != null ->
-                this@motionSharedBounds.sharedBounds(
-                    sharedContentState = sharedContentState,
-                    animatedVisibilityScope = animatedScope,
-                    boundsTransform = boundsTransform,
-                    resizeMode = resizeMode,
-                )
-
-            else ->
-                this@motionSharedBounds.sharedBounds(
-                    sharedContentState = sharedContentState,
-                    animatedVisibilityScope = animatedScope,
-                    boundsTransform = boundsTransform,
-                )
+        if (resizeMode != null) {
+            this@motionSharedBounds.sharedBounds(
+                sharedContentState = sharedContentState,
+                animatedVisibilityScope = animatedScope,
+                boundsTransform = boundsTransform,
+                resizeMode = resizeMode,
+                clipInOverlayDuringTransition = overlayClip,
+            )
+        } else {
+            this@motionSharedBounds.sharedBounds(
+                sharedContentState = sharedContentState,
+                animatedVisibilityScope = animatedScope,
+                boundsTransform = boundsTransform,
+                clipInOverlayDuringTransition = overlayClip,
+            )
         }
     }
 }

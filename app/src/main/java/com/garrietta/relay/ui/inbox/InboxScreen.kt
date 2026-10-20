@@ -73,6 +73,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontStyle
@@ -87,6 +89,7 @@ import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.TopSearchPopup
+import com.garrietta.relay.ui.motion.InboxChromeBand
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
@@ -338,7 +341,18 @@ fun InboxScreen(
                         .weight(1f)
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
-                        .padding(top = 4.dp, bottom = 8.dp),
+                        .padding(top = 4.dp, bottom = 8.dp)
+                        // Chrome band, top edge (Garrett 2026-10-20):
+                        // this surface's top is the line the transition
+                        // overlay must never paint above — everything
+                        // higher is main-page chrome (collapsing title +
+                        // gear + this column's pill bar). Reported from
+                        // layout, never snapshot state, so the band
+                        // tracks the collapsing header 1:1 with scroll
+                        // without recomposing rows (see InboxChromeBand).
+                        .onGloballyPositioned { coords ->
+                            InboxChromeBand.topPx = coords.positionInWindow().y
+                        },
                     shape = RoundedCornerShape(28.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                 ) {
@@ -464,7 +478,27 @@ fun InboxScreen(
                     ) { it },
                 exit = fadeOut(tween(180)) +
                     slideOutVertically(tween(220)) { it },
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    // Chrome band, bottom edge (Garrett 2026-10-20):
+                    // the cluster's top is the line the transition
+                    // overlay must never paint below while the cluster
+                    // is on screen — a morph to/from the last visible
+                    // row passes behind the pill + search button
+                    // exactly as it passes behind the header. Layout
+                    // position is the cluster's resting slot (the
+                    // slide is a layer translation), so the band holds
+                    // steady through the slide in/out; once the
+                    // cluster leaves composition the node measures 0
+                    // and the band opens to the window bottom again.
+                    .onGloballyPositioned { coords ->
+                        InboxChromeBand.bottomPx =
+                            if (coords.size.height > 0) {
+                                coords.positionInWindow().y
+                            } else {
+                                Float.POSITIVE_INFINITY
+                            }
+                    },
             ) {
                 Row(
                     modifier = Modifier

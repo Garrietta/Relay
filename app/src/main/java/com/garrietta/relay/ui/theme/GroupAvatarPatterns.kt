@@ -32,11 +32,13 @@ import kotlin.math.sqrt
  * chat grows: one center avatar, then hexagonal rings around it (3 =
  * triangle-ish, 4–7 = a hex cluster, then outer rings).
  *
- * - Base scale = f(member count): min(0.75, 0.9/√N) — the scale that fits
- *   N overlapping icons inside the 1:1 box a single 1:1 avatar occupies
- *   (his calibration: 6 people ≈ 35%). The raw layout is then
- *   envelope-normalized so the cluster fills the same share of the box
- *   at every count (see [clusterPlacements]).
+ * AREA RULE (Garrett 2026-10-19, 23:16, replacing the envelope-normalization
+ * rule): the cluster's icons together take up roughly the SAME AREA as one
+ * single-contact shape — the 3-person conglomerate should read like the
+ * Monroe Health icon in size. Per-icon scale = 1/√N (N icons × (1/√N)² =
+ * 1.0 single-shape area), and the hex spacing is re-derived per count so
+ * the arrangement FITS that scale inside the 1:1 box: the overlap gets
+ * tighter as N shrinks (3 = tight triangle, 6+ = airier hex).
  * - Per-contact jitter: ±3% of the base scale, deterministic per
  *   (conversation, contact), for uniqueness.
  * - Random positions AND rotations, deterministic per (conversation,
@@ -56,12 +58,13 @@ data class ClusterMember(
 private data class Placement(val xFrac: Float, val yFrac: Float, val sizeFrac: Float, val zIndex: Float)
 
 /**
- * Base scale for N overlapping avatars in the 1:1 box — derived from the
- * member count, never a per-N guess table: min(0.75, 0.9/√N). N=3 → 0.52,
- * N=4 → 0.45, N=5 → 0.40, N=6 → 0.37 (≈ his 35%), N=8 → 0.32.
+ * Per-icon scale for N cluster avatars in the 1:1 box — the AREA RULE
+ * (Garrett 2026-10-19): N icons at (1/√N)² summed area = 1.0 — the same
+ * area as one single-contact shape takes in the same box. N=3 → 0.577,
+ * N=4 → 0.50, N=5 → 0.447, N=6 → 0.408, N=9 → 0.333.
  */
 private fun baseScale(n: Int): Float =
-    minOf(0.75f, 0.9f / sqrt(n.toFloat().coerceAtLeast(1f)))
+    1f / sqrt(n.toFloat().coerceAtLeast(1f))
 
 /** Deterministic pseudo-random in [0, 1) from a string seed. */
 private fun jitter01(seed: String): Float =
@@ -98,29 +101,33 @@ private fun hexSlots(n: Int, spacing: Float): List<Triple<Float, Float, Int>> {
 }
 
 /**
- * Target share of the 1:1 box the cluster's outer envelope spans for
- * EVERY member count (Garrett 2026-10-19: "the group messages of all
- * contact counts could scale better in the provided space"). 0.94
- * leaves headroom for the ±0.025 position jitter (worst case envelope
- * 0.99 — still inside the box); the per-icon clamp is the final safety.
+ * Envelope cap for the cluster at EVERY member count. The hex spacing is
+ * derived backwards from it: d = (CAP/2 − s/2) / e1, where s is the
+ * area-rule scale and e1 the unit-spacing slot extent — so the bigger
+ * area-sized icons never exceed the box while the tight hex overlap
+ * keeps the conglomerate filling it (small N = tight triangle, large N
+ * = airier hex). 0.96 leaves headroom for the ±0.025 position jitter
+ * (worst case envelope ≈ 1.01, still inside); the per-icon clamp is the
+ * final safety.
  */
-private const val TARGET_CLUSTER_FILL = 0.94f
+private const val TARGET_CLUSTER_FILL = 0.96f
 
 /**
- * V3 placements for a cluster of [n] members: hex-ring slots with a
- * loose ~38% overlap (center distance = 0.62 × base scale), per-member
- * position jitter, per-member scale jitter, all clamped into the 1:1 box.
+ * V3 placements for a cluster of [n] members: hex-ring slots at a
+ * count-derived spacing, per-member position jitter, per-member scale
+ * jitter, all clamped into the 1:1 box.
  *
- * ENVELOPE NORMALIZATION: the raw hex layout's outer envelope varied
- * wildly by count (measured: N=3 overflows at 1.14 and gets crushed by
- * the clamp; N=5 fills only 0.89; N=7 only 0.75 — icons shrinking to
- * the center as groups grow, which is the "tiny cluster, dead space"
- * look Garrett flagged). So the raw envelope is MEASURED from the slot
- * geometry, and every slot offset and the base size are scaled by
- * k = TARGET_CLUSTER_FILL / rawEnvelope — the cluster fills the box to
- * the same share at every count, by construction, not by retuned
- * constants. Normalized icon size lands ≈0.43 for N=3–7 and shrinks
- * gracefully once ring 2 engages (N≥8).
+ * AREA RULE (Garrett 2026-10-19 23:16): each icon's scale is 1/√N, so N
+ * icons sum to the area of one single-contact shape — the conglomerate
+ * reads at the same size as a Monroe Health row icon at every count.
+ * The old envelope normalization shrank icons to ≈0.43 at N=3–7 (summed
+ * area 0.55–0.75 — visibly tiny clusters with dead space). Spacing is now
+ * re-derived from the area scale: with the unit-spacing slot extent e1
+ * measured from [hexSlots], d = (CAP/2 − s/2) / e1 puts the cluster's
+ * outer envelope exactly at [TARGET_CLUSTER_FILL] while the OVERLAP
+ * absorbs the area scale — N=3 overlaps ≈65% (tight triangle), N=6
+ * ≈30%, N=7 ≈20% (airy hex), the adaptation Garrett asked for. The
+ * per-icon clamp remains the hard no-overflow safety.
  */
 private fun clusterPlacements(
     members: List<ClusterMember>,
@@ -128,29 +135,32 @@ private fun clusterPlacements(
 ): List<Placement> {
     val n = members.size
     if (n == 0) return emptyList()
-    val base = baseScale(n)
-    val rawSlots = hexSlots(n, base * 0.62f)
-    // Raw envelope: the farthest slot edge from the box center (either
-    // axis), doubled. Slots are precomputed numbers, so this is exact.
-    val rawExtent = rawSlots.maxOf { (sx, sy, _) ->
+    val size = baseScale(n)
+    // Unit-spacing slot extent: the farthest slot offset from the box
+    // center (either axis) when the hex spacing is 1 — exact, because
+    // slot offsets scale linearly with spacing. Divide the available
+    // half-box (envelope cap minus this icon's radius) by it to get the
+    // spacing that both fits the area-sized icons and fills the box.
+    val unitExtent = hexSlots(n, 1f).maxOf { (sx, sy, _) ->
         maxOf(abs(sx - 0.5f), abs(sy - 0.5f))
-    } + base / 2f
-    val k = TARGET_CLUSTER_FILL / (rawExtent * 2f)
-    val slots = rawSlots.map { (sx, sy, ring) ->
-        Triple(0.5f + (sx - 0.5f) * k, 0.5f + (sy - 0.5f) * k, ring)
     }
-    val scaledBase = base * k
+    val spacing = if (unitExtent > 0f) {
+        ((TARGET_CLUSTER_FILL / 2f - size / 2f) / unitExtent).coerceAtLeast(0.05f)
+    } else {
+        0f
+    }
+    val slots = hexSlots(n, spacing)
     val maxRing = slots.maxOf { it.third }
     return members.mapIndexed { i, member ->
         val (sx, sy, ring) = slots[i]
-        val size = memberScale(conversationKey, member.address, scaledBase)
+        val memberSize = memberScale(conversationKey, member.address, size)
         val jx = (jitter01("$conversationKey|${member.address}|x") - 0.5f) * 0.05f
         val jy = (jitter01("$conversationKey|${member.address}|y") - 0.5f) * 0.05f
-        val half = size / 2f
+        val half = memberSize / 2f
         Placement(
             xFrac = (sx + jx).coerceIn(half, 1f - half),
             yFrac = (sy + jy).coerceIn(half, 1f - half),
-            sizeFrac = size,
+            sizeFrac = memberSize,
             // Inner rings draw on top of outer rings (center highest).
             zIndex = (maxRing - ring).toFloat(),
         )

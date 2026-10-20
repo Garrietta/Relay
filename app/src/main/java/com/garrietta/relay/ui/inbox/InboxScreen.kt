@@ -235,6 +235,20 @@ fun InboxScreen(
         }
     }
 
+    // Root box (Garrett 2026-10-20): the search popup and the bottom
+    // cluster are composed AFTER the Scaffold, as this screen's topmost
+    // layers. Scaffold draws its topBar as a sibling AFTER its content,
+    // so anything inside the Scaffold's content — however late — renders
+    // UNDER the "Messages" header; that is why the open search popup
+    // had the title and gear drawn over it. As later siblings of the
+    // whole Scaffold in this Box, the popup and its scrim cover
+    // everything in the inbox (header, pill bar, list), and the bottom
+    // cluster — composed after the popup — stays above the scrim so
+    // the search button remains the popup's toggle. The audit for the
+    // new-message popup: it is composed at the activity level (a nav
+    // destination single-pane, last in RelayTwoPane two-pane), already
+    // topmost — no change needed there.
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         // Transparent: the screen lives inside the list-pane container (or
         // the window background in single-pane) — the conversation list is
@@ -248,12 +262,6 @@ fun InboxScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
-        // Outer full-window box: the search popup overlays the WHOLE
-        // window (header included) from here, exactly like the new-chat
-        // popup at the activity level, and the bottom cluster stays
-        // above the popup's scrim. The padded inner box holds only the
-        // list column.
-        Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -363,6 +371,7 @@ fun InboxScreen(
             }
             }
         }
+    }
             // Conversation search popup — the SAME TopSearchPopup as the
             // new-chat button (Garrett 2026-10-20). Composed BEFORE the
             // bottom cluster so the pill + search button render ABOVE the
@@ -465,7 +474,6 @@ fun InboxScreen(
                     }
                 }
             }
-        }
     }
 }
 

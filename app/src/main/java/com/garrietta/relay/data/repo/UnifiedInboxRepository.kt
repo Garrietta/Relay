@@ -418,6 +418,13 @@ class UnifiedInboxRepository(
                     photoUri = contactLookup.photoUri(it.number),
                 )
             },
+            // The authoritative group flag (Garrett 2026-10-20): the
+            // server's own isGroup (Conversation field 10), with the
+            // cleaned others count as backstop — the chat header and
+            // details page read THIS (via the nav args), never a
+            // re-derived count of their own, so the surfaces can't
+            // diverge the way "No Dad" did.
+            isGroup = c.isGroup || others.size > 1,
         )
     }
 
@@ -514,7 +521,7 @@ class UnifiedInboxRepository(
                 .firstOrNull { it.id == conversationId }
                 ?: return@withContext emptyList()
             val selfNumbers = selfNumberSet()
-            cleanRcsParticipantList(conv.participants, selfNumbers)
+            val cleaned = cleanRcsParticipantList(conv.participants, selfNumbers)
                 .filterNot { it.isUnknownSenderGhost() }
                 .map { p ->
                     Participant(
@@ -525,7 +532,35 @@ class UnifiedInboxRepository(
                         isSelf = p.isMe,
                     )
                 }
+            // Same-source reconciliation (Garrett 2026-10-20, "No Dad"):
+            // the conversation list is wholesale-replaced on every sync
+            // pull, and a later pull can carry a THINNER participant list
+            // for the same conversation than the pull the inbox row was
+            // rendered from. The chat must agree with the row the user
+            // actually saw and tapped, so when the inbox row's own
+            // participant list is the fuller one, it wins. (When the
+            // fresh server list is fuller, it wins instead.)
+            val inboxOthers = inboxRowParticipants(conversationId, -1L, emptyList())
+            if (inboxOthers.size > cleaned.size) inboxOthers else cleaned
         }
+
+    /**
+     * The participant list of the inbox ROW for a conversation — the exact
+     * list the inbox rendered (and classified the row by). Chat surfaces
+     * reconcile against it so the chat can never present a thinner group
+     * than the row the user tapped (Garrett 2026-10-20, "No Dad").
+     */
+    fun inboxRowParticipants(
+        rcsConversationId: String?,
+        threadId: Long,
+        threadIds: List<Long>,
+    ): List<Participant> =
+        _conversations.value.firstOrNull { row ->
+            (rcsConversationId != null && row.rcsConversationId == rcsConversationId) ||
+                row.threadId == threadId ||
+                row.threadId in threadIds ||
+                row.threadIds.any { it == threadId || it in threadIds }
+        }?.participants.orEmpty()
 
     /** Outcome of an RCS send: the tmpId for echo correlation, or the verbatim reason. */
     sealed interface RcsSendOutcome {
@@ -654,6 +689,9 @@ class UnifiedInboxRepository(
                             photoUri = contactLookup.photoUri(addr),
                         )
                     },
+                    // Telephony group flag, same contract as the RCS
+                    // mapping: more than one OTHER participant = group.
+                    isGroup = others.size > 1,
                 )
             } else {
                 conv

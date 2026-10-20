@@ -17,6 +17,8 @@ sealed interface Screen {
         val transportLabel: String = "SMS",
         /** Server conversation id for RCS rows (paired mode); null = Telephony. */
         val rcsConversationId: String? = null,
+        /** Group classification from the inbox row (see Conversation.isGroup). */
+        val isGroup: Boolean = false,
     ) : Screen
     data object Settings : Screen
     data object NewConversation : Screen
@@ -35,6 +37,8 @@ sealed interface Screen {
         val displayName: String,
         val transportLabel: String = "SMS",
         val rcsConversationId: String? = null,
+        /** Group classification from the inbox row (see Conversation.isGroup). */
+        val isGroup: Boolean = false,
         val focusAddress: String? = null,
     ) : Screen
 }

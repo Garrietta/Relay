@@ -166,6 +166,12 @@ fun ChatScreen(
     transportLabel: String = "SMS",
     /** Server conversation id for RCS rows (paired mode); null = Telephony. */
     rcsConversationId: String? = null,
+    /**
+     * The inbox row's group classification (Garrett 2026-10-20): the
+     * header honors it even if this screen's own participant list loads
+     * thinner than the row's — the surfaces must never disagree.
+     */
+    knownGroup: Boolean = false,
     onBack: () -> Unit,
     /**
      * Opens the conversation details page (Garrett 2026-10-19): tapping any
@@ -222,14 +228,24 @@ fun ChatScreen(
         }
     }
     // Header mode from the OTHER-participant count (self excluded and
-    // deduped — the server's participant list can include him twice).
-    // Per-sender bubble theming applies to groups.
-    val headerMode = if (others.size <= 1) HeaderMode.OneToOne else HeaderMode.Group
+    // deduped — the server's participant list can include him twice),
+    // OR the inbox row's own group classification: a conversation the
+    // inbox showed as a group opens with the group header even while
+    // its participant list is still loading (or loads thinner than the
+    // row's — Garrett 2026-10-20, "No Dad"). Per-sender bubble theming
+    // applies to groups.
+    val headerMode = if (others.size <= 1 && !knownGroup) HeaderMode.OneToOne else HeaderMode.Group
     val isGroup = headerMode == HeaderMode.Group
     // Stable per-conversation key for the group avatar pattern: the same
     // group always gets the same cluster arrangement (spiral/grid/zigzag).
     val patternKey = rcsConversationId ?: "tel:$threadId"
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    // Scroll-restore bookkeeping (declared here, above the header state:
+    // the header's initial collapse derives from the saved position, and
+    // the collapse driver below stays frozen until the restore lands).
+    // See the restore effect further down for the full rationale.
+    var scrollRestored by remember(viewModel) { mutableStateOf(false) }
+    var restoreAttempts by remember(viewModel) { mutableStateOf(0) }
     // Sticky collapse with hysteresis, gated on real scrollability. The old
     // "any offset > 0" flapped: a short thread's overscroll bounce would
     // start the minimize and snap it straight back to full size. Now the
@@ -237,14 +253,44 @@ fun ChatScreen(
     // scroll, and stays minimized until the user returns to the very top.
     // Boolean-driven (never a spring retargeted every scroll frame — the
     // #102 lesson); RelaySprings animate the change.
-    var headerCollapsed by remember { mutableStateOf(false) }
+    //
+    // INITIAL STATE (Garrett 2026-10-20): a chat reopened at a restored
+    // SCROLLED position starts with the header ALREADY collapsed — the
+    // state that scroll position implies. The old code always started
+    // expanded and let the collapse driver flip it once the restore
+    // landed: mid-entrance-transition the header crossfaded to its other
+    // layout, the avatar carrying the shared-element morph vanished from
+    // its registered branch (the collapsed layouts register no morph
+    // target), and the morph drew the photo stranded mid-screen. With
+    // the header in its final state from the first frame, a scrolled
+    // chat simply has no morph target on its side — the entrance/exit
+    // degrade cleanly to the surface slide, the exact reverse both
+    // ways — while a chat reopened at the newest message starts
+    // expanded and morphs exactly as before. A saved position IS the
+    // newest message at offset 0 exactly when the chat was left at the
+    // bottom; anything else means it reopens scrolled.
+    var headerCollapsed by remember(viewModel) {
+        val saved = viewModel.savedScrollPosition()
+        val newestId = messages.firstOrNull()?.id
+        val opensAtNewest = saved != null && newestId != null &&
+            saved.messageId == newestId && saved.scrollOffset == 0
+        mutableStateOf(saved != null && !opensAtNewest)
+    }
     /** Message whose reaction badge was tapped — shows the who-reacted dialog. */
     var reactionDetail by remember { mutableStateOf<Message?>(null) }
     val collapseThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
     LaunchedEffect(
         listState.firstVisibleItemIndex,
         listState.firstVisibleItemScrollOffset,
+        scrollRestored,
     ) {
+        // Frozen until the saved scroll position is restored: before
+        // that, the list still reports (0, 0) — "not scrolled" — which
+        // would flip the header expanded, only for the restore to flip
+        // it back, mid-transition (the stranded-avatar bug above).
+        // headerCollapsed was initialized FROM the saved position, so
+        // it is already correct while this driver is frozen.
+        if (!scrollRestored) return@LaunchedEffect
         val idx = listState.firstVisibleItemIndex
         val off = listState.firstVisibleItemScrollOffset
         val scrollable = listState.canScrollForward || listState.canScrollBackward
@@ -281,8 +327,9 @@ fun ChatScreen(
     // deep fill); after a few misses it falls back to newest, and once
     // restored it never touches scroll again — live arrivals in the
     // reverseLayout list settle at the bottom on their own.
-    var scrollRestored by remember(viewModel) { mutableStateOf(false) }
-    var restoreAttempts by remember(viewModel) { mutableStateOf(0) }
+    // (scrollRestored / restoreAttempts are declared above the header
+    // state — the header's initial collapse derives from the position
+    // this effect restores.)
     LaunchedEffect(messages) {
         if (messages.isEmpty() || scrollRestored) return@LaunchedEffect
         val saved = viewModel.savedScrollPosition()

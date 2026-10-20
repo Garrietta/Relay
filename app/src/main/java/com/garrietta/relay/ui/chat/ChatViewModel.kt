@@ -398,8 +398,15 @@ class ChatViewModel(
             val parts = repository.getGroupParticipants(threadIds)
             _participants.value = parts
             val self = repository.ownAddress()
-            _others.value = if (self == null) parts
+            val computed = if (self == null) parts
                 else parts.filterNot { repository.normalizedAddress(it.address) == self }
+            // Same-source reconciliation as the RCS path (Garrett
+            // 2026-10-20, "No Dad"): if the inbox row's participant list
+            // is fuller than this thread query's, the row wins — the
+            // chat's group classification and member list must match the
+            // row the user tapped.
+            val inboxOthers = repository.inboxRowParticipants(null, threadId, threadIds)
+            _others.value = if (inboxOthers.size > computed.size) inboxOthers else computed
             participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {

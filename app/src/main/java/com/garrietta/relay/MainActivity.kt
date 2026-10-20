@@ -272,7 +272,7 @@ class MainActivity : ComponentActivity() {
                                 viewModel = inboxVm,
                                 userMessages = settingsVm.userMessages,
                                 onOpenChat = {
-                                    push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds, it.transportLabel, it.rcsConversationId))
+                                    push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds, it.transportLabel, it.rcsConversationId, it.isGroup))
                                 },
                                 onOpenSettings = { push(Screen.Settings) },
                                 onNewConversation = { push(Screen.NewConversation) },
@@ -291,6 +291,7 @@ class MainActivity : ComponentActivity() {
                                 threadIds = screen.threadIds,
                                 transportLabel = screen.transportLabel,
                                 rcsConversationId = screen.rcsConversationId,
+                                knownGroup = screen.isGroup,
                                 onBack = ::pop,
                                 // Header/avatar taps open the details page
                                 // (Garrett 2026-10-19).
@@ -303,6 +304,7 @@ class MainActivity : ComponentActivity() {
                                             displayName = screen.displayName,
                                             transportLabel = screen.transportLabel,
                                             rcsConversationId = screen.rcsConversationId,
+                                            isGroup = screen.isGroup,
                                             focusAddress = focusAddress,
                                         )
                                     )
@@ -324,6 +326,7 @@ class MainActivity : ComponentActivity() {
                                 threadId = screen.threadId,
                                 transportLabel = screen.transportLabel,
                                 rcsConversationId = screen.rcsConversationId,
+                                knownGroup = screen.isGroup,
                                 focusAddress = screen.focusAddress,
                                 onBack = ::pop,
                             )
@@ -500,6 +503,7 @@ class MainActivity : ComponentActivity() {
                                         threadIds = convo.threadIds,
                                         transportLabel = convo.transportLabel,
                                         rcsConversationId = convo.rcsConversationId,
+                                        knownGroup = convo.isGroup,
                                         onBack = { selected = null },
                                         onOpenDetails = { focusAddress ->
                                             detailsRequest = convo to focusAddress
@@ -540,6 +544,7 @@ class MainActivity : ComponentActivity() {
                         threadId = dc.threadId,
                         transportLabel = dc.transportLabel,
                         rcsConversationId = dc.rcsConversationId,
+                        knownGroup = dc.isGroup,
                         focusAddress = focus,
                         onBack = { detailsRequest = null },
                     )

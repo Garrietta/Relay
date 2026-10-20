@@ -48,6 +48,16 @@ data class Conversation(
      * per-group avatar cluster in inbox rows. Empty for 1:1 rows.
      */
     val participants: List<Participant> = emptyList(),
+    /**
+     * The ONE group classification every surface reads (Garrett
+     * 2026-10-20): set where the row is built — from the server's
+     * Conversation.isGroup (field 10) or the cleaned other-participant
+     * count for RCS rows, from the recipient count for Telephony rows.
+     * The inbox row, the chat header and the details page all consume
+     * this flag, so they can never disagree ("No Dad" rendered as a
+     * group in the inbox but opened as a 1:1).
+     */
+    val isGroup: Boolean = false,
 )
 
 /** A single message inside a conversation. */

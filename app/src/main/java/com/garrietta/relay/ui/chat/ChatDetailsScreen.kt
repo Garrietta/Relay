@@ -117,6 +117,13 @@ fun ChatDetailsScreen(
     threadId: Long,
     transportLabel: String = "SMS",
     rcsConversationId: String? = null,
+    /**
+     * The inbox row's group classification (Garrett 2026-10-20): a known
+     * group stays in conversation (member-list) mode even if this
+     * screen's participant list loads thinner than the row's — the
+     * surfaces must never disagree ("No Dad").
+     */
+    knownGroup: Boolean = false,
     focusAddress: String? = null,
     onBack: () -> Unit,
 ) {
@@ -132,20 +139,27 @@ fun ChatDetailsScreen(
     // Drill-down: tapping a group member features them; back returns to
     // the group view.
     var personAddress by remember(focusAddress) { mutableStateOf(focusAddress) }
-    val featured: Participant? = remember(personAddress, visibleOthers, participants) {
+    val featured: Participant? = remember(personAddress, visibleOthers, participants, knownGroup) {
         val addr = personAddress
         when {
             addr != null -> viewModel.senderFor(addr)
                 ?: (participants + visibleOthers).firstOrNull { it.address == addr }
+            // Known group, conversation mode: never feature a lone
+            // participant just because this screen's list came back
+            // thinner than the inbox row's (Garrett 2026-10-20).
+            knownGroup -> null
             visibleOthers.size <= 1 ->
                 visibleOthers.firstOrNull() ?: participants.firstOrNull()
             else -> null
         }
     }
-    // Group mode only when there really are multiple others; while the
+    // Group mode when there really are multiple others — or when the
+    // inbox row classified the conversation as a group (conversation
+    // mode only; a member drill-down is person mode). While the
     // participant list is still loading we stay in person mode (never a
     // flash of an empty "group" view).
-    val isGroup = featured == null && visibleOthers.size > 1
+    val isGroup = featured == null &&
+        (visibleOthers.size > 1 || (knownGroup && personAddress == null))
 
     val personName = featured?.let {
         if (it.isUnknownSenderGhost()) it.address

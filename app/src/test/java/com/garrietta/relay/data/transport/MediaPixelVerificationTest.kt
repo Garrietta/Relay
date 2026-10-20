@@ -233,4 +233,193 @@ class MediaPixelVerificationTest {
         assertNull(imageFingerprint(IntArray(10), 100, 100))
         assertNotNull(imageFingerprint(IntArray(16 * 16) { 0xFFFFFFFF.toInt() }, 16, 16))
     }
+
+    // ---------- two-signal agreement (windows + distribution) ----------
+
+    /** Extracts the cw x ch rectangle at (x0, y0) from a w-wide image. */
+    private fun crop(px: IntArray, w: Int, x0: Int, y0: Int, cw: Int, ch: Int): IntArray {
+        val out = IntArray(cw * ch)
+        for (y in 0 until ch) {
+            for (x in 0 until cw) {
+                out[y * cw + x] = px[(y0 + y) * w + (x0 + x)]
+            }
+        }
+        return out
+    }
+
+    /** Rotates a w x h image 90 degrees clockwise into an h x w image. */
+    private fun rotate90(px: IntArray, w: Int, h: Int): IntArray {
+        val out = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                out[x * h + (h - 1 - y)] = px[y * w + x]
+            }
+        }
+        return out
+    }
+
+    private fun set(px: IntArray, w: Int, h: Int): PixelFingerprintSet =
+        imagePixelFingerprints(px, w, h) ?: error("expected a fingerprint set for ${w}x$h")
+
+    @Test fun `set center matches the plain fingerprint`() {
+        val scene = renderScene(320, 240)
+        val s = set(scene, 320, 240)
+        assertEquals(0.0, fingerprintMeanDiff(s.center, fp(scene, 320, 240)), 0.0)
+    }
+
+    @Test fun `windows exist only along the long axis`() {
+        assertEquals(2, set(renderScene(320, 240), 320, 240).windows.size)
+        assertEquals(2, set(renderScene(240, 320), 240, 320).windows.size)
+        assertEquals(0, set(renderScene(200, 200), 200, 200).windows.size)
+        assertNull(imagePixelFingerprints(IntArray(8 * 8) { 0xFFFFFFFF.toInt() }, 8, 8))
+    }
+
+    @Test fun `distribution channels are normalized`() {
+        val d = imageDistribution(renderScene(64, 48), 64, 48) ?: error("distribution")
+        assertEquals(FP_DIST_BINS * 3, d.size)
+        for (ch in 0 until 3) {
+            var sum = 0.0
+            for (i in 0 until FP_DIST_BINS) sum += d[ch * FP_DIST_BINS + i]
+            assertEquals(1.0, sum, 0.01)
+        }
+    }
+
+    @Test fun `rendition distributions agree closely`() {
+        val full = renderScene(320, 240)
+        val thumb = quantize(boxDownscale(full, 320, 240, 80, 60), 5)
+        val a = imageDistribution(full, 320, 240) ?: error("distribution")
+        val b = imageDistribution(thumb, 80, 60) ?: error("distribution")
+        assertEquals(0.0, distributionDistance(a, a), 0.0)
+        assertTrue(distributionsAgree(a, b))
+        assertEquals(
+            PixelAgreement.STRICT,
+            pixelAgreement(set(full, 320, 240), set(thumb, 80, 60)),
+        )
+    }
+
+    @Test fun `top cropped thumbnail agrees STRICT via a window`() {
+        // A portrait photo whose server thumbnail is the TOP square, not
+        // the center square: the aligned center comparison legitimately
+        // fails (different framing), and the anchored window is what
+        // rescues it — still as a cell-by-cell STRICT match.
+        val full = renderScene(240, 400)
+        val topCrop = crop(full, 240, 0, 0, 240, 240)
+        val thumb = quantize(boxDownscale(topCrop, 240, 240, 60, 60), 5)
+        assertFalse(
+            "center grids must disagree for an off-center crop",
+            fingerprintsAgree(fp(full, 240, 400), fp(thumb, 60, 60)),
+        )
+        assertEquals(
+            PixelAgreement.STRICT,
+            pixelAgreement(set(full, 240, 400), set(thumb, 60, 60)),
+        )
+    }
+
+    @Test fun `bottom cropped thumbnail agrees STRICT via a window`() {
+        val full = renderScene(240, 400)
+        val bottomCrop = crop(full, 240, 0, 160, 240, 240)
+        val thumb = quantize(boxDownscale(bottomCrop, 240, 240, 60, 60), 5)
+        assertEquals(
+            PixelAgreement.STRICT,
+            pixelAgreement(set(full, 240, 400), set(thumb, 60, 60)),
+        )
+    }
+
+    @Test fun `rotated rendition agrees via distribution only`() {
+        // The EXIF case: the full image decodes sideways (BitmapFactory
+        // ignores orientation), the server thumbnail is baked upright.
+        // No aligned grid can agree; the palette is identical.
+        val full = renderScene(320, 240)
+        val rotated = rotate90(full, 320, 240)
+        val thumb = quantize(boxDownscale(rotated, 240, 320, 60, 80), 5)
+        val candidate = set(full, 320, 240)
+        val truth = set(thumb, 60, 80)
+        assertFalse(fingerprintsAgree(candidate.center, truth.center))
+        assertTrue(
+            candidate.windows.none { fingerprintsAgree(it, truth.center) },
+        )
+        assertEquals(PixelAgreement.DISTRIBUTION, pixelAgreement(candidate, truth))
+    }
+
+    @Test fun `gray block garble is NONE on both signals`() {
+        // The case the layer exists for must survive the second signal:
+        // flat mid-gray blocks flatten the palette too, so the
+        // distribution stays far on the reject side of its line.
+        val full = renderScene(320, 240)
+        val thumb = quantize(boxDownscale(full, 320, 240, 80, 60), 5)
+        val garbled = garbleBlocks(full, 320, 240, 40, 30)
+        val candidate = set(garbled, 320, 240)
+        val truth = set(thumb, 80, 60)
+        assertEquals(PixelAgreement.NONE, pixelAgreement(candidate, truth))
+        val d = distributionDistance(candidate.distribution, truth.distribution)
+        assertTrue(
+            "garble distribution distance $d should clear the line with margin",
+            d > FP_DIST_AGREE_MAX * 2,
+        )
+    }
+
+    @Test fun `different image is NONE on both signals`() {
+        val a = set(renderScene(320, 240, variant = 0), 320, 240)
+        val thumbB = quantize(
+            boxDownscale(renderScene(320, 240, variant = 1), 320, 240, 80, 60), 5,
+        )
+        val b = set(thumbB, 80, 60)
+        assertEquals(PixelAgreement.NONE, pixelAgreement(a, b))
+        assertTrue(
+            distributionDistance(a.distribution, b.distribution) > FP_DIST_AGREE_MAX,
+        )
+    }
+
+    @Test fun `uniform image never false trips`() {
+        val w = 320
+        val h = 240
+        val uniform = IntArray(w * h) { argb(200.0, 200.0, 120.0) }
+        val thumb = quantize(boxDownscale(uniform, w, h, 80, 60), 5)
+        assertEquals(
+            PixelAgreement.STRICT,
+            pixelAgreement(set(uniform, w, h), set(thumb, 80, 60)),
+        )
+        val da = imageDistribution(uniform, w, h) ?: error("distribution")
+        val db = imageDistribution(thumb, 80, 60) ?: error("distribution")
+        assertTrue(distributionDistance(da, db) < 0.01)
+    }
+
+    @Test fun `distribution composites transparent pixels over white`() {
+        val w = 64
+        val h = 64
+        val halfTransparent = IntArray(w * h) { i ->
+            if (i % w < w / 2) 0x00000000 else 0xFFFFFFFF.toInt()
+        }
+        val allWhite = IntArray(w * h) { 0xFFFFFFFF.toInt() }
+        val a = imageDistribution(halfTransparent, w, h) ?: error("distribution")
+        val b = imageDistribution(allWhite, w, h) ?: error("distribution")
+        assertEquals(0.0, distributionDistance(a, b), 0.0)
+    }
+
+    @Test fun `pixel outcome mapping is exhaustive`() {
+        assertEquals(
+            PixelOutcome.ACCEPT_VERIFIED,
+            pixelOutcome(PixelAgreement.STRICT, corroboratedByRefetch = false),
+        )
+        assertEquals(
+            PixelOutcome.ACCEPT_VERIFIED,
+            pixelOutcome(PixelAgreement.STRICT, corroboratedByRefetch = true),
+        )
+        assertEquals(
+            PixelOutcome.ACCEPT_DISTRIBUTION,
+            pixelOutcome(PixelAgreement.DISTRIBUTION, corroboratedByRefetch = false),
+        )
+        assertEquals(
+            PixelOutcome.ACCEPT_VERIFIED,
+            pixelOutcome(PixelAgreement.DISTRIBUTION, corroboratedByRefetch = true),
+        )
+        assertEquals(
+            PixelOutcome.ACCEPT_VERIFIED,
+            pixelOutcome(PixelAgreement.NONE, corroboratedByRefetch = true),
+        )
+        assertEquals(
+            PixelOutcome.REJECT,
+            pixelOutcome(PixelAgreement.NONE, corroboratedByRefetch = false),
+        )
+    }
 }

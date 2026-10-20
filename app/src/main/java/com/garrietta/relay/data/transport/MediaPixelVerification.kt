@@ -32,6 +32,32 @@ import kotlin.math.floor
  * ~0.005–0.02; gray-block garble lands at ~0.15+ mean with most cells
  * divergent; a different image lands similarly high. The agree line sits
  * ~3x above honest-rendition noise and ~2.5x below garble.
+ *
+ * FALSE-POSITIVE HARDENING (Garrett 2026-10-20, later): the aligned
+ * center-square comparison alone terminally rejected a legitimate photo
+ * Mom shared — the aligned grid assumes the thumbnail is the same
+ * framing AND the same orientation as BitmapFactory's raw decode, and
+ * both assumptions fail for real photos:
+ *  - OFF-CENTER CROPS: a server thumbnail cropped from the top/bottom/
+ *    edge of the frame (not the center) shifts every cell. The set
+ *    therefore also fingerprints the start- and end-anchored squares
+ *    ("windows"); agreement with ANY aligned window is still STRICT.
+ *  - ORIENTATION: full images carry EXIF orientation that
+ *    BitmapFactory does not apply, while server thumbnails are baked
+ *    upright — an oriented photo fingerprints sideways against its own
+ *    thumbnail. A whole-frame color DISTRIBUTION (per-channel
+ *    histograms over the entire frame) is invariant to rotation, flips
+ *    and crops; it is the second, weaker signal.
+ * A candidate is STRICT when an aligned grid agrees, DISTRIBUTION when
+ * only the distribution agrees, NONE when both disagree. Calibrated on
+ * the synthetic suite: a 90°-rotated rendition sits at distribution
+ * distance ~0.004, an off-center crop is rescued by the windows at
+ * STRICT, gray-block garble sits at ~0.5 distribution distance with a
+ * ~0.1 aligned mean, and a different image at ~0.25 / ~0.19 — the
+ * distribution line at 0.20 keeps ~2.5x margin under garble. Heavily
+ * PADDED renditions (letterbox bars) land just above the line (~0.21)
+ * and stay rejected: no server behavior observed pads thumbnails, and
+ * the margin under garble is worth more than that rescue.
  */
 
 /** Fingerprint grid edge: 16x16 average-color cells. */
@@ -46,11 +72,23 @@ const val FP_CELL_DIVERGENT_MIN = 0.20
 /** Divergent-cell fraction above which renditions disagree regardless of mean. */
 const val FP_DIVERGENT_FRACTION_MAX = 0.30
 
+/** Bins per channel in the whole-frame distribution fingerprint. */
+const val FP_DIST_BINS = 8
+
+/**
+ * Whole-frame distribution distance (mean per-channel half-L1 between
+ * histograms, 0..1) at or below which two renditions corroborate each
+ * other even when no aligned grid agrees. Calibrated in the file header:
+ * rotated/cropped honest renditions land at ~0.0–0.16, garble at ~0.5,
+ * a different image at ~0.25.
+ */
+const val FP_DIST_AGREE_MAX = 0.20
+
 /**
  * Computes the fingerprint of an ARGB pixel array ([pixels] row-major,
- * [width] x [height]). Returns null when the image is too small to
- * fingerprint (center-square side smaller than the grid) or the pixel
- * array is undersized. Pure-Kotlin, JVM-testable.
+ * [width] x [height]) over its CENTER SQUARE. Returns null when the
+ * image is too small to fingerprint (center-square side smaller than
+ * the grid) or the pixel array is undersized. Pure-Kotlin, JVM-testable.
  */
 fun imageFingerprint(
     pixels: IntArray,
@@ -62,9 +100,39 @@ fun imageFingerprint(
     if (pixels.size < width * height) return null
     val side = minOf(width, height)
     if (side < grid) return null
-    val ox = (width - side) / 2.0
-    val oy = (height - side) / 2.0
-    val cellSize = side.toDouble() / grid
+    return imageFingerprintWindow(
+        pixels, width, height,
+        originX = (width - side) / 2.0,
+        originY = (height - side) / 2.0,
+        side = side.toDouble(),
+        grid = grid,
+    )
+}
+
+/**
+ * Computes the fingerprint of the square window whose top-left corner is
+ * ([originX], [originY]) and whose side is [side] (all in source-pixel
+ * units, fractional origins allowed — the sampling is area-weighted).
+ * This is the engine under [imageFingerprint]; the anchored windows in
+ * [PixelFingerprintSet] exist so an off-center-cropped thumbnail can be
+ * matched against the square of the full image it was actually cropped
+ * from. Same null contract as [imageFingerprint].
+ */
+fun imageFingerprintWindow(
+    pixels: IntArray,
+    width: Int,
+    height: Int,
+    originX: Double,
+    originY: Double,
+    side: Double,
+    grid: Int = MEDIA_FP_GRID,
+): FloatArray? {
+    if (width < 1 || height < 1 || grid < 1) return null
+    if (pixels.size < width * height) return null
+    if (side < grid || side <= 0.0) return null
+    val ox = originX
+    val oy = originY
+    val cellSize = side / grid
     val out = FloatArray(grid * grid * 3)
     var idx = 0
     for (gy in 0 until grid) {
@@ -152,15 +220,185 @@ fun fingerprintsAgree(a: FloatArray, b: FloatArray): Boolean =
         fingerprintDivergentFraction(a, b) <= FP_DIVERGENT_FRACTION_MAX
 
 /**
- * Decodes [bytes] (bounded: the long edge lands at ~160–320 px via
- * inSampleSize — the fingerprint only needs cell averages, never full
- * resolution) and returns its fingerprint, or null when the bytes do
- * not decode or are too small. Runs wherever the media pipeline runs
- * (Dispatchers.IO), never the UI thread. A garbled-but-decodable image
- * still fingerprints — that is the point: its fingerprint is what the
- * ground-truth comparison rejects.
+ * Whole-frame color distribution of an ARGB pixel array: per-channel
+ * (Y, Cb, Cr) histograms with [bins] bins each, every channel normalized
+ * to sum 1, laid out as [Y bins | Cb bins | Cr bins]. Computed over the
+ * ENTIRE frame with the same white compositing as the grid fingerprint.
+ * A distribution has no geometry — it cannot see arrangement — which is
+ * exactly what makes it invariant to the rotations, flips and crops
+ * that defeat the aligned grid, and exactly why it is only ever the
+ * SECOND signal (see [pixelAgreement]). Pure-Kotlin, JVM-testable.
  */
-fun imageFingerprintOfBytes(bytes: ByteArray): FloatArray? {
+fun imageDistribution(
+    pixels: IntArray,
+    width: Int,
+    height: Int,
+    bins: Int = FP_DIST_BINS,
+): FloatArray? {
+    if (width < 1 || height < 1 || bins < 1) return null
+    if (pixels.size < width * height) return null
+    val counts = DoubleArray(3 * bins)
+    val total = width * height
+    for (i in 0 until total) {
+        val argb = pixels[i]
+        val a = (argb ushr 24) and 0xFF
+        // Composite over white, normalized to 0..1 (same math as the
+        // grid fingerprint: channel*a + 255*(255-a), over 255*255).
+        val rN = (((argb shr 16) and 0xFF) * a + 255 * (255 - a)) / 65025.0
+        val gN = (((argb shr 8) and 0xFF) * a + 255 * (255 - a)) / 65025.0
+        val bN = ((argb and 0xFF) * a + 255 * (255 - a)) / 65025.0
+        val y = 0.299 * rN + 0.587 * gN + 0.114 * bN
+        val cb = (0.5 + (bN - y) * 0.564).coerceIn(0.0, 1.0)
+        val cr = (0.5 + (rN - y) * 0.713).coerceIn(0.0, 1.0)
+        counts[(y * bins).toInt().coerceIn(0, bins - 1)] += 1.0
+        counts[bins + (cb * bins).toInt().coerceIn(0, bins - 1)] += 1.0
+        counts[2 * bins + (cr * bins).toInt().coerceIn(0, bins - 1)] += 1.0
+    }
+    return FloatArray(3 * bins) { (counts[it] / total).toFloat() }
+}
+
+/**
+ * Distance between two distributions: the mean over the three channels
+ * of the half-L1 histogram distance, 0..1 (0 = identical palettes,
+ * 1 = disjoint palettes).
+ */
+fun distributionDistance(a: FloatArray, b: FloatArray): Double {
+    require(a.size == b.size && a.isNotEmpty() && a.size % 3 == 0) {
+        "distribution size mismatch"
+    }
+    val bins = a.size / 3
+    var total = 0.0
+    for (ch in 0 until 3) {
+        var l1 = 0.0
+        for (i in 0 until bins) l1 += abs(a[ch * bins + i] - b[ch * bins + i])
+        total += 0.5 * l1
+    }
+    return total / 3.0
+}
+
+/** True when two distributions are close enough to be the same palette. */
+fun distributionsAgree(a: FloatArray, b: FloatArray): Boolean =
+    a.size == b.size && a.isNotEmpty() &&
+        distributionDistance(a, b) <= FP_DIST_AGREE_MAX
+
+/**
+ * Everything the pixel-truth layer knows about one rendition: the
+ * center-square grid fingerprint, the grid fingerprints of the
+ * start/end-anchored squares (empty for a square image — its only
+ * square is the center one), and the whole-frame distribution.
+ */
+class PixelFingerprintSet(
+    val center: FloatArray,
+    val windows: List<FloatArray>,
+    val distribution: FloatArray,
+)
+
+/**
+ * Builds the [PixelFingerprintSet] of an ARGB pixel array, or null when
+ * the image is too small to fingerprint (same contract as
+ * [imageFingerprint]).
+ */
+fun imagePixelFingerprints(
+    pixels: IntArray,
+    width: Int,
+    height: Int,
+): PixelFingerprintSet? {
+    val center = imageFingerprint(pixels, width, height) ?: return null
+    val distribution = imageDistribution(pixels, width, height) ?: return null
+    val side = minOf(width, height).toDouble()
+    val windows = mutableListOf<FloatArray>()
+    if (width > height) {
+        // Squares anchored at the left and right edges (a landscape
+        // image's top/bottom are fully spanned by every square).
+        imageFingerprintWindow(pixels, width, height, 0.0, 0.0, side)
+            ?.let { windows.add(it) }
+        imageFingerprintWindow(pixels, width, height, width - side, 0.0, side)
+            ?.let { windows.add(it) }
+    } else if (height > width) {
+        // Squares anchored at the top and bottom edges.
+        imageFingerprintWindow(pixels, width, height, 0.0, 0.0, side)
+            ?.let { windows.add(it) }
+        imageFingerprintWindow(pixels, width, height, 0.0, height - side, side)
+            ?.let { windows.add(it) }
+    }
+    return PixelFingerprintSet(center, windows, distribution)
+}
+
+/** How strongly a candidate rendition matches the ground truth. */
+enum class PixelAgreement {
+    /** An aligned grid agrees — pixel-verified, the strong signal. */
+    STRICT,
+
+    /** No grid agrees, but the whole-frame palette does — corroborated. */
+    DISTRIBUTION,
+
+    /** Both signals disagree — the candidate is not the thumbnail's image. */
+    NONE,
+}
+
+/**
+ * The two-signal verdict: STRICT when the center grid agrees with the
+ * truth's center grid OR any candidate window agrees with it (the
+ * window case is an off-center crop of the SAME framing — still an
+ * aligned, cell-by-cell match); otherwise DISTRIBUTION when the
+ * whole-frame palettes agree; otherwise NONE.
+ */
+fun pixelAgreement(
+    candidate: PixelFingerprintSet,
+    truth: PixelFingerprintSet,
+): PixelAgreement {
+    if (fingerprintsAgree(candidate.center, truth.center)) {
+        return PixelAgreement.STRICT
+    }
+    if (candidate.windows.any { fingerprintsAgree(it, truth.center) }) {
+        return PixelAgreement.STRICT
+    }
+    if (distributionsAgree(candidate.distribution, truth.distribution)) {
+        return PixelAgreement.DISTRIBUTION
+    }
+    return PixelAgreement.NONE
+}
+
+/** What the download loop should do with one attempt's pixel verdict. */
+enum class PixelOutcome {
+    /** Accept and count as pixel-verified. */
+    ACCEPT_VERIFIED,
+
+    /** Accept, but count separately: the palette carried it, not a grid. */
+    ACCEPT_DISTRIBUTION,
+
+    /** Reject the attempt (retryable; terminal when the budget ends). */
+    REJECT,
+}
+
+/**
+ * The pure attempt decision, factored out of the download loop so the
+ * whole mapping is unit-testable: a STRICT verdict accepts as verified;
+ * a DISTRIBUTION verdict accepts as corroborated; a NONE verdict still
+ * accepts as verified when an independent byte-different refetch has
+ * already produced pixels that agree with this attempt (the renditions
+ * vote together against the thumbnail); anything else rejects. Terminal
+ * rejection therefore requires BOTH signals to disagree with the
+ * thumbnail — fingerprint disagreement alone never kills a photo.
+ */
+fun pixelOutcome(
+    agreement: PixelAgreement,
+    corroboratedByRefetch: Boolean,
+): PixelOutcome = when {
+    agreement == PixelAgreement.STRICT || corroboratedByRefetch ->
+        PixelOutcome.ACCEPT_VERIFIED
+    agreement == PixelAgreement.DISTRIBUTION ->
+        PixelOutcome.ACCEPT_DISTRIBUTION
+    else -> PixelOutcome.REJECT
+}
+
+/**
+ * Bounded decode shared by the fingerprint entry points: the long edge
+ * lands at ~160–320 px via inSampleSize — the fingerprints only need
+ * cell averages and palette mass, never full resolution. Returns
+ * (pixels, width, height), or null when the bytes do not decode.
+ */
+private fun decodeBoundedPixels(bytes: ByteArray): Triple<IntArray, Int, Int>? {
     if (bytes.size < 12) return null
     return try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -180,11 +418,30 @@ fun imageFingerprintOfBytes(bytes: ByteArray): FloatArray? {
             val h = bmp.height
             val px = IntArray(w * h)
             bmp.getPixels(px, 0, w, 0, 0, w, h)
-            imageFingerprint(px, w, h)
+            Triple(px, w, h)
         } finally {
             bmp.recycle()
         }
     } catch (_: Exception) {
         null
     }
+}
+
+/**
+ * Decodes [bytes] (bounded, see [decodeBoundedPixels]) and returns its
+ * center-square fingerprint, or null when the bytes do not decode or
+ * are too small. Runs wherever the media pipeline runs (Dispatchers.IO),
+ * never the UI thread. A garbled-but-decodable image still fingerprints
+ * — that is the point: its fingerprint is what the ground-truth
+ * comparison rejects.
+ */
+fun imageFingerprintOfBytes(bytes: ByteArray): FloatArray? {
+    val (px, w, h) = decodeBoundedPixels(bytes) ?: return null
+    return imageFingerprint(px, w, h)
+}
+
+/** Decodes [bytes] (bounded) and returns its full [PixelFingerprintSet]. */
+fun imagePixelFingerprintsOfBytes(bytes: ByteArray): PixelFingerprintSet? {
+    val (px, w, h) = decodeBoundedPixels(bytes) ?: return null
+    return imagePixelFingerprints(px, w, h)
 }

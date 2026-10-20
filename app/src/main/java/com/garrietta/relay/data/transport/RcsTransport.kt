@@ -137,12 +137,20 @@ class RcsTransport(context: Context) : Transport {
      * = checks passed; mediaHealed = a download whose first attempt's
      * pixels were REJECTED but a later fresh attempt verified (the user
      * saw a loading state, then the correct image — never the corrupt
-     * one); mediaUnhealable = the attempt budget exhausted on pixel
-     * mismatches, so the verbatim error surfaced instead of the image.
+     * one); mediaUnhealable = the attempt budget exhausted with BOTH
+     * signals (aligned grid AND whole-frame distribution) disagreeing,
+     * so the verbatim error surfaced instead of the image;
+     * mediaAcceptedMismatch = downloads/cache hits accepted although no
+     * aligned grid agreed, because the whole-frame color distribution
+     * corroborated the thumbnail (off-center crop / EXIF orientation —
+     * the aligned grid legitimately cannot match those). Kept separate
+     * from mediaVerified so a false acceptance stays visible in
+     * Diagnostics instead of hiding inside the verified count.
      */
     private val mediaVerified = java.util.concurrent.atomic.AtomicInteger(0)
     private val mediaHealed = java.util.concurrent.atomic.AtomicInteger(0)
     private val mediaUnhealable = java.util.concurrent.atomic.AtomicInteger(0)
+    private val mediaAcceptedMismatch = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
      * Remote typing state (Garrett 2026-10-19; typist identity 2026-10-20):
@@ -192,7 +200,9 @@ class RcsTransport(context: Context) : Transport {
             "splicesRejected=${splicesRejected.get()}, " +
             "mediaVerified=${mediaVerified.get()}, " +
             "mediaHealed=${mediaHealed.get()}, " +
-            "mediaUnhealable=${mediaUnhealable.get()}, ${ghostScanDiagnostics()}"
+            "mediaUnhealable=${mediaUnhealable.get()}, " +
+            "mediaAcceptedMismatch=${mediaAcceptedMismatch.get()}, " +
+            "${ghostScanDiagnostics()}"
     }
 
     /** Tachyon token expiry (epoch ms) for Diagnostics; null when not paired. */
@@ -1303,6 +1313,18 @@ class RcsTransport(context: Context) : Transport {
      * lives in rcs_media/v5: v4 entries were admitted under
      * structural-only rules, so the bump gives every image in his library
      * exactly one verified re-fetch.
+     *
+     * TWO-SIGNAL AGREEMENT (Garrett 2026-10-20, later): the comparison is
+     * the [pixelAgreement] verdict, not the bare aligned grid. A download
+     * whose aligned grids all disagree but whose whole-frame color
+     * distribution matches the thumbnail's is ACCEPTED and counted
+     * (mediaAcceptedMismatch): every structural gate has already passed
+     * on those bytes, the server re-serves deterministic renditions (a
+     * byte-identical refetch can never "heal" an aligned-grid false
+     * positive — off-center crops and EXIF orientation are permanent),
+     * and a wrong acceptance is recoverable by eye while a false
+     * rejection is a dead end. Terminal rejection now requires BOTH
+     * signals to disagree across the whole attempt budget.
      */
     private suspend fun downloadValidatedById(
         id: String,
@@ -1316,24 +1338,24 @@ class RcsTransport(context: Context) : Transport {
         return withContext(Dispatchers.IO) {
             val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v5")
             val cacheFile = java.io.File(cacheDir, id.sanitizeFileName())
-            // Ground-truth thumbnail fingerprint for pixel verification.
+            // Ground-truth thumbnail fingerprints for pixel verification.
             // Seeded from the inline bytes when the caller has them; the
             // field-9 thumbnail rendition is fetched (through this same
             // choke point — structurally gated, itself unverified) only
-            // when a check actually needs it.
-            var thumbFp: FloatArray? =
-                if (isImage) groundTruth?.let { imageFingerprintOfBytes(it) } else null
-            suspend fun ensureThumbFp() {
-                if (thumbFp != null || !isImage) return
+            // when a check actually needs it and no inline set exists.
+            var truthSet: PixelFingerprintSet? =
+                if (isImage) groundTruth?.let { imagePixelFingerprintsOfBytes(it) } else null
+            suspend fun ensureTruthSet() {
+                if (truthSet != null || !isImage) return
                 if (thumbId.isEmpty() || thumbKey.size != 32) return
-                thumbFp = try {
+                truthSet = try {
                     val thumbBytes = downloadValidatedById(
                         id = thumbId,
                         key = thumbKey,
                         declaredWireSize = 0,
                         isImage = true,
                     )
-                    imageFingerprintOfBytes(thumbBytes)
+                    imagePixelFingerprintsOfBytes(thumbBytes)
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     null // no ground truth — structural gates only
@@ -1349,28 +1371,62 @@ class RcsTransport(context: Context) : Transport {
                     fingerprintFile(cacheFile).delete()
                 } else if (isImage) {
                     // Pixel re-verification on serve: the stored sidecar
-                    // fingerprint (written only for verified bytes) is
-                    // compared against the thumbnail fingerprint — no
-                    // full-image decode on the hit path.
-                    ensureThumbFp()
-                    val tfp = thumbFp
-                    val sidecarFp = if (tfp == null) null else readFingerprintSidecar(cacheFile)
-                    val cachedFp = sidecarFp
-                        ?: if (tfp == null) null else imageFingerprintOfBytes(cached)
-                    when {
+                    // fingerprints (written only for accepted bytes) are
+                    // compared against the thumbnail's set — cheaply from
+                    // the sidecar when it can decide, with a full decode
+                    // only when it cannot. The verdict is the same
+                    // two-signal [pixelAgreement] the download path uses,
+                    // so an entry accepted via distribution at download
+                    // time re-verifies identically here and stays served
+                    // (no evict/refetch loop across re-opens).
+                    ensureTruthSet()
+                    val truth = truthSet
+                    if (truth == null) {
                         // No ground truth available: write-time trust.
-                        tfp == null -> return@withContext cached
-                        // Bytes won't fingerprint (cannot happen past the
-                        // gates above): structural verdict stands.
-                        cachedFp == null -> return@withContext cached
-                        fingerprintsAgree(cachedFp, tfp) -> {
-                            if (sidecarFp == null) {
-                                writeFingerprintSidecar(cacheFile, cachedFp)
-                            }
+                        return@withContext cached
+                    }
+                    val sidecar = readFingerprintSidecar(cacheFile)
+                    // What the sidecar alone can decide: STRICT from its
+                    // center grid, DISTRIBUTION from its distribution, or
+                    // NONE when a COMPLETE sidecar disagrees on both. A
+                    // legacy center-only sidecar that misses STRICT is
+                    // undecided (null) — its bytes may still match via a
+                    // window or the palette, which needs the real decode.
+                    val cheap: PixelAgreement? = when {
+                        sidecar == null -> null
+                        fingerprintsAgree(sidecar.center, truth.center) ->
+                            PixelAgreement.STRICT
+                        sidecar.distribution != null &&
+                            distributionsAgree(sidecar.distribution, truth.distribution) ->
+                            PixelAgreement.DISTRIBUTION
+                        sidecar.distribution != null -> PixelAgreement.NONE
+                        else -> null
+                    }
+                    val verdict = cheap ?: run {
+                        val cachedSet = imagePixelFingerprintsOfBytes(cached)
+                        if (cachedSet == null) {
+                            // Bytes won't fingerprint (cannot happen past
+                            // the gates above): structural verdict stands.
+                            return@withContext cached
+                        }
+                        val v = pixelAgreement(cachedSet, truth)
+                        if (v != PixelAgreement.NONE) {
+                            writeFingerprintSidecar(
+                                cacheFile, cachedSet.center, cachedSet.distribution,
+                            )
+                        }
+                        v
+                    }
+                    when (verdict) {
+                        PixelAgreement.STRICT -> {
                             mediaVerified.incrementAndGet()
                             return@withContext cached
                         }
-                        else -> {
+                        PixelAgreement.DISTRIBUTION -> {
+                            mediaAcceptedMismatch.incrementAndGet()
+                            return@withContext cached
+                        }
+                        PixelAgreement.NONE -> {
                             // The cached pixels are NOT the image the
                             // server thumbnail shows — a poisoned entry.
                             // Evict and fall through to the healing
@@ -1384,7 +1440,7 @@ class RcsTransport(context: Context) : Transport {
                     return@withContext cached
                 }
             }
-            ensureThumbFp()
+            ensureTruthSet()
             // Pixel-verification state shared across attempts: how many
             // attempts produced pixels the ground truth rejects, and the
             // rejected fingerprints + byte hashes for the corroboration
@@ -1394,7 +1450,8 @@ class RcsTransport(context: Context) : Transport {
             // the same rendition re-served and carries no new evidence).
             var pixelFailures = 0
             val rejectedFps = mutableListOf<Pair<FloatArray, Int>>()
-            var acceptedFp: FloatArray? = null
+            var acceptedSet: PixelFingerprintSet? = null
+            var acceptedViaDistribution = false
             // Single attempt: fetch + decrypt + validate. Kept as a local so
             // the retry loop below can re-run a FRESH download.
             suspend fun attemptDownload(): ByteArray {
@@ -1535,29 +1592,44 @@ class RcsTransport(context: Context) : Transport {
                 // pass on authentically garbled pixels — perfect headers,
                 // trailer and GCM tags over gray-block scan data (the
                 // Papaw ultrasound). When a ground-truth thumbnail
-                // fingerprint exists, the decoded pixels must match it
-                // before the bytes may be cached or rendered; a mismatch
-                // is retryable and the heal loop refetches whole-body.
-                // Corroboration: a byte-DIFFERENT refetch whose pixels
-                // agree with a rejected attempt is an independent
-                // rendition voting for the full image over the thumbnail.
-                val tfp = thumbFp
-                if (isImage && tfp != null) {
-                    val fp = imageFingerprintOfBytes(plain)
-                    if (fp != null) {
-                        val corroborated = rejectedFps.any { (rfp, rhash) ->
-                            rhash != plain.contentHashCode() &&
-                                fingerprintsAgree(fp, rfp)
-                        }
-                        if (fingerprintsAgree(fp, tfp) || corroborated) {
-                            acceptedFp = fp
-                        } else {
-                            pixelFailures++
-                            rejectedFps.add(fp to plain.contentHashCode())
-                            throw PixelMismatchException(
-                                "media unavailable: downloaded image does " +
-                                    "not match its server thumbnail",
-                            )
+                // fingerprint set exists, the decoded pixels must match
+                // it before the bytes may be cached or rendered. The
+                // match is the two-signal [pixelAgreement] verdict (see
+                // MediaPixelVerification): STRICT accepts as verified; a
+                // byte-DIFFERENT refetch whose pixels agree with a
+                // rejected attempt also accepts as verified (independent
+                // renditions voting for the full image over the
+                // thumbnail); DISTRIBUTION accepts counted separately —
+                // the whole-frame palette corroborates bytes that already
+                // passed every structural gate, which is the legitimate-
+                // photo signature (off-center crop / EXIF orientation)
+                // that no refetch could ever heal. Only NONE rejects,
+                // retryable so the heal loop refetches whole-body.
+                val truth = truthSet
+                if (isImage && truth != null) {
+                    val candSet = imagePixelFingerprintsOfBytes(plain)
+                    if (candSet != null) {
+                        val agreement = pixelAgreement(candSet, truth)
+                        val corroborated =
+                            agreement == PixelAgreement.NONE &&
+                                rejectedFps.any { (rfp, rhash) ->
+                                    rhash != plain.contentHashCode() &&
+                                        fingerprintsAgree(candSet.center, rfp)
+                                }
+                        when (pixelOutcome(agreement, corroborated)) {
+                            PixelOutcome.ACCEPT_VERIFIED -> acceptedSet = candSet
+                            PixelOutcome.ACCEPT_DISTRIBUTION -> {
+                                acceptedSet = candSet
+                                acceptedViaDistribution = true
+                            }
+                            PixelOutcome.REJECT -> {
+                                pixelFailures++
+                                rejectedFps.add(candSet.center to plain.contentHashCode())
+                                throw PixelMismatchException(
+                                    "media unavailable: downloaded image does " +
+                                        "not match its server thumbnail",
+                                )
+                            }
                         }
                     }
                 }
@@ -1600,12 +1672,21 @@ class RcsTransport(context: Context) : Transport {
             }
             // Only bytes that passed every gate — pixel verification
             // included, when ground truth exists — ever enter the cache.
+            // The sidecar stores the accepted set's center fingerprint
+            // AND distribution, so a distribution-accepted entry
+            // re-verifies as DISTRIBUTION on later hits (served, never
+            // evicted into a refetch loop) while a poisoned entry still
+            // fails both signals and heals.
             writeCacheAtomically(cacheFile, plain)
-            val afp = acceptedFp
-            if (afp != null) {
-                writeFingerprintSidecar(cacheFile, afp)
-                mediaVerified.incrementAndGet()
-                if (pixelFailures > 0) mediaHealed.incrementAndGet()
+            val aset = acceptedSet
+            if (aset != null) {
+                writeFingerprintSidecar(cacheFile, aset.center, aset.distribution)
+                if (acceptedViaDistribution) {
+                    mediaAcceptedMismatch.incrementAndGet()
+                } else {
+                    mediaVerified.incrementAndGet()
+                    if (pixelFailures > 0) mediaHealed.incrementAndGet()
+                }
             }
             plain
         }
@@ -1648,6 +1729,19 @@ class RcsTransport(context: Context) : Transport {
         java.io.File(cacheFile.parentFile, cacheFile.name + ".fp")
 
     /**
+     * What a fingerprint sidecar knows about its cache entry: the center
+     * grid fingerprint, plus the whole-frame distribution when the entry
+     * was written by the two-signal verifier. A null distribution marks
+     * a LEGACY sidecar (center-only): still decidable for STRICT, but a
+     * STRICT miss is undecided rather than a rejection — the bytes get
+     * one full decode before anyone evicts them.
+     */
+    private class SidecarFingerprints(
+        val center: FloatArray,
+        val distribution: FloatArray?,
+    )
+
+    /**
      * Persists the pixel fingerprint of VERIFIED cache bytes (see
      * downloadValidatedById): cache hits then re-verify against the
      * server thumbnail by comparing fingerprints — no full-image decode
@@ -1662,14 +1756,43 @@ class RcsTransport(context: Context) : Transport {
         }
     }
 
+    /**
+     * Two-signal sidecar: center fingerprint and distribution, separated
+     * by ';'. Distribution-accepted entries need their distribution on
+     * disk, or the next cache hit would see a STRICT miss with no second
+     * signal and evict bytes the download path deliberately accepted.
+     */
+    private fun writeFingerprintSidecar(
+        cacheFile: java.io.File,
+        fp: FloatArray,
+        distribution: FloatArray,
+    ) {
+        try {
+            fingerprintFile(cacheFile).writeText(
+                fp.joinToString(",") + ";" + distribution.joinToString(","),
+            )
+        } catch (_: Exception) {
+            // The entry itself was still verified at write time.
+        }
+    }
+
     /** Reads a fingerprint sidecar; null when absent or malformed. */
-    private fun readFingerprintSidecar(cacheFile: java.io.File): FloatArray? {
+    private fun readFingerprintSidecar(cacheFile: java.io.File): SidecarFingerprints? {
         val f = fingerprintFile(cacheFile)
         if (!f.exists()) return null
         return try {
-            val parts = f.readText().split(",")
-            if (parts.size != MEDIA_FP_GRID * MEDIA_FP_GRID * 3) return null
-            FloatArray(parts.size) { parts[it].toFloat() }
+            val sections = f.readText().split(";")
+            val centerParts = sections[0].split(",")
+            if (centerParts.size != MEDIA_FP_GRID * MEDIA_FP_GRID * 3) return null
+            val center = FloatArray(centerParts.size) { centerParts[it].toFloat() }
+            val distribution = if (sections.size == 2) {
+                val distParts = sections[1].split(",")
+                if (distParts.size != FP_DIST_BINS * 3) return null
+                FloatArray(distParts.size) { distParts[it].toFloat() }
+            } else {
+                null
+            }
+            SidecarFingerprints(center, distribution)
         } catch (_: Exception) {
             null
         }

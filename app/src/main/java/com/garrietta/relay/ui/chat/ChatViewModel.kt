@@ -18,6 +18,7 @@ import com.garrietta.relay.data.repo.ChatScrollStore
 import com.garrietta.relay.data.repo.ScrollPosition
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
+import com.garrietta.relay.ui.theme.ContactPalettes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -337,7 +338,12 @@ class ChatViewModel(
     private val _others = MutableStateFlow<List<Participant>>(emptyList())
     val others: StateFlow<List<Participant>> = _others
 
-    /** Palette seed per participant (null = no photo) for per-sender bubbles. */
+    /**
+     * Bubble-tint seed per participant: photo-derived when the sender
+     * has a photo; a photo-less sender seeds from their assigned
+     * expressive palette instead (Garrett 2026-10-20) — null now only
+     * for an address that isn't a known participant.
+     */
     private val _senderSeeds = MutableStateFlow<Map<String, androidx.compose.ui.graphics.Color?>>(emptyMap())
     val senderSeeds: StateFlow<Map<String, androidx.compose.ui.graphics.Color?>> = _senderSeeds
 
@@ -437,7 +443,12 @@ class ChatViewModel(
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {
                 val key = repository.normalizedAddress(p.address)
+                // No photo (or extraction failed): seed the bubble
+                // tint from the sender's assigned expressive palette
+                // (Garrett 2026-10-20) — the same hue family as their
+                // photo-less avatar, never the neutral fallback.
                 seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
+                    ?: ContactPalettes.paletteFor(p.address).seed
             }
             _senderSeeds.value = seeds
         }
@@ -572,7 +583,7 @@ class ChatViewModel(
         return idx[address] ?: idx[repository.normalizedAddress(address)]
     }
 
-    /** Palette seed for the sender of [address] (null = no photo). */
+    /** Bubble-tint seed for the sender of [address]; null only when the sender is not a known participant. */
     fun seedFor(address: String): androidx.compose.ui.graphics.Color? {
         val seeds = _senderSeeds.value
         return seeds[address] ?: seeds[repository.normalizedAddress(address)]
@@ -596,7 +607,11 @@ class ChatViewModel(
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {
                 val key = repository.normalizedAddress(p.address)
+                // No photo (or extraction failed): the assigned
+                // expressive palette seeds the bubble tint (Garrett
+                // 2026-10-20) — same rule as the RCS path above.
                 seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
+                    ?: ContactPalettes.paletteFor(p.address).seed
             }
             _senderSeeds.value = seeds
         }

@@ -19,7 +19,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
@@ -47,6 +50,12 @@ import coil.compose.AsyncImagePainter
  * When a photo IS present, it also feeds the per-contact Palette theming
  * (see ChatViewModel.loadContactTheme) — photo and color identity stay one.
  *
+ * When there is NO photo, the initial sits on the contact's assigned
+ * Material 3 Expressive palette ([ContactPalettes] — Garrett 2026-10-20):
+ * one palette per contact, keyed by the same identity as the shape, the
+ * same on every surface. [paletteIndex] lets a group cluster override
+ * the raw assignment when two members would collide exactly.
+ *
  * STANDING RULE (1:1 square): every avatar shape is scaled to fit inside a
  * 1:1 square bounding box ([size] x [size]), so all avatar shapes have
  * consistent sizing regardless of the polygon's aspect ratio. The photo
@@ -62,6 +71,8 @@ fun ContactAvatar(
     shape: Shape = WavyBlobShape,
     shapeKey: String? = null,
     textStyle: TextStyle = MaterialTheme.typography.headlineMedium,
+    /** Cluster-resolved palette override (see ContactPalettes). */
+    paletteIndex: Int? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     // Expressive rotation wins over the explicit shape when a key is given.
@@ -94,14 +105,21 @@ fun ContactAvatar(
     // Shapes outside the vocabulary keep box centering (offset 0).
     val anchorX = namedShape?.let { shapeWidth * (it.opticalAnchor.first - 0.5f) } ?: 0.dp
     val anchorY = namedShape?.let { shapeHeight * (it.opticalAnchor.second - 0.5f) } ?: 0.dp
-    // Deterministic per-contact fallback colors from the wallpaper scheme.
-    val (bg, fg) = remember(name, scheme) {
-        val palette = listOf(
-            scheme.primaryContainer to scheme.onPrimaryContainer,
-            scheme.secondaryContainer to scheme.onSecondaryContainer,
-            scheme.tertiaryContainer to scheme.onTertiaryContainer,
-        )
-        palette[(name.hashCode().and(Int.MAX_VALUE)) % palette.size]
+    // Photo-less identity (Garrett 2026-10-20): the contact's assigned
+    // expressive palette — keyed by the SAME identity that keys the
+    // shape (the address-based [shapeKey], the display name only when
+    // no key was passed), resolved once here so every surface agrees.
+    // The pair is pre-verified WCAG AA in ContactPalettes and passed
+    // through the codebase's ensureContrast guard again, so the
+    // initial is legible on its ground in either scheme.
+    val palette = remember(paletteIndex, shapeKey, name) {
+        paletteIndex?.let { ContactPalettes.paletteAt(it) }
+            ?: ContactPalettes.paletteFor(shapeKey ?: name)
+    }
+    val darkTheme = scheme.background.luminance() < 0.5f
+    val bg = palette.background(darkTheme)
+    val fg = remember(palette, darkTheme) {
+        Color(ensureContrast(palette.onBackground(darkTheme).toArgb(), bg.toArgb()))
     }
     // Outer box = the 1:1 square slot; inner box = the shape at its
     // aspect-correct fit-inside-square size, centered. The caller's modifier

@@ -226,7 +226,7 @@ private fun ColorScheme.withVerifiedContrast(): ColorScheme {
     )
 }
 
-private fun ensureContrast(fg: Int, bg: Int, minRatio: Float = 4.5f): Int {
+internal fun ensureContrast(fg: Int, bg: Int, minRatio: Float = 4.5f): Int {
     var c = fg
     repeat(24) {
         if (ColorUtils.calculateContrast(c, bg) >= minRatio) return c

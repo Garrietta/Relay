@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
+import com.garrietta.relay.ui.theme.ContactPalettes
 
 /**
  * Notification avatars in the contact's expressive shape (Garrett
@@ -76,11 +77,18 @@ object NotificationAvatar {
         if (photo != null) {
             canvas.drawBitmap(photo, null, Rect(0, 0, sizePx, sizePx), null)
         } else {
-            // Initial-letter fallback in the same shape.
-            canvas.drawColor(fallbackColor(shapeKey.ifBlank { displayName }))
+            // Initial-letter fallback in the same shape, in the
+            // contact's assigned expressive palette (Garrett
+            // 2026-10-20) — the same colors their in-app photo-less
+            // avatar uses, picked for the shade's night mode.
+            val palette = ContactPalettes.paletteFor(shapeKey.ifBlank { displayName })
+            val night = (context.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+            canvas.drawColor(palette.backgroundArgb(night))
             val initial = displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.WHITE
+                color = palette.onBackgroundArgb(night)
                 textSize = sizePx * 0.42f
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 textAlign = Paint.Align.CENTER
@@ -120,14 +128,4 @@ object NotificationAvatar {
         val side = minOf(w, h)
         Bitmap.createBitmap(decoded, (w - side) / 2, (h - side) / 2, side, side)
     }.getOrNull()
-
-    /** Deterministic fallback fill, keyed like the shape assignment. */
-    private fun fallbackColor(key: String): Int {
-        val tones = intArrayOf(
-            0xFF2E7D32.toInt(), 0xFF1565C0.toInt(), 0xFF6A1B9A.toInt(),
-            0xFFC62828.toInt(), 0xFFEF6C00.toInt(), 0xFF00838F.toInt(),
-            0xFF4527A0.toInt(), 0xFF558B2F.toInt(),
-        )
-        return tones[(key.hashCode() and Int.MAX_VALUE) % tones.size]
-    }
 }

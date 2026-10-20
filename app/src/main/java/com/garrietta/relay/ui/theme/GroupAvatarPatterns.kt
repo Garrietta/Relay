@@ -381,6 +381,15 @@ fun GroupAvatarCluster(
     val placements = remember(conversationKey, shown.size, shown.map { it.address }) {
         clusterPlacements(shown, conversationKey)
     }
+    // Photo-less palette collisions inside this one cluster (Garrett
+    // 2026-10-20): if two shown members' assigned palettes collide
+    // exactly, the later member nudges to the next palette so the
+    // cluster stays readable. Solo surfaces always use the raw
+    // assignment — the nudge exists only here, where members share
+    // one box.
+    val paletteIndexes = remember(shown.map { it.address }) {
+        ContactPalettes.paletteIndexesForCluster(shown.map { it.address })
+    }
     val smallText = boxSize < 80.dp
     Box(modifier = modifier.size(boxSize)) {
         shown.forEachIndexed { i, member ->
@@ -394,6 +403,7 @@ fun GroupAvatarCluster(
                 name = member.name,
                 size = s,
                 shapeKey = member.address,
+                paletteIndex = paletteIndexes[i],
                 textStyle = clusterLetterStyle(s),
                 modifier = Modifier
                     .offset(
@@ -462,6 +472,11 @@ private fun TwoAvatarOverlap(
     val bx = if (flipX) 1f - bxC else bxC
     val aOnTop = ((h ushr 5) and 1) == 1
     val s = boxSize * 0.75f
+    // Same cluster palette rule as the hex cluster: an exact palette
+    // collision between the two members nudges the second one.
+    val paletteIndexes = remember(a.address, b.address) {
+        ContactPalettes.paletteIndexesForCluster(listOf(a.address, b.address))
+    }
     Box(modifier = modifier.size(boxSize)) {
         val rotA = remember(a.address) { memberRotationOld(a.address) }
         val rotB = remember(b.address) { memberRotationOld(b.address) }
@@ -470,6 +485,7 @@ private fun TwoAvatarOverlap(
             name = a.name,
             size = s,
             shapeKey = a.address,
+            paletteIndex = paletteIndexes[0],
             textStyle = clusterLetterStyle(s),
             modifier = Modifier
                 .offset(x = boxSize * ax - s / 2, y = boxSize * ayC - s / 2)
@@ -481,6 +497,7 @@ private fun TwoAvatarOverlap(
             name = b.name,
             size = s,
             shapeKey = b.address,
+            paletteIndex = paletteIndexes[1],
             textStyle = clusterLetterStyle(s),
             modifier = Modifier
                 .offset(x = boxSize * bx - s / 2, y = boxSize * byC - s / 2)

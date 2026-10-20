@@ -1695,10 +1695,6 @@ private fun MediaBubble(
         onSelect = onToggleSelect,
     )
 }
-        onDismiss = { showReactMenu = false },
-        onReact = onReact,
-    )
-}
 
 /**
  * Fullscreen image viewer (Garrett 2026-10-19): pinch-to-zoom, pan while

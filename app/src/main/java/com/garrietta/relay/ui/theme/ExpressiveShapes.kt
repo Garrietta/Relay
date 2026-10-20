@@ -54,6 +54,75 @@ data class NamedShape(
         referencePath.computeBounds(b, true)
         if (b.height() <= 0f) 1f else b.width() / b.height()
     }
+
+    /**
+     * Optical anchor: the area centroid of this shape's filled path, as
+     * (x, y) fractions of the path bounds — where the shape's visual
+     * mass actually sits. Garrett 2026-10-19: initials centered on the
+     * bounding box looked off-center in asymmetric shapes (the rounded
+     * triangle's mass sits low, the pentagon's high), so avatar letters
+     * anchor here instead. Measured from the real path by
+     * [measureOpticalAnchor] — no hand-tuned values; symmetric shapes
+     * measure (0.5, 0.5) and keep a zero offset.
+     */
+    val opticalAnchor: Pair<Float, Float> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        measureOpticalAnchor(referencePath)
+    }
+}
+
+/**
+ * Measures a path's optical anchor (area centroid) by rasterizing it:
+ * the path is uniform-fitted into a 96×96 ALPHA_8 bitmap (the same fit
+ * [addFitted] applies at draw time, so bounds-fractions here map
+ * directly onto the drawn shape), then the alpha-weighted centroid of
+ * the filled region is taken. Fractions within ±0.004 of center snap
+ * to exactly 0.5 so symmetric shapes get a true zero offset instead
+ * of antialiasing noise.
+ */
+private fun measureOpticalAnchor(ref: android.graphics.Path): Pair<Float, Float> {
+    val n = 96
+    val src = android.graphics.Path(ref)
+    val bounds = android.graphics.RectF()
+    src.computeBounds(bounds, true)
+    if (bounds.width() <= 0f || bounds.height() <= 0f) return 0.5f to 0.5f
+    val s = minOf(n / bounds.width(), n / bounds.height())
+    val m = android.graphics.Matrix()
+    m.setScale(s, s)
+    m.postTranslate(n / 2f - bounds.centerX() * s, n / 2f - bounds.centerY() * s)
+    src.transform(m)
+    val fitted = android.graphics.RectF()
+    src.computeBounds(fitted, true)
+    if (fitted.width() <= 0f || fitted.height() <= 0f) return 0.5f to 0.5f
+    val bmp = android.graphics.Bitmap.createBitmap(
+        n, n, android.graphics.Bitmap.Config.ALPHA_8,
+    )
+    android.graphics.Canvas(bmp).drawPath(
+        src,
+        android.graphics.Paint().apply {
+            isAntiAlias = true
+            style = android.graphics.Paint.Style.FILL
+        },
+    )
+    val pixels = IntArray(n * n)
+    bmp.getPixels(pixels, 0, n, 0, 0, n, n)
+    bmp.recycle()
+    var weightedX = 0.0
+    var weightedY = 0.0
+    var total = 0.0
+    for (i in pixels.indices) {
+        val a = (pixels[i] ushr 24).toDouble()
+        if (a > 0.0) {
+            weightedX += ((i % n) + 0.5) * a
+            weightedY += ((i / n) + 0.5) * a
+            total += a
+        }
+    }
+    if (total <= 0.0) return 0.5f to 0.5f
+    fun snap(v: Float): Float =
+        if (kotlin.math.abs(v - 0.5f) < 0.004f) 0.5f else v
+    val cx = ((weightedX / total).toFloat() - fitted.left) / fitted.width()
+    val cy = ((weightedY / total).toFloat() - fitted.top) / fitted.height()
+    return snap(cx) to snap(cy)
 }
 
 /** Reference radius for all vocabulary paths; fitted to layout at draw time. */

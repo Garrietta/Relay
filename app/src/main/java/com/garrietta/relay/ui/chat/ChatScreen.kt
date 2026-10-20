@@ -416,6 +416,16 @@ fun ChatScreen(
                                     onReact = { emoji ->
                                         viewModel.sendReaction(message, emoji)
                                     },
+                                    // Group mode: the media renders inside
+                                    // the sender column so its leading edge
+                                    // matches group text bubbles exactly
+                                    // (Garrett 2026-10-19).
+                                    sender = if (isGroup && !message.isOutgoing)
+                                        viewModel.senderFor(message.address) else null,
+                                    isGroup = isGroup,
+                                    onAvatarClick = { sender ->
+                                        onOpenDetails(sender.address)
+                                    },
                                 )
                                 return@itemsIndexed
                             }
@@ -966,6 +976,13 @@ private fun MediaBubble(
     onOpenImage: (Message) -> Unit = {},
     /** Long-press reaction send (Garrett 2026-10-19: reactions both ways). */
     onReact: (String) -> Unit = {},
+    /** Group chats: the sender, so group-incoming media renders inside
+     * the same sender column as group-incoming text bubbles (identical
+     * leading edge). Null outside groups. */
+    sender: Participant? = null,
+    isGroup: Boolean = false,
+    /** Tapping the sender's avatar opens their details page. */
+    onAvatarClick: (Participant) -> Unit = {},
 ) {
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
@@ -996,10 +1013,16 @@ private fun MediaBubble(
         remember(message.id) { decodeImageBounds(loadedBytes) }
     } else null
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
-    ) {
+    // The media + caption block, emitted into whichever layout hosts it
+    // below: the plain full-width column, or — for group-incoming
+    // messages — the sender column, so the media's leading edge lines
+    // up EXACTLY with group-incoming text bubbles (Garrett 2026-10-19:
+    // "Photos are misaligned" — media used to flush to the list edge
+    // while text bubbles sit 36dp in: 28dp avatar + 8dp gap. Same fix
+    // the link preview got in #130.) Outgoing media already shares the
+    // outgoing text bubbles' trailing edge.
+    @Composable
+    fun MediaContent() {
         Box {
             Box(
                 modifier = Modifier
@@ -1199,6 +1222,50 @@ private fun MediaBubble(
                     else MaterialTheme.colorScheme.onSurface,
                 )
             }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
+    ) {
+        // Smart-cast: the null check is inline so `sender` is non-null.
+        if (isGroup && !message.isOutgoing && sender != null) {
+            // Group-incoming: same sender column as group-incoming text
+            // bubbles (28dp avatar + 8dp gap) — the media's leading edge
+            // matches the bubbles' exactly.
+            Row(verticalAlignment = Alignment.Top) {
+                ContactAvatar(
+                    photoUri = sender.photoUri,
+                    name = sender.displayName.ifBlank { sender.address },
+                    size = 28.dp,
+                    shapeKey = sender.address,
+                    textStyle = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onAvatarClick(sender) },
+                    ),
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(
+                    modifier = Modifier.weight(1f, fill = false),
+                    horizontalAlignment = Alignment.Start,
+                ) {
+                    Text(
+                        text = if (sender.isUnknownSenderGhost()) sender.address
+                        else sender.displayName.ifBlank { sender.address },
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    MediaContent()
+                }
+            }
+        } else {
+            MediaContent()
         }
     }
 

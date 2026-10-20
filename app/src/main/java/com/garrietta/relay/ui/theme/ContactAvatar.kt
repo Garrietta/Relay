@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
@@ -84,6 +85,15 @@ fun ContactAvatar(
         shapeWidth = size * aspect
         shapeHeight = size
     }
+    // OPTICAL CENTERING (Garrett 2026-10-19): the initial letter (and
+    // the loading indicator) sit at the shape's measured area centroid
+    // ([NamedShape.opticalAnchor]), not the bounding-box center —
+    // asymmetric shapes (triangle, pentagon, fan...) carry their
+    // visual mass off-center, so box-centered letters looked lost in
+    // them. The photo is NOT offset: it fills the clip as before.
+    // Shapes outside the vocabulary keep box centering (offset 0).
+    val anchorX = namedShape?.let { (it.opticalAnchor.first - 0.5f) * shapeWidth } ?: 0.dp
+    val anchorY = namedShape?.let { (it.opticalAnchor.second - 0.5f) * shapeHeight } ?: 0.dp
     // Deterministic per-contact fallback colors from the wallpaper scheme.
     val (bg, fg) = remember(name, scheme) {
         val palette = listOf(
@@ -116,6 +126,7 @@ fun ContactAvatar(
                 text = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
                 style = textStyle,
                 color = fg,
+                modifier = Modifier.offset(x = anchorX, y = anchorY),
             )
             if (photoUri != null) {
                 // Expressive loading state: the seven-shape loop while the
@@ -134,6 +145,7 @@ fun ContactAvatar(
                 )
                 if (imgState is AsyncImagePainter.State.Loading) {
                     SevenShapeLoadingIndicator(
+                        modifier = Modifier.offset(x = anchorX, y = anchorY),
                         diameter = size * 0.45f,
                         color = fg,
                     )

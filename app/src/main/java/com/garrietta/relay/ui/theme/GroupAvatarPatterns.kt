@@ -13,11 +13,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -31,7 +34,9 @@ import kotlin.math.sqrt
  *
  * - Base scale = f(member count): min(0.75, 0.9/√N) — the scale that fits
  *   N overlapping icons inside the 1:1 box a single 1:1 avatar occupies
- *   (his calibration: 6 people ≈ 35%).
+ *   (his calibration: 6 people ≈ 35%). The raw layout is then
+ *   envelope-normalized so the cluster fills the same share of the box
+ *   at every count (see [clusterPlacements]).
  * - Per-contact jitter: ±3% of the base scale, deterministic per
  *   (conversation, contact), for uniqueness.
  * - Random positions AND rotations, deterministic per (conversation,
@@ -93,9 +98,29 @@ private fun hexSlots(n: Int, spacing: Float): List<Triple<Float, Float, Int>> {
 }
 
 /**
+ * Target share of the 1:1 box the cluster's outer envelope spans for
+ * EVERY member count (Garrett 2026-10-19: "the group messages of all
+ * contact counts could scale better in the provided space"). 0.94
+ * leaves headroom for the ±0.025 position jitter (worst case envelope
+ * 0.99 — still inside the box); the per-icon clamp is the final safety.
+ */
+private const val TARGET_CLUSTER_FILL = 0.94f
+
+/**
  * V3 placements for a cluster of [n] members: hex-ring slots with a
  * loose ~38% overlap (center distance = 0.62 × base scale), per-member
  * position jitter, per-member scale jitter, all clamped into the 1:1 box.
+ *
+ * ENVELOPE NORMALIZATION: the raw hex layout's outer envelope varied
+ * wildly by count (measured: N=3 overflows at 1.14 and gets crushed by
+ * the clamp; N=5 fills only 0.89; N=7 only 0.75 — icons shrinking to
+ * the center as groups grow, which is the "tiny cluster, dead space"
+ * look Garrett flagged). So the raw envelope is MEASURED from the slot
+ * geometry, and every slot offset and the base size are scaled by
+ * k = TARGET_CLUSTER_FILL / rawEnvelope — the cluster fills the box to
+ * the same share at every count, by construction, not by retuned
+ * constants. Normalized icon size lands ≈0.43 for N=3–7 and shrinks
+ * gracefully once ring 2 engages (N≥8).
  */
 private fun clusterPlacements(
     members: List<ClusterMember>,
@@ -104,11 +129,21 @@ private fun clusterPlacements(
     val n = members.size
     if (n == 0) return emptyList()
     val base = baseScale(n)
-    val slots = hexSlots(n, base * 0.62f)
+    val rawSlots = hexSlots(n, base * 0.62f)
+    // Raw envelope: the farthest slot edge from the box center (either
+    // axis), doubled. Slots are precomputed numbers, so this is exact.
+    val rawExtent = rawSlots.maxOf { (sx, sy, _) ->
+        maxOf(abs(sx - 0.5f), abs(sy - 0.5f))
+    } + base / 2f
+    val k = TARGET_CLUSTER_FILL / (rawExtent * 2f)
+    val slots = rawSlots.map { (sx, sy, ring) ->
+        Triple(0.5f + (sx - 0.5f) * k, 0.5f + (sy - 0.5f) * k, ring)
+    }
+    val scaledBase = base * k
     val maxRing = slots.maxOf { it.third }
     return members.mapIndexed { i, member ->
         val (sx, sy, ring) = slots[i]
-        val size = memberScale(conversationKey, member.address, base)
+        val size = memberScale(conversationKey, member.address, scaledBase)
         val jx = (jitter01("$conversationKey|${member.address}|x") - 0.5f) * 0.05f
         val jy = (jitter01("$conversationKey|${member.address}|y") - 0.5f) * 0.05f
         val half = size / 2f
@@ -121,6 +156,19 @@ private fun clusterPlacements(
         )
     }
 }
+
+/**
+ * Initial-letter style for cluster members (Garrett 2026-10-19): the
+ * letter scales WITH the member's rendered size AND keeps the single
+ * avatar's style — headlineMedium with only its font size scaled, so
+ * weight and family stay identical (bold stays bold). The old fixed
+ * labelMedium/titleSmall styles rendered the letters tiny inside
+ * scaled-down cluster shapes. Ratio = headlineMedium's 28sp at
+ * ContactAvatar's 56dp default size = 0.5 × size.
+ */
+@Composable
+private fun clusterLetterStyle(size: Dp): TextStyle =
+    MaterialTheme.typography.headlineMedium.copy(fontSize = (size.value * 0.5f).sp)
 
 /**
  * A group's contact photos in the V3 hex cluster: each keeps its
@@ -160,8 +208,7 @@ fun GroupAvatarCluster(
                 name = member.name,
                 size = s,
                 shapeKey = member.address,
-                textStyle = if (smallText) MaterialTheme.typography.labelMedium
-                    else MaterialTheme.typography.titleSmall,
+                textStyle = clusterLetterStyle(s),
                 modifier = Modifier
                     .offset(
                         x = boxSize * p.xFrac - s / 2,
@@ -228,7 +275,6 @@ private fun TwoAvatarOverlap(
     val bx = if (flipX) 1f - bxC else bxC
     val aOnTop = ((h ushr 5) and 1) == 1
     val s = boxSize * 0.75f
-    val smallText = boxSize < 80.dp
     Box(modifier = modifier.size(boxSize)) {
         val rotA = remember(a.address) { memberRotationOld(a.address) }
         val rotB = remember(b.address) { memberRotationOld(b.address) }
@@ -237,8 +283,7 @@ private fun TwoAvatarOverlap(
             name = a.name,
             size = s,
             shapeKey = a.address,
-            textStyle = if (smallText) MaterialTheme.typography.labelMedium
-                else MaterialTheme.typography.titleSmall,
+            textStyle = clusterLetterStyle(s),
             modifier = Modifier
                 .offset(x = boxSize * ax - s / 2, y = boxSize * ayC - s / 2)
                 .graphicsLayer { rotationZ = rotA }
@@ -249,8 +294,7 @@ private fun TwoAvatarOverlap(
             name = b.name,
             size = s,
             shapeKey = b.address,
-            textStyle = if (smallText) MaterialTheme.typography.labelMedium
-                else MaterialTheme.typography.titleSmall,
+            textStyle = clusterLetterStyle(s),
             modifier = Modifier
                 .offset(x = boxSize * bx - s / 2, y = boxSize * byC - s / 2)
                 .graphicsLayer { rotationZ = rotB }

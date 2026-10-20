@@ -129,6 +129,7 @@ import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalFocusManager
@@ -244,6 +245,16 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val chatContext = LocalContext.current
     val listState = rememberLazyListState()
+    // Height of the floating bottom-chrome zone (composer + selection
+    // bar + sticker panel while open), measured from the overlay
+    // itself (Garrett 2026-10-20: the chat draws behind the bar). The
+    // message list's bottom content padding tracks it, so the newest
+    // message parks clear of the bar at rest while scrolled content
+    // passes underneath. Seeded with the resting zone (64dp pill row
+    // + its vertical padding + a typical gesture inset); the size
+    // callback corrects it on the first layout.
+    var composerZoneHeight by remember { mutableStateOf(96.dp) }
+    val chatDensity = LocalDensity.current
     // Scroll-velocity jiggle (Garrett 2026-10-20): one smoothed signal
     // for the message list — bubble rows (and the sender avatars inside
     // them) read it in the draw phase (see ScrollJiggle). The landing,
@@ -703,10 +714,21 @@ fun ChatScreen(
             // surface, Build #171's band bottom — the inbox cluster's
             // top — cut the overlay copy's composer region off at that
             // line for the whole flight: the entry bar opened as a
-            // sliver at the screen's bottom edge.) The Scaffold's
-            // containerColor (the wallpaper's bottom tone) backs the
-            // bars' strip, so the seam under the surface is invisible.
-            Column(
+            // sliver at the screen's bottom edge.)
+            //
+            // The bars also FLOAT over the surface (Garrett 2026-10-20:
+            // "the chat should draw behind the bar at the bottom of the
+            // chat"): the surface runs the full height of the pane and
+            // the bars overlay its bottom edge, so scrolled messages
+            // pass under the composer pill instead of stopping dead at
+            // its top edge. Rest stays honest — the list's bottom
+            // content padding tracks the measured bar zone
+            // (composerZoneHeight), so the newest message parks fully
+            // clear of the bar; drawing behind is a scroll-time visual
+            // only. Under the surface, the Scaffold's containerColor
+            // (the wallpaper's bottom tone) backs any strip the morph
+            // hasn't covered yet, so no seam ever shows.
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -722,12 +744,12 @@ fun ChatScreen(
                 // Thread container: the chat reads as one large rounded
                 // container below the app bar (M3E containment), visually
                 // independent of it. Shared-bounds target for the inbox
-                // conversation row — the surface is the message region
-                // only; the bars below it are chrome, not content.
+                // conversation row. The surface spans the pane's full
+                // height — its bottom edge runs behind the floating
+                // bars, which are chrome, not content.
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         .motionSharedBounds(
                             SharedElementKeys.conversation(threadId),
                             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -753,7 +775,18 @@ fun ChatScreen(
                         LazyColumn(
                             state = listState,
                             reverseLayout = true,
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                            // Draw-behind geometry: this reversed list
+                            // anchors its newest item at the visual
+                            // bottom, where the before-content padding
+                            // (PaddingValues.bottom under reverseLayout)
+                            // is the measured composer zone plus the
+                            // usual 8dp — the newest message parks
+                            // clear of the floating bar at rest, and
+                            // anything scrolled passes under it.
+                            contentPadding = PaddingValues(
+                                start = 4.dp, top = 8.dp, end = 4.dp,
+                                bottom = composerZoneHeight + 8.dp,
+                            ),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
@@ -910,59 +943,75 @@ fun ChatScreen(
                         }
                     }
                 }
-                // Selection action bar (Garrett 2026-10-20, feature
-                // queue 4/7: multi-message forwarding): slides in
-                // above the composer while any bubble is selected —
-                // the count, a clear (X), and Forward, which opens
-                // the conversation picker. Media bubbles select too
-                // (long-press menu → Select), so attachments can be
-                // forwarded, not just text.
-                AnimatedVisibility(
-                    visible = selectedIds.isNotEmpty(),
-                    enter = slideInVertically(RelaySprings.bouncy()) { it } +
-                        fadeIn(tween(120)),
-                    exit = slideOutVertically(tween(160)) { it } +
-                        fadeOut(tween(120)),
+                // Bottom chrome overlay: bottom-anchored on the root,
+                // measured into composerZoneHeight (the list's bottom
+                // padding above reads it). Its bounds are exactly the
+                // bars' bounds, so the list stays touchable everywhere
+                // else; the attachment/location sheets are modal
+                // windows of their own and never lived here.
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .onSizeChanged { size ->
+                            composerZoneHeight =
+                                with(chatDensity) { size.height.toDp() }
+                        },
                 ) {
-                    SelectionBar(
-                        count = selectedIds.size,
-                        forwarding = forwarding,
-                        onClear = { viewModel.clearSelection() },
-                        onForward = { showForwardPicker = true },
+                    // Selection action bar (Garrett 2026-10-20, feature
+                    // queue 4/7: multi-message forwarding): slides in
+                    // above the composer while any bubble is selected —
+                    // the count, a clear (X), and Forward, which opens
+                    // the conversation picker. Media bubbles select too
+                    // (long-press menu → Select), so attachments can be
+                    // forwarded, not just text.
+                    AnimatedVisibility(
+                        visible = selectedIds.isNotEmpty(),
+                        enter = slideInVertically(RelaySprings.bouncy()) { it } +
+                            fadeIn(tween(120)),
+                        exit = slideOutVertically(tween(160)) { it } +
+                            fadeOut(tween(120)),
+                    ) {
+                        SelectionBar(
+                            count = selectedIds.size,
+                            forwarding = forwarding,
+                            onClear = { viewModel.clearSelection() },
+                            onForward = { showForwardPicker = true },
+                        )
+                    }
+                    Composer(
+                        sending = sending,
+                        onSend = { viewModel.send(recipient, it) },
+                        onAttachmentSoon = {
+                            // Voice messages stay stubbed (Garrett 2026-10-19:
+                            // the four picker options send for real now).
+                            scope.launch {
+                                snackbarHostState.showSnackbar("Voice messages are coming soon")
+                            }
+                        },
+                        onAttach = { uri ->
+                            viewModel.sendAttachment(uri, chatContext.contentResolver)
+                        },
+                        onSticker = { def ->
+                            viewModel.sendSticker(def)
+                            stickerStore.record(def.id)
+                        },
+                        recentStickers = recentStickerDefs,
+                        onSendLocation = { latitude, longitude, name ->
+                            viewModel.sendLocation(recipient, latitude, longitude, name)
+                        },
+                        onLocationDenied = {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    "Relay needs location permission to share your " +
+                                        "location. Allow it in Settings \u2192 Apps \u2192 " +
+                                        "Relay \u2192 Permissions \u2192 Location.",
+                                )
+                            }
+                        },
+                        isSmsChat = liveTransportLabel == "SMS",
                     )
                 }
-                Composer(
-                    sending = sending,
-                    onSend = { viewModel.send(recipient, it) },
-                    onAttachmentSoon = {
-                        // Voice messages stay stubbed (Garrett 2026-10-19:
-                        // the four picker options send for real now).
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Voice messages are coming soon")
-                        }
-                    },
-                    onAttach = { uri ->
-                        viewModel.sendAttachment(uri, chatContext.contentResolver)
-                    },
-                    onSticker = { def ->
-                        viewModel.sendSticker(def)
-                        stickerStore.record(def.id)
-                    },
-                    recentStickers = recentStickerDefs,
-                    onSendLocation = { latitude, longitude, name ->
-                        viewModel.sendLocation(recipient, latitude, longitude, name)
-                    },
-                    onLocationDenied = {
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                "Relay needs location permission to share your " +
-                                    "location. Allow it in Settings \u2192 Apps \u2192 " +
-                                    "Relay \u2192 Permissions \u2192 Location.",
-                            )
-                        }
-                    },
-                    isSmsChat = liveTransportLabel == "SMS",
-                )
             }
         }
     }

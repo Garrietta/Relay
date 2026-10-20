@@ -322,6 +322,19 @@ class ChatViewModel(
     val photoUri: StateFlow<String?> = _photoUri
 
     /**
+     * The 1:1 peer's name as resolved from the DEVICE address book
+     * (Garrett 2026-10-20); null while the peer is not a saved
+     * contact. Distinct from the header's displayed title: for RCS
+     * chats the title comes from the server payload and stays
+     * server-driven, but this is what the "Add contact?" button's
+     * unknown test reads — so the button disappears the moment the
+     * peer exists in his contacts, without waiting for the server to
+     * learn a name it may never send.
+     */
+    private val _peerContactName = MutableStateFlow<String?>(null)
+    val peerContactName: StateFlow<String?> = _peerContactName
+
+    /**
      * Group participants (1:1 threads: the single other party). Drives the
      * group header cluster and per-sender bubble theming. Keyed maps below
      * are indexed by NORMALIZED address so message senders match regardless
@@ -375,6 +388,42 @@ class ChatViewModel(
                 repository.inboxChanges().collect { reload() }
             }
         }
+        // Contact refresh on resume (Garrett 2026-10-20): when Relay
+        // returns from the background and the repository drops its
+        // cached contact resolutions — he saved a contact via this
+        // header's "Add contact?" detour to the Contacts app — re-run
+        // ONLY the contact-derived resolution, so the open chat and
+        // its details inherit the saved contact with no app restart
+        // and no chat re-entry. The baseline is this chat's open:
+        // the loads above already read the lookup as it stands, so
+        // only invalidations landing after the open re-resolve (the
+        // StateFlow otherwise replays its current value straight
+        // into a fresh collector).
+        val contactTickAtOpen = repository.contactChanges().value
+        viewModelScope.launch {
+            repository.contactChanges().collect { tick ->
+                if (tick > contactTickAtOpen) refreshContactDerivedState()
+            }
+        }
+    }
+
+    /**
+     * Re-runs this chat's contact-derived resolution after a
+     * resume-time contact invalidation (see the init collector):
+     * participants + sender seeds through the same loaders init
+     * used, membership others re-derived through the refined seam,
+     * and the header theme/name overlay re-resolved. Message
+     * history, scroll position, and transport state are NOT touched
+     * — only contact-derived state refreshes.
+     */
+    private fun refreshContactDerivedState() {
+        val id = rcsConversationId
+        if (id != null) {
+            loadRcsParticipants(id)
+        } else {
+            loadParticipants()
+        }
+        if (address.isNotBlank()) loadContactTheme(address)
     }
 
     /**
@@ -455,23 +504,7 @@ class ChatViewModel(
             _transportLabel.value =
                 if (repository.rcsConversationType(conversationId) == 1) "SMS" else "RCS"
         }
-        viewModelScope.launch {
-            val parts = repository.getRcsParticipants(conversationId)
-            _participants.value = parts
-            refreshRcsOthers(conversationId)
-            participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
-            val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
-            for (p in parts) {
-                val key = repository.normalizedAddress(p.address)
-                // No photo (or extraction failed): seed the bubble
-                // tint from the sender's assigned expressive palette
-                // (Garrett 2026-10-20) — the same hue family as their
-                // photo-less avatar, never the neutral fallback.
-                seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
-                    ?: ContactPalettes.paletteFor(p.address).seed
-            }
-            _senderSeeds.value = seeds
-        }
+        loadRcsParticipants(conversationId)
         viewModelScope.launch {
             repository.observeRcsMessages().collect { msg ->
                 // Only arrivals for THIS conversation belong to this
@@ -515,6 +548,35 @@ class ChatViewModel(
             }
         }
         if (address.isNotBlank()) loadContactTheme(address)
+    }
+
+    /**
+     * (Re)loads the server participant table, the refined others,
+     * the sender index, and the per-sender bubble-tint seeds. Runs
+     * at init and again on a resume-time contact invalidation (see
+     * [refreshContactDerivedState]): participant photos key off the
+     * repository's contact lookup, so a contact saved while this
+     * chat sat open only reaches the header and details when this
+     * re-runs against the cleared cache.
+     */
+    private fun loadRcsParticipants(conversationId: String) {
+        viewModelScope.launch {
+            val parts = repository.getRcsParticipants(conversationId)
+            _participants.value = parts
+            refreshRcsOthers(conversationId)
+            participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
+            val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
+            for (p in parts) {
+                val key = repository.normalizedAddress(p.address)
+                // No photo (or extraction failed): seed the bubble
+                // tint from the sender's assigned expressive palette
+                // (Garrett 2026-10-20) — the same hue family as their
+                // photo-less avatar, never the neutral fallback.
+                seeds[key] = p.photoUri?.let { repository.extractContactSeed(it) }
+                    ?: ContactPalettes.paletteFor(p.address).seed
+            }
+            _senderSeeds.value = seeds
+        }
     }
 
     /**
@@ -691,6 +753,14 @@ class ChatViewModel(
         viewModelScope.launch {
             val uri = repository.resolvePhotoUri(recipient)
             _photoUri.value = uri
+            // The peer's DEVICE-contact name (Garrett 2026-10-20):
+            // null while the peer isn't in his contacts. The header
+            // feeds it into the "Add contact?" decision so the
+            // button tracks device-contact existence even when the
+            // title it displays comes from the server (RCS) — and it
+            // clears the moment a save lands, because the resume
+            // refresh re-runs this loader against the cleared lookup.
+            _peerContactName.value = repository.resolveContactName(recipient)
             // ONE seed-resolution rule everywhere contact theming
             // consumes a color (Garrett 2026-10-20,
             // [ContactPalettes.resolveContactSeedArgb]): the

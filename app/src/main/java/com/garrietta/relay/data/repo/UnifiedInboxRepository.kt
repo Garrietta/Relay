@@ -202,6 +202,14 @@ class UnifiedInboxRepository(
     private val refreshTick = MutableStateFlow(0)
 
     /**
+     * Contact-invalidation tick (Garrett 2026-10-20): bumps when
+     * [invalidateContactCache] actually dropped cached resolutions,
+     * so an open chat can re-run its contact-derived resolution (see
+     * [contactChanges]).
+     */
+    private val contactTick = MutableStateFlow(0)
+
+    /**
      * Serializes conversation loads. Concurrent refreshes race the Telephony
      * provider (DB-locked failures) and each other; without this, a failed
      * load could win the race and clobber a good list.
@@ -283,6 +291,39 @@ class UnifiedInboxRepository(
 
     /** Emits whenever the inbox data changes; chat screens collect to reload. */
     fun inboxChanges(): Flow<Int> = refreshTick
+
+    /**
+     * Contact-change signal (Garrett 2026-10-20): bumps ONLY when a
+     * resume-time [invalidateContactCache] actually cleared cached
+     * contact resolutions. Open chats collect it and re-run their
+     * contact-derived state (participants, header photo/name) — the
+     * same re-derive-on-tick shape as [membershipChanges].
+     */
+    fun contactChanges(): StateFlow<Int> = contactTick
+
+    /**
+     * Drops every cached contact resolution so the next read
+     * re-resolves against the live address book (Garrett 2026-10-20:
+     * "refresh the name/button when I return from Contacts" — he
+     * saves the contact in the Contacts app while Relay sits
+     * backgrounded, and the unresolved number-as-name entry the
+     * lookup memoized at load would otherwise outlive the save for
+     * the whole process lifetime). Called from MainActivity's resume
+     * path when Relay returns from the background, BEFORE its
+     * refresh() so that refresh's own row mapping already reads
+     * fresh resolutions; every other consumer picks the change up on
+     * its next read, and open chats re-read immediately via
+     * [contactChanges]. No-op when the lookup holds nothing (see
+     * [ContactRefreshLogic]). Returns whether anything was cleared.
+     */
+    fun invalidateContactCache(): Boolean {
+        if (!ContactRefreshLogic.shouldInvalidate(contactLookup.cachedEntryCount())) {
+            return false
+        }
+        contactLookup.invalidate()
+        contactTick.value += 1
+        return true
+    }
 
     /**
      * Loads the conversation list, or null when the load FAILED. Null is
@@ -1509,6 +1550,17 @@ class UnifiedInboxRepository(
     suspend fun resolveDisplayName(address: String): String =
         withContext(Dispatchers.IO) { contactLookup.displayName(address) }
 
+    /**
+     * The device contact's name for [address], or null when the
+     * address is not in his contacts (Garrett 2026-10-20). The chat
+     * header feeds this — when it exists — into the "Add contact?"
+     * decision, so the button tracks DEVICE-contact existence even
+     * where the displayed title itself comes from somewhere else
+     * (an RCS conversation's server-provided name fields).
+     */
+    suspend fun resolveContactName(address: String): String? =
+        withContext(Dispatchers.IO) { contactLookup.contactName(address) }
+
     /** Contact profile photo URI for [address], or null when there is none. */
     suspend fun resolvePhotoUri(address: String): String? =
         withContext(Dispatchers.IO) { contactLookup.photoUri(address) }
@@ -2001,6 +2053,23 @@ private class ContactLookup(private val context: Context) {
     }
 
     /**
+     * The device contact's display name for [address], or null when
+     * the address is NOT in the device contacts. Unlike [displayName]
+     * there is no address fallback: null is the "unknown peer" signal
+     * the chat header's contact-refresh path keys on (Garrett
+     * 2026-10-20). Deliberately not memoized separately — it runs at
+     * chat open and on resume refreshes, never per row.
+     */
+    @Synchronized
+    fun contactName(address: String): String? {
+        for (variant in addressVariants(address)) {
+            val name = phoneLookupFirst(variant, ContactsContract.PhoneLookup.DISPLAY_NAME)
+            if (name != null) return name
+        }
+        return null
+    }
+
+    /**
      * Raw contact ID for [address], or null when not in contacts. Tries every
      * address variant, so one leg's odd format can't strand a duplicate row.
      * Used as a merge key so two different numbers for the SAME person land
@@ -2026,6 +2095,28 @@ private class ContactLookup(private val context: Context) {
         }
         photoCache[address] = uri
         return uri
+    }
+
+    /**
+     * How many resolutions (names + photos) are currently memoized —
+     * the input to [ContactRefreshLogic.shouldInvalidate]: a resume
+     * only has stale state to drop when this is non-zero.
+     */
+    @Synchronized
+    fun cachedEntryCount(): Int = cache.size + photoCache.size
+
+    /**
+     * Drops every memoized resolution (Garrett 2026-10-20): the
+     * unresolved entries are the stale ones — a number cached as its
+     * own name with no photo keeps the chat header showing the bare
+     * number (and the "Add contact?" button) forever after the
+     * contact is saved in the Contacts app, until this runs. The next
+     * read of either map re-resolves against the live address book.
+     */
+    @Synchronized
+    fun invalidate() {
+        cache.clear()
+        photoCache.clear()
     }
 }
 

@@ -242,6 +242,7 @@ fun ChatScreen(
     var showForwardPicker by remember { mutableStateOf(false) }
     val participants by viewModel.participants.collectAsState()
     val others by viewModel.others.collectAsState()
+    val peerContactName by viewModel.peerContactName.collectAsState()
     val isTyping by viewModel.isTyping.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -684,6 +685,7 @@ fun ChatScreen(
                     participants = participants,
                     displayName = displayName,
                     photoUri = photoUri,
+                    peerContactName = peerContactName,
                     recipient = recipient,
                     threadId = threadId,
                     transportLabel = liveTransportLabel,
@@ -1391,6 +1393,11 @@ private fun ChatHeader(
     participants: List<Participant>,
     displayName: String,
     photoUri: String?,
+    /** The peer's DEVICE-contact name (Garrett 2026-10-20); null
+     * while the peer is not a saved contact. Feeds ONLY the
+     * "Add contact?" decision — the displayed title stays the
+     * conversation's own name. */
+    peerContactName: String?,
     recipient: String,
     threadId: Long,
     transportLabel: String,
@@ -1431,10 +1438,20 @@ private fun ChatHeader(
                 // participant's own address (recipient fallback while
                 // participants load), the same address the details
                 // page's Call/Video actions use.
+                //
+                // The name the rule reads is the DEVICE-contact name
+                // when one exists (Garrett 2026-10-20, resume
+                // refresh): the displayed title above stays the
+                // conversation's own (server-provided for RCS), but
+                // the button answers "is this peer in his contacts?"
+                // — so once he saves the contact and returns, the
+                // lookup name stands in front of the identity and
+                // the button is gone, even if the server never sends
+                // a name of its own.
                 val addContactTarget = ChatHeaderLogic.addContactTarget(
                     isGroup = false,
                     isSelf = peer?.isSelf == true,
-                    peerName = peerName,
+                    peerName = peerContactName ?: peerName,
                     peerAddress = peer?.address ?: recipient,
                 )
                 OneToOneHeader(

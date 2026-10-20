@@ -757,8 +757,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * True once this activity has been fully stopped since it last
+     * resumed — Relay was backgrounded behind another app (Garrett
+     * 2026-10-20: he leaves for the Contacts app to save a contact
+     * from the chat header's "Add contact?" button, then returns).
+     * The first resume after process start never counts: nothing was
+     * cached before it, and nothing went stale.
+     */
+    private var wasBackgrounded = false
+
+    override fun onStop() {
+        super.onStop()
+        wasBackgrounded = true
+    }
+
     override fun onResume() {
         super.onResume()
+        // Return from the background (Garrett 2026-10-20): contact
+        // resolutions the repository memoized before he left — above
+        // all the unresolved number-as-name entries — may be stale
+        // now that the address book changed under them. Drop them
+        // BEFORE the refresh below re-maps the inbox, so the refresh
+        // itself already reads fresh resolutions; open chats hear
+        // about it through the repository's contact tick and
+        // re-resolve their headers in place. A resume that never
+        // left the foreground (permission dialogs, focus changes)
+        // skips this entirely.
+        if (wasBackgrounded) {
+            wasBackgrounded = false
+            app.repository.invalidateContactCache()
+        }
         app.repository.refresh()
     }
 

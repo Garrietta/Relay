@@ -151,11 +151,14 @@ class SettingsViewModel(
         repository.rcsTransport.currentRcsConversations().size
 
     /**
-     * Duplicate inbox entries unified by the participant-set merge at
-     * the last refresh (Garrett's hard rule, 2026-10-20) — Diagnostics
-     * shows it as mergedDuplicates=N so the merge is verifiable.
+     * Messages the self-sender guard corrected (Garrett 2026-10-20):
+     * wire-incoming messages whose sender — resolved against the
+     * conversation's OWN participant table — is Garrett himself. Each
+     * would have rendered as an incoming bubble under his own name;
+     * Diagnostics shows the count as selfSenderContradictions=N.
      */
-    fun mergedDuplicatesCount(): Int = repository.mergedDuplicatesCount()
+    fun selfSenderContradictionCount(): Int =
+        repository.selfSenderContradictionCount()
 
     /**
      * Conversations whose own participant list claims a group while
@@ -213,8 +216,10 @@ class SettingsViewModel(
 
     /**
      * On-disk cache sizes for Diagnostics: the RCS media cache
-     * (cacheDir/rcs_media/v4) and the chat-history LRU (filesDir/chat_history).
-     * Blocking file walk — call off the main thread.
+     * (cacheDir/rcs_media/v4) and the chat-history LRU
+     * (filesDir/chat_history_v2 — v1 was retired with the
+     * cross-conversation merge, whose mixed histories must never be
+     * served again). Blocking file walk — call off the main thread.
      */
     fun storageStats(): StorageStats {
         fun walk(dir: java.io.File): Pair<Int, Long> {
@@ -230,7 +235,7 @@ class SettingsViewModel(
             return files to bytes
         }
         val media = walk(java.io.File(context.cacheDir, "rcs_media/v4"))
-        val history = walk(java.io.File(context.filesDir, "chat_history"))
+        val history = walk(java.io.File(context.filesDir, "chat_history_v2"))
         return StorageStats(media.first, media.second, history.first, history.second)
     }
 }

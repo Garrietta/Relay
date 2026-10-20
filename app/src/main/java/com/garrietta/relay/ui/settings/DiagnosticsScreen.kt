@@ -199,8 +199,8 @@ fun DiagnosticsScreen(
                     onAction = null,
                 )
                 SettingsRow(
-                    title = "Merged duplicates",
-                    subtitle = "mergedDuplicates=${viewModel.mergedDuplicatesCount()}",
+                    title = "Self-sender contradictions",
+                    subtitle = "selfSenderContradictions=${viewModel.selfSenderContradictionCount()}",
                     actionLabel = null,
                     onAction = null,
                 )

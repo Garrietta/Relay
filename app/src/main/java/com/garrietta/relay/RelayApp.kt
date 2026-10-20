@@ -220,19 +220,16 @@ class RelayApp : Application() {
         // fallback feed this function, so a muted conversation can never
         // post through either path. The key for an RCS conversation IS
         // its server conversation id (CategoryStore.conversationKey).
-        // Duplicate-merged conversations (Garrett 2026-10-20): the mute
-        // holds when ANY merged member id is muted — a mute recorded
-        // against any one of the unified ids silences them all.
-        if (repository.mergedRcsIdsFor(msg.conversationId)
-                .any { muteStore.isMuted(it) }
-        ) {
+        // The mute key for an RCS conversation IS its own server
+        // conversation id — one conversation, one key, no cross-
+        // conversation resolution (the merge fan-out was removed
+        // 2026-10-20).
+        if (muteStore.isMuted(msg.conversationId)) {
             MessageNotifications.recordSkipped("muted")
             return
         }
         val open = repository.openRcsConversation.value
-        if (open != null &&
-            msg.conversationId in repository.mergedRcsIdsFor(open)
-        ) {
+        if (open != null && msg.conversationId == open) {
             MessageNotifications.recordSkipped("chat open on screen")
             return
         }

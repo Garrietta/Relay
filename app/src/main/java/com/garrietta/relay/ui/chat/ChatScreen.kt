@@ -683,8 +683,7 @@ fun ChatScreen(
 
     // Forward picker (Garrett 2026-10-20, feature queue 4/7): the shared
     // TopSearchPopup card listing conversations; the current conversation
-    // is excluded (forwarding into the chat you're reading is a no-op),
-    // and merged duplicates match on ANY of their server ids.
+    // is excluded (forwarding into the chat you're reading is a no-op).
     if (showForwardPicker) {
         ForwardPickerPopup(
             conversations = forwardTargets,
@@ -786,8 +785,8 @@ private fun SelectionBar(
  * shared [TopSearchPopup] scaffold — the same top-center bouncy card as
  * New message and inbox Search — listing the inbox's conversations with
  * live search (name, address, or snippet). The conversation being read
- * is excluded: an RCS row matches on ANY of its duplicate-merged server
- * ids, a Telephony row on any of its merged thread ids. Tapping a row
+ * is excluded: an RCS row matches on its own server id, a Telephony row
+ * on any of its provider thread ids. Tapping a row
  * runs the popup's animated exit first, then fires [onPick].
  */
 @Composable

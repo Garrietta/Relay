@@ -44,17 +44,6 @@ data class Conversation(
      */
     val rcsConversationId: String? = null,
     /**
-     * ALL server conversation ids unified into this row by the
-     * duplicate participant-set merge (Garrett 2026-10-20: identical
-     * participant sets in more than one chat ARE the same chat),
-     * canonical first. Empty when the row was not merged — [allRcsIds]
-     * then falls back to [rcsConversationId]. Display unification only:
-     * the underlying server conversations and their messages are never
-     * deleted or rewritten, so a future server-side change un-merges
-     * cleanly.
-     */
-    val mergedRcsIds: List<String> = emptyList(),
-    /**
      * Group members (self excluded) for group conversations. Drives the
      * per-group avatar cluster in inbox rows. Empty for 1:1 rows.
      */
@@ -191,10 +180,14 @@ fun String.isUnknownSenderGhostName(): Boolean {
  */
 fun Participant.isUnknownSenderGhost(): Boolean = displayName.isUnknownSenderGhostName()
 
-/** Every server conversation id this row represents, canonical first. */
+/**
+ * The server conversation id this row represents — exactly one, its
+ * own. (The cross-conversation merge that once let a row stand for
+ * several server ids was removed 2026-10-20: every server conversation
+ * is its own chat, nothing crosses conversation boundaries.)
+ */
 fun Conversation.allRcsIds(): List<String> =
-    if (mergedRcsIds.isNotEmpty()) mergedRcsIds
-    else listOfNotNull(rcsConversationId)
+    listOfNotNull(rcsConversationId)
 
 /**
  * Built-in "Unknown" category membership (Garrett 2026-10-19): a

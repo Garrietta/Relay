@@ -9,7 +9,6 @@ import android.os.Looper
 import android.provider.ContactsContract
 import android.util.Log
 import com.garrietta.relay.data.model.Conversation
-import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
@@ -305,17 +304,10 @@ class UnifiedInboxRepository(
             Log.w(TAG, "loadConversations: query failed", e)
             return@withContext null
         }
-        val telephony = mergeThreads(raw)
-        // Same hard rule on the Telephony path: provider group threads
-        // with exactly equal participant sets (mergeThreads fills the
-        // participant lists above) are one chat, not two rows.
-        val merged = mergeDuplicateConversations(telephony)
-        mergedRcsGroups = emptyMap()
-        mergedDuplicates = telephony.size - merged.size
-        if (mergedDuplicates > 0) {
-            Log.d(TAG, "loadConversations: unified $mergedDuplicates duplicate Telephony row(s) by participant set")
-        }
-        merged.sortedByDescending { it.date }
+        // Every provider thread is its own row beyond the 1:1 leg
+        // merger inside mergeThreads — no cross-conversation
+        // participant-set unification (removed 2026-10-20).
+        mergeThreads(raw).sortedByDescending { it.date }
     }
 
     // ---------- RCS (paired mode) ----------
@@ -336,26 +328,16 @@ class UnifiedInboxRepository(
         rcsTransport.conversationForNumber(number)
 
     private suspend fun loadRcsConversations(): List<Conversation> {
+        // Every server conversation is its own inbox row — mapping is
+        // 1:1 per server id and NOTHING unifies rows across
+        // conversations. (The participant-set merge that once combined
+        // rows here was removed 2026-10-20: the server can hold two
+        // conversation objects with look-alike participant sets that
+        // are legitimately SEPARATE chats — his Dad 1:1 and the
+        // Dad+Grace group — and combining them corrupted both.)
         val rows = rcsTransport.currentRcsConversations()
             .map { mapRcsConversation(it) }
-        // Garrett's hard rule (2026-10-20): the server can hold TWO
-        // conversation objects for the exact same participant set (his
-        // "Dad" row and "Dad, Grace Ambrose" row) — each maps to its
-        // own inbox row above, because mapping is 1:1 per server id.
-        // Rows with exactly equal participant sets are the same chat:
-        // unify them for display and remember every member id.
-        val merged = mergeDuplicateConversations(rows)
-        val groups = mutableMapOf<String, List<String>>()
-        for (row in merged) {
-            val ids = row.allRcsIds()
-            if (ids.size > 1) ids.forEach { groups[it] = ids }
-        }
-        mergedRcsGroups = groups
-        mergedDuplicates = rows.size - merged.size
-        if (mergedDuplicates > 0) {
-            Log.d(TAG, "loadRcsConversations: unified $mergedDuplicates duplicate row(s) by participant set")
-        }
-        return merged.sortedByDescending { it.date }
+        return rows.sortedByDescending { it.date }
     }
 
     /**
@@ -460,25 +442,6 @@ class UnifiedInboxRepository(
     private val rcsServerMessages = mutableMapOf<String, List<com.garrietta.relay.rcs.proto.RcsMessage>>()
 
     /**
-     * Duplicate-merge resolution (Garrett 2026-10-20): every member id
-     * of a participant-set-merged group mapped to its canonical-first
-     * id list. Rebuilt on every conversation load. Message loads,
-     * sends, read-marking, participant lookups and the notification
-     * pipeline all resolve through here, so ANY merged member id —
-     * however the chat was opened — behaves as the one merged
-     * conversation. Display unification only; nothing is deleted.
-     */
-    @Volatile
-    private var mergedRcsGroups: Map<String, List<String>> = emptyMap()
-
-    /** Duplicate inbox entries absorbed by the merge at the last load. */
-    @Volatile
-    private var mergedDuplicates: Int = 0
-
-    /** mergedDuplicates=N for Settings → Diagnostics. */
-    fun mergedDuplicatesCount(): Int = mergedDuplicates
-
-    /**
      * Participant-integrity anomalies (Garrett 2026-10-20): server
      * conversation id → display title for conversations whose OWN
      * participant list claims a group while their loaded messages were
@@ -498,33 +461,30 @@ class UnifiedInboxRepository(
     fun participantAnomalyTitles(): List<String> =
         participantAnomalies.values.sorted()
 
-    /** Canonical-first server ids for [conversationId]; itself when unmerged. */
-    fun mergedRcsIdsFor(conversationId: String): List<String> =
-        mergedRcsGroups[conversationId] ?: listOf(conversationId)
+    /**
+     * Self-sender contradictions corrected by the guard in
+     * [rcsMessagesSingle] (Garrett 2026-10-20): messages whose sender —
+     * resolved against the conversation's OWN participant table — is
+     * the user, while the wire direction claimed incoming. Each one
+     * would have rendered as an incoming group message under Garrett's
+     * own name and photo; the per-conversation isMe determination wins
+     * and the message renders outgoing instead.
+     */
+    private val selfSenderLock = Any()
+    private var selfSenderContradictions: Int = 0
 
-    /** The id sends route to: the merged group's canonical conversation. */
-    fun canonicalRcsId(conversationId: String): String =
-        mergedRcsIdsFor(conversationId).first()
+    /** selfSenderContradictions=N for Settings → Diagnostics. */
+    fun selfSenderContradictionCount(): Int =
+        synchronized(selfSenderLock) { selfSenderContradictions }
 
     /**
-     * History for [conversationId] — for a duplicate-merged conversation
-     * the UNION of every merged member's messages, interleaved strictly
-     * by timestamp (newest first): one combined chat history
-     * (Garrett 2026-10-20). Unmerged conversations take the single-id
-     * path unchanged.
+     * History for [conversationId] — ONLY that server conversation's
+     * own messages. Nothing is ever unioned across conversations (the
+     * cross-conversation merge was removed 2026-10-20): a message
+     * belongs to exactly the conversation the server delivered it in.
      */
-    suspend fun rcsMessages(conversationId: String, count: Long = 50L): List<Message> {
-        val ids = mergedRcsIdsFor(conversationId)
-        if (ids.size == 1) return rcsMessagesSingle(conversationId, count)
-        val union = ids.flatMap { rcsMessagesSingle(it, count) }
-            .distinctBy { it.serverId?.takeIf { s -> s.isNotBlank() } ?: "id:${it.id}" }
-            .sortedByDescending { it.date }
-            .take(count.toInt().coerceAtLeast(0))
-        // Write-through under the REQUESTED id, so the open chat's
-        // instant-open cache key holds the combined history.
-        putCachedMessages(conversationId, union)
-        return union
-    }
+    suspend fun rcsMessages(conversationId: String, count: Long = 50L): List<Message> =
+        rcsMessagesSingle(conversationId, count)
 
     /**
      * Single-server-conversation history load (see [rcsMessages]).
@@ -558,8 +518,7 @@ class UnifiedInboxRepository(
                     ?.takeIf { it in otherNumbers }
             }.distinct().size
             val title = _conversations.value.firstOrNull { row ->
-                row.rcsConversationId == conversationId ||
-                    conversationId in row.mergedRcsIds
+                row.rcsConversationId == conversationId
             }?.displayName?.ifBlank { null }
                 ?: conv?.name?.ifBlank { null }
                 ?: conversationId
@@ -576,21 +535,42 @@ class UnifiedInboxRepository(
                 }
             }
         }
+        // Self-sender guard (Garrett 2026-10-20): the sender is resolved
+        // against THIS conversation's own participant table only. When
+        // that resolution says the sender is Garrett himself — the
+        // entry isMe-flagged, or its number is one of his own numbers
+        // (the server sometimes leaves a self entry unflagged) — the
+        // message is OUTGOING, whatever the wire direction claimed.
+        // Without this, his own messages rendered as incoming group
+        // bubbles under the name "Garrett Marietta" with his photo.
+        val selfDigits = selfNumberSet()
+            .map { it.filter(Char::isDigit) }
+            .filter { it.isNotEmpty() }
+        val byPid = participants.associateBy { it.participantId }
         server.map { m ->
-            val senderNumber = participants
-                .firstOrNull { it.participantId == m.participantId }?.number.orEmpty()
+            val sender = byPid[m.participantId]
+            val senderNumber = sender?.number.orEmpty()
+            val senderDigits = senderNumber.filter(Char::isDigit)
+            val senderIsSelf = sender != null &&
+                (sender.isMe || (senderDigits.isNotEmpty() && selfDigits.any { s ->
+                    senderDigits.takeLast(10) == s.takeLast(10)
+                }))
+            val outgoing = m.fromMe || senderIsSelf
+            if (senderIsSelf && !m.fromMe) {
+                synchronized(selfSenderLock) { selfSenderContradictions++ }
+            }
             Message(
                 id = m.id.hashCode().toLong(),
                 threadId = threadKey,
                 address = senderNumber,
                 body = m.body,
                 date = m.timestampMs,
-                isOutgoing = m.fromMe,
+                isOutgoing = outgoing,
                 isMms = false,
                 read = true,
                 tmpId = m.tmpId.ifBlank { null },
                 media = m.media,
-                deliveryStatus = rcsStatusToDelivery(m.status, m.fromMe),
+                deliveryStatus = rcsStatusToDelivery(m.status, outgoing),
                 serverId = m.id.ifBlank { null },
                 reactions = m.wireReactions.flatMap { wr ->
                     wr.participantIds.ifEmpty { listOf("") }.map { pid ->
@@ -621,20 +601,17 @@ class UnifiedInboxRepository(
     /** The server's transport type for one conversation (1=SMS, 2=RCS, 0=unknown). */
     fun rcsConversationType(conversationId: String): Int =
         rcsTransport.currentRcsConversations()
-            .firstOrNull { it.id == canonicalRcsId(conversationId) }?.type ?: 0
+            .firstOrNull { it.id == conversationId }?.type ?: 0
 
     /** Server participants for an RCS conversation, deduped by normalized address (self kept). */
     suspend fun getRcsParticipants(conversationId: String): List<Participant> =
         // Participant integrity (Garrett 2026-10-20): membership comes
-        // from ONE conversation's own server payload — for a duplicate-
-        // merged chat, the CANONICAL conversation's list (the merged
-        // chat's routing identity). Member lists are never unioned
-        // across server conversations: a union takes the maximum of
-        // every member's claim, so one stale or over-broad payload
-        // would cement a foreign participant into the combined chat.
-        // (Merged members hold equal participant sets by construction,
-        // so the canonical list loses nothing.)
-        getRcsParticipantsSingle(canonicalRcsId(conversationId))
+        // from THIS conversation's own server payload only — never a
+        // union across server conversations and never another
+        // conversation's list: a union takes the maximum of every
+        // payload's claim, so one stale or over-broad list would
+        // cement a foreign participant into a chat that never had them.
+        getRcsParticipantsSingle(conversationId)
 
     /** Single-server-conversation participants (see [getRcsParticipants]). */
     private suspend fun getRcsParticipantsSingle(conversationId: String): List<Participant> =
@@ -665,15 +642,13 @@ class UnifiedInboxRepository(
     suspend fun rcsOthers(conversationId: String): List<Participant> =
         withContext(Dispatchers.IO) {
             // Participant integrity (Garrett 2026-10-20): the header's
-            // membership is the CANONICAL conversation's OWN server
-            // participant list — never a union across the merged
-            // group's member conversations. A union presents the
-            // maximum claim any member payload ever made, so a person
-            // listed by one duplicate object would appear in the
-            // combined chat even when the canonical conversation's own
-            // payload doesn't list them.
+            // membership is THIS conversation's OWN server participant
+            // list — never a union across conversations. A union
+            // presents the maximum claim any payload ever made, so a
+            // person listed by some other conversation object would
+            // appear in a chat whose own payload doesn't list them.
             val proto = rcsTransport.currentRcsConversations()
-                .firstOrNull { it.id == canonicalRcsId(conversationId) }
+                .firstOrNull { it.id == conversationId }
                 ?.participants.orEmpty()
             if (proto.isEmpty()) return@withContext emptyList()
             val selfNumbers = selfNumberSet()
@@ -711,14 +686,13 @@ class UnifiedInboxRepository(
      *
      * Participant integrity (Garrett 2026-10-20): the row is matched by
      * EXACT conversation identity only. RCS chats match on the server
-     * conversation id — the row that IS this conversation, or the
-     * merged row this id was unified into; Telephony chats match on
-     * their own provider thread-id set. The previous any-of matching
-     * also accepted bare threadId equality, and an RCS row's threadId
-     * is a 32-bit `String.hashCode()` of its server id: a hash
-     * collision (or a stale merged thread-id set) could hand a chat a
-     * DIFFERENT conversation's fuller participant list — a foreign
-     * participant entering a chat whose own payload never listed them.
+     * conversation id — the row that IS this conversation; Telephony
+     * chats match on their own provider thread-id set. The earlier
+     * any-of matching also accepted bare threadId equality, and an RCS
+     * row's threadId is a 32-bit `String.hashCode()` of its server id:
+     * a hash collision could hand a chat a DIFFERENT conversation's
+     * fuller participant list — a foreign participant entering a chat
+     * whose own payload never listed them.
      */
     fun inboxRowParticipants(
         rcsConversationId: String?,
@@ -728,8 +702,7 @@ class UnifiedInboxRepository(
         val rows = _conversations.value
         if (rcsConversationId != null) {
             return rows.firstOrNull { row ->
-                row.rcsConversationId == rcsConversationId ||
-                    rcsConversationId in row.mergedRcsIds
+                row.rcsConversationId == rcsConversationId
             }?.participants.orEmpty()
         }
         val ids = (threadIds + threadId).toSet()
@@ -745,12 +718,11 @@ class UnifiedInboxRepository(
     }
 
     suspend fun sendRcs(conversationId: String, body: String, tmpId: String): RcsSendOutcome {
-        // Duplicate merge: sends always route to the canonical (live
-        // server) conversation — never to a stale duplicate id, whichever
-        // member id the chat was opened with.
-        val target = canonicalRcsId(conversationId)
+        // Sends go to the opened conversation only — there is no
+        // canonical rerouting (cross-conversation routing removed
+        // 2026-10-20).
         return try {
-            rcsTransport.sendRcsText(target, body, tmpId)
+            rcsTransport.sendRcsText(conversationId, body, tmpId)
             // Refresh the conversation list so the snippet/date update, then
             // the inbox. The echo arrives on the long-poll and reconciles the
             // optimistic bubble via tmpId.
@@ -782,10 +754,9 @@ class UnifiedInboxRepository(
         caption: String,
         tmpId: String,
     ): RcsSendOutcome {
-        // Canonical routing, same as sendRcs (duplicate participant-set merge).
-        val target = canonicalRcsId(conversationId)
+        // Sends go to the opened conversation only, same as sendRcs.
         return try {
-            rcsTransport.sendRcsMedia(target, media, caption, tmpId)
+            rcsTransport.sendRcsMedia(conversationId, media, caption, tmpId)
             rcsTransport.refreshConversations()
             refresh()
             RcsSendOutcome.Sent(tmpId)
@@ -809,16 +780,14 @@ class UnifiedInboxRepository(
 
     /** Marks the latest incoming RCS message read (mirrors markThreadRead). */
     suspend fun markRcsRead(conversationId: String) = withContext(Dispatchers.IO) {
-        // Duplicate-merged conversation: mark EVERY member read, so no
-        // duplicate keeps an unread state alive on the server side.
-        for (id in mergedRcsIdsFor(conversationId)) {
-            val latest = synchronized(rcsServerMessages) {
-                rcsServerMessages[id]
-                    ?.filter { !it.fromMe }
-                    ?.maxByOrNull { it.timestampMs }
-            } ?: continue
-            rcsTransport.markRcsRead(id, latest.id)
-        }
+        // Only THIS conversation is marked — read state never fans out
+        // to any other conversation (fan-out removed 2026-10-20).
+        val latest = synchronized(rcsServerMessages) {
+            rcsServerMessages[conversationId]
+                ?.filter { !it.fromMe }
+                ?.maxByOrNull { it.timestampMs }
+        } ?: return@withContext
+        rcsTransport.markRcsRead(conversationId, latest.id)
     }
 
     /**

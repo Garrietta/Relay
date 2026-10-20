@@ -38,9 +38,8 @@ class InboxViewModel(
     val mutedKeys: StateFlow<Set<String>> = muteStore.mutedKeys
 
     fun isMuted(conversation: Conversation): Boolean {
-        // Duplicate-merged entry (Garrett 2026-10-20): muted when ANY
-        // member id is muted — every merged server id for RCS rows,
-        // every merged thread's key for Telephony rows.
+        // One conversation, one mute key: the row's own server id for
+        // RCS rows, its own thread key(s) for Telephony rows.
         val rcsIds = conversation.allRcsIds()
         if (rcsIds.isNotEmpty()) return rcsIds.any { muteStore.isMuted(it) }
         val ids = conversation.threadIds.ifEmpty { listOf(conversation.threadId) }
@@ -66,9 +65,9 @@ class InboxViewModel(
             // Stale assignments (to a deleted category) match nothing.
             // The built-in Unread tab is a FILTER VIEW, not a partition
             // (Garrett 2026-10-20): it shows only conversations with unread
-            // messages — the row's unread flag is already OR-ed across
-            // duplicate-merged members (ThreadMerging), and muted chats
-            // still count (mute silences notifications, not read state).
+            // messages — each row's own unread flag, nothing combined
+            // across conversations — and muted chats still count (mute
+            // silences notifications, not read state).
             // Turning Unread on never changes what All shows. Auto-
             // classification still wins inside it, exactly as in All and
             // custom categories: while the Unknown tab is on, unknown

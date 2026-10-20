@@ -139,8 +139,8 @@ class ChatViewModel(
      * the Google Messages most-requested batch forward). Sends every
      * selected message into [target], OLDEST first, as ordinary messages
      * through the existing send paths: RCS targets via
-     * [UnifiedInboxRepository.sendRcs] (which routes duplicate-merged
-     * conversations to the canonical server id, #148), SMS/Telephony
+     * [UnifiedInboxRepository.sendRcs] (to that conversation's own
+     * server id — no cross-conversation routing), SMS/Telephony
      * targets via the SMS transport — the same routing the composer uses
      * for that conversation (a server conversation typed SMS (type 1)
      * sends as SMS even while paired). Media messages re-send their
@@ -435,11 +435,9 @@ class ChatViewModel(
         }
         viewModelScope.launch {
             repository.observeRcsMessages().collect { msg ->
-                // Duplicate-merged conversation: arrivals on ANY merged
-                // member id belong to this one combined chat.
-                if (msg.conversationId in
-                    repository.mergedRcsIdsFor(conversationId)
-                ) {
+                // Only arrivals for THIS conversation belong to this
+                // chat — nothing crosses conversation boundaries.
+                if (msg.conversationId == conversationId) {
                     onRcsIncoming(msg)
                 }
             }
@@ -457,9 +455,7 @@ class ChatViewModel(
         // sender id, so groups show a generic indicator.
         viewModelScope.launch {
             repository.rcsTransport.typingEvents.collect { te ->
-                if (te.conversationId !in
-                    repository.mergedRcsIdsFor(conversationId)
-                ) {
+                if (te.conversationId != conversationId) {
                     return@collect
                 }
                 if (te.typing) {

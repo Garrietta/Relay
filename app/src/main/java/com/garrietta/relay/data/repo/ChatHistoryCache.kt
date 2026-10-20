@@ -30,7 +30,16 @@ class ChatHistoryCache(dir: File) {
         const val MAX_ACTIVE = 50
     }
 
-    private val root = File(dir, "chat_history").also { it.mkdirs() }
+    /**
+     * Cache directory version: v2 (2026-10-20). The v1 directory
+     * ("chat_history") may hold histories written while the
+     * cross-conversation merge was live — message lists from SEVERAL
+     * server conversations mixed under one canonical conversation's
+     * key. Those mixed lists must never be served again, so the cache
+     * moved to a fresh directory; the v1 files are simply orphaned
+     * (never read), exactly like the media cache's v3 → v4 bump.
+     */
+    private val root = File(dir, "chat_history_v2").also { it.mkdirs() }
     private val orderFile = File(root, "_order.json")
 
     /** Most-recent-first keys. Guarded by the instance monitor. */

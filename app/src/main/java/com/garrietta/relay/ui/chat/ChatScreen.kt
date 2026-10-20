@@ -22,6 +22,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -68,7 +69,8 @@ import androidx.compose.material.icons.filled.SentimentSatisfied
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -76,6 +78,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -219,6 +222,8 @@ fun ChatScreen(
     // Boolean-driven (never a spring retargeted every scroll frame — the
     // #102 lesson); RelaySprings animate the change.
     var headerCollapsed by remember { mutableStateOf(false) }
+    /** Message whose reaction badge was tapped — shows the who-reacted dialog. */
+    var reactionDetail by remember { mutableStateOf<Message?>(null) }
     val collapseThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
     LaunchedEffect(
         listState.firstVisibleItemIndex,
@@ -387,6 +392,7 @@ fun ChatScreen(
                                     // the same width; height follows aspect
                                     // ratio. Text bubbles keep the 0.8 cap.
                                     maxBubbleWidth = maxWidth * 0.66f,
+                                    onShowReactions = { reactionDetail = it },
                                 )
                                 return@itemsIndexed
                             }
@@ -418,6 +424,7 @@ fun ChatScreen(
                                 darkTheme = darkTheme,
                                 maxBubbleWidth = maxBubbleWidth,
                                 onAvatarClick = { sender -> onOpenDetails(sender.address) },
+                                onShowReactions = { reactionDetail = it },
                             )
                         }
                         }
@@ -434,6 +441,36 @@ fun ChatScreen(
                 }
             }
         }
+    }
+
+    // Who-reacted dialog (Garrett 2026-10-19): tapping an inline reaction
+    // badge lists every reactor with their emoji.
+    reactionDetail?.let { reacted ->
+        AlertDialog(
+            onDismissRequest = { reactionDetail = null },
+            title = { Text("Reactions") },
+            text = {
+                Column {
+                    reacted.reactions.forEach { r ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        ) {
+                            Text(r.emoji, style = MaterialTheme.typography.bodyLarge)
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                r.reactorName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { reactionDetail = null }) { Text("Close") }
+            },
+        )
     }
 }
 
@@ -873,6 +910,8 @@ private fun MediaBubble(
     media: RcsMediaAttachment,
     loadMedia: suspend (RcsMediaAttachment) -> ByteArray,
     maxBubbleWidth: Dp,
+    /** Tapping the reaction badge lists who reacted (Garrett 2026-10-19). */
+    onShowReactions: (Message) -> Unit = {},
 ) {
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
@@ -907,11 +946,12 @@ private fun MediaBubble(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (message.isOutgoing) Alignment.End else Alignment.Start,
     ) {
-        Box(
-            modifier = Modifier
-                .widthIn(max = maxBubbleWidth)
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+        Box {
+            Box(
+                modifier = Modifier
+                    .widthIn(max = maxBubbleWidth)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                 .combinedClickable(
                     onClick = {
                         if (error != null) {
@@ -1052,6 +1092,8 @@ private fun MediaBubble(
                     )
                 }
             }
+        }
+            ReactionBadgeOverlay(message, onShowReactions)
         }
         if (message.body.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
@@ -1225,6 +1267,8 @@ private fun MessageBubble(
     maxBubbleWidth: Dp = Dp.Unspecified,
     /** Tapping the sender's avatar opens their details page (Garrett 2026-10-19). */
     onAvatarClick: (Participant) -> Unit = {},
+    /** Tapping the reaction badge lists who reacted (Garrett 2026-10-19). */
+    onShowReactions: (Message) -> Unit = {},
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
@@ -1290,15 +1334,18 @@ private fun MessageBubble(
                         maxLines = 1,
                     )
                     Spacer(Modifier.height(2.dp))
-                    BubbleBox(
-                        shape = shape,
-                        containerColor = containerColor,
-                        contentColor = contentColor,
-                        selectionActive = selectionActive,
-                        onToggleSelect = onToggleSelect,
-                        body = message.body,
-                        maxBubbleWidth = maxBubbleWidth,
-                    )
+                    Box {
+                        BubbleBox(
+                            shape = shape,
+                            containerColor = containerColor,
+                            contentColor = contentColor,
+                            selectionActive = selectionActive,
+                            onToggleSelect = onToggleSelect,
+                            body = message.body,
+                            maxBubbleWidth = maxBubbleWidth,
+                        )
+                        ReactionBadgeOverlay(message, onShowReactions)
+                    }
                     // Link unfurl shares the sender column so its leading
                     // edge lines up exactly with the bubble (Garrett
                     // 2026-10-19: previews must left-align with messages).
@@ -1306,15 +1353,18 @@ private fun MessageBubble(
                 }
             }
         } else {
-            BubbleBox(
-                shape = shape,
-                containerColor = containerColor,
-                contentColor = contentColor,
-                selectionActive = selectionActive,
-                onToggleSelect = onToggleSelect,
-                body = message.body,
-                maxBubbleWidth = maxBubbleWidth,
-            )
+            Box {
+                BubbleBox(
+                    shape = shape,
+                    containerColor = containerColor,
+                    contentColor = contentColor,
+                    selectionActive = selectionActive,
+                    onToggleSelect = onToggleSelect,
+                    body = message.body,
+                    maxBubbleWidth = maxBubbleWidth,
+                )
+                ReactionBadgeOverlay(message, onShowReactions)
+            }
         }
         if (message.isMms) {
             Text(
@@ -1340,6 +1390,54 @@ private fun MessageBubble(
                 status = message.deliveryStatus,
                 modifier = Modifier.padding(top = 2.dp, end = 4.dp),
             )
+        }
+    }
+}
+
+/**
+ * Emoji reaction badge overlay (Garrett 2026-10-19): a small Google
+ * Messages-style badge straddling the bottom trailing edge of the bubble.
+ * Distinct emojis in first-use order, plus a count when multiple people
+ * reacted. Tapping opens the who-reacted dialog via [onShowReactions].
+ * Nothing renders when the message carries no reactions.
+ */
+@Composable
+private fun BoxScope.ReactionBadgeOverlay(
+    message: Message,
+    onShowReactions: (Message) -> Unit,
+) {
+    val reactions = message.reactions
+    if (reactions.isEmpty()) return
+    val distinct = remember(reactions) { reactions.map { it.emoji }.distinct() }
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shadowElevation = 2.dp,
+        modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .offset(x = 6.dp, y = 9.dp),
+        onClick = { onShowReactions(message) },
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            distinct.take(5).forEach { emoji ->
+                Text(
+                    text = emoji,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                )
+            }
+            if (reactions.size > 1) {
+                Text(
+                    text = reactions.size.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 3.dp),
+                )
+            }
         }
     }
 }

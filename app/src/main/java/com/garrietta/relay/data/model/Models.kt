@@ -74,6 +74,26 @@ data class Message(
      * MessageStatus proto codes; NONE for incoming messages.
      */
     val deliveryStatus: DeliveryStatus = DeliveryStatus.NONE,
+    /**
+     * Emoji reactions attached to this message (Garrett 2026-10-19). The
+     * paired web protocol delivers reactions as formatted text messages
+     * (`{emoji} to "{snippet}"`, plus iPhone tapback verb forms); the
+     * ChatViewModel parses them out and attaches them here so they render as
+     * inline badges, Google Messages style, instead of stray text bubbles.
+     */
+    val reactions: List<MessageReaction> = emptyList(),
+)
+
+/**
+ * An emoji reaction attached to a message.
+ *
+ * @property reactorName The reactor's display name, or "You" when Garrett reacted.
+ */
+data class MessageReaction(
+    val emoji: String,
+    val reactorName: String,
+    val fromMe: Boolean,
+    val timestampMs: Long,
 )
 
 /**

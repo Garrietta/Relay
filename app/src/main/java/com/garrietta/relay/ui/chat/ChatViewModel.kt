@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
+import com.garrietta.relay.data.model.MessageReaction
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.repo.AppSeedStore
@@ -187,20 +188,20 @@ class ChatViewModel(
         // goes SHALLOWER than what's on screen (Garrett 2026-10-19): if the
         // cache already holds 300, pulling 50 would shrink the list out
         // from under a restored scroll position.
-        _messages.value = repository.cachedMessages(conversationId) ?: emptyList()
+        publishMessages(repository.cachedMessages(conversationId) ?: emptyList())
         viewModelScope.launch {
             // Disk LRU (Garrett 2026-10-19): on cold start the memory cache
             // missed — paint instantly from the persistent 50-chat history
             // while the network load runs behind it.
             if (_messages.value.isEmpty()) {
                 val disk = repository.cachedHistoryFromDisk(conversationId)
-                if (disk != null && _messages.value.isEmpty()) _messages.value = disk
+                if (disk != null && _messages.value.isEmpty()) publishMessages(disk)
             }
             val floor = maxOf(rcsHistoryCount, _messages.value.size.toLong())
             // Keep the count consistent for later live reloads — a later
             // 50-pull must not shrink a 300-deep list either.
             rcsHistoryCount = floor
-            _messages.value = repository.rcsMessages(conversationId, floor)
+            publishMessages(repository.rcsMessages(conversationId, floor))
             repository.markRcsRead(conversationId)
             // Background deep fill (Garrett 2026-10-19: "at least the last
             // three weeks of chats"). The first paint stays instant from
@@ -255,7 +256,7 @@ class ChatViewModel(
             // chat re-pulls its thread so the message appears in-app, not
             // just in the notification shade.
             repository.inboxChanges().collect {
-                _messages.value = repository.rcsMessages(conversationId, rcsHistoryCount)
+                publishMessages(repository.rcsMessages(conversationId, rcsHistoryCount))
             }
         }
         // Remote typing: conversation-scoped; the wire event carries no
@@ -314,9 +315,11 @@ class ChatViewModel(
                 return
             }
             viewModelScope.launch {
-                _messages.value = repository.rcsMessages(
-                    rcsConversationId ?: return@launch,
-                    rcsHistoryCount,
+                publishMessages(
+                    repository.rcsMessages(
+                        rcsConversationId ?: return@launch,
+                        rcsHistoryCount,
+                    ),
                 )
             }
             return
@@ -359,10 +362,23 @@ class ChatViewModel(
             rcsConversationId, threadIds.firstOrNull() ?: threadId,
         )
 
+    /**
+     * Assigns the message list, consuming reaction text messages into their
+     * targets' [Message.reactions] so they render as inline badges instead
+     * of stray bubbles.
+     */
+    private fun publishMessages(list: List<Message>) {
+        _messages.value = attachReactions(list, ::reactorNameFor)
+    }
+
+    /** Resolves a reaction message's reactor display name ("You" when Garrett reacted). */
+    private fun reactorNameFor(msg: Message): String =
+        if (msg.isOutgoing) "You" else senderFor(msg.address)?.displayName ?: msg.address
+
     /** Sets the message list and writes it through to the instant-open cache. */
     private fun setMessages(list: List<Message>) {
-        _messages.value = list
-        repository.putCachedMessages(cacheKey(), list)
+        publishMessages(list)
+        repository.putCachedMessages(cacheKey(), _messages.value)
     }
 
     /** Resolves the participant who sent [address], or null when unknown. */
@@ -412,19 +428,19 @@ class ChatViewModel(
         val smsKey = CategoryStore.conversationKey(
             null, threadIds.firstOrNull() ?: threadId,
         )
-        _messages.value = repository.cachedMessages(smsKey) ?: emptyList()
+        publishMessages(repository.cachedMessages(smsKey) ?: emptyList())
         if (_messages.value.isEmpty()) {
             // Disk LRU: cold-start instant paint from the persistent
             // 50-chat history while the provider load runs.
             viewModelScope.launch {
                 val disk = repository.cachedHistoryFromDisk(smsKey)
-                if (disk != null && _messages.value.isEmpty()) _messages.value = disk
+                if (disk != null && _messages.value.isEmpty()) publishMessages(disk)
             }
         }
         viewModelScope.launch {
             // Merged conversations load the full history across thread_ids.
             val loaded = repository.loadMessages(threadIds)
-            _messages.value = loaded.ifEmpty {
+            publishMessages(loaded.ifEmpty {
                 // Empty but the inbox showed a snippet: the thread_id key
                 // may have gone stale (provider re-split threads). Re-resolve
                 // by address so the thread shows the same unified set.
@@ -437,7 +453,7 @@ class ChatViewModel(
                     }
                     fallback
                 }
-            }
+            })
             if (activeThreadId >= 0) repository.markThreadRead(threadIds)
         }
     }
@@ -547,5 +563,96 @@ class ChatViewModel(
     fun clearError() {
         _sendError.value = null
     }
+}
+
+/** The standard reaction set (Google Messages' picker). */
+private val ReactionEmojis = listOf("❤️", "👍", "👎", "😂", "😮", "😢", "😡")
+
+/** iPhone tapback verb forms → emoji, as Google Messages renders them. */
+private val TapbackVerbs = linkedMapOf(
+    "Loved" to "❤️",
+    "Liked" to "👍",
+    "Disliked" to "👎",
+    "Laughed at" to "😂",
+    "Emphasized" to "‼️",
+    "Questioned" to "❓",
+)
+
+/**
+ * Parses a reaction message body into (emoji, quoted snippet), or null when
+ * the body is not a reaction. The paired web protocol delivers reactions as
+ * formatted text messages: `{emoji} to "{snippet}"`; iPhone tapbacks arriving
+ * over SMS/MMS use verb forms (`Loved "..."`, `Laughed at "..."`) with either
+ * straight or curly quotes. The snippet is the START of the reacted-to
+ * message body, truncated with an ellipsis when long.
+ */
+fun parseReaction(body: String): Pair<String, String>? {
+    val t = body.trim()
+    for (emoji in ReactionEmojis) {
+        val prefix = "$emoji to \""
+        if (t.startsWith(prefix) && t.endsWith("\"") && t.length > prefix.length + 1) {
+            return emoji to t.removePrefix(prefix).dropLast(1)
+        }
+    }
+    for ((verb, emoji) in TapbackVerbs) {
+        for (open in listOf("\"", "“")) {
+            val prefix = "$verb $open"
+            if (t.startsWith(prefix) && (t.endsWith("\"") || t.endsWith("”")) &&
+                t.length > prefix.length + 1
+            ) {
+                return emoji to t.removePrefix(prefix).dropLast(1)
+            }
+        }
+    }
+    return null
+}
+
+/**
+ * Consumes reaction text messages into [Message.reactions] on their targets
+ * (Garrett 2026-10-19: inline emoji badges, Google Messages style, not
+ * separate bubbles). The target is the most recent non-reaction message at
+ * or before the reaction whose body starts with the quoted snippet (exact
+ * match also accepted). A reaction with no match stays in the list as a
+ * bubble — information is never silently dropped. [nameFor] resolves the
+ * reactor's display name. Idempotent: re-running on an already-processed
+ * list is a no-op.
+ */
+fun attachReactions(
+    messages: List<Message>,
+    nameFor: (Message) -> String,
+): List<Message> {
+    if (messages.isEmpty()) return messages
+    val parsed = messages.mapNotNull { m -> parseReaction(m.body)?.let { m to it } }
+    if (parsed.isEmpty()) return messages
+    val consumed = mutableSetOf<Long>()
+    val byTarget = mutableMapOf<Long, MutableList<MessageReaction>>()
+    for ((msg, pr) in parsed) {
+        val (emoji, quote) = pr
+        val needle = quote.trimEnd().removeSuffix("…").removeSuffix("...").trimEnd()
+        if (needle.isEmpty()) continue
+        val target = messages
+            .filter {
+                it.id != msg.id && it.date <= msg.date && parseReaction(it.body) == null
+            }
+            .filter { it.body == needle || it.body.startsWith(needle) }
+            .maxByOrNull { it.date }
+        if (target != null) {
+            consumed += msg.id
+            byTarget.getOrPut(target.id) { mutableListOf() } += MessageReaction(
+                emoji = emoji,
+                reactorName = nameFor(msg),
+                fromMe = msg.isOutgoing,
+                timestampMs = msg.date,
+            )
+        }
+    }
+    if (consumed.isEmpty()) return messages
+    return messages
+        .filterNot { it.id in consumed }
+        .map { m ->
+            byTarget[m.id]?.let { rs ->
+                m.copy(reactions = rs.sortedBy { it.timestampMs })
+            } ?: m
+        }
 }
 

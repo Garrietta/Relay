@@ -557,8 +557,13 @@ fun ChatScreen(
                                     sender = if (isGroup && !message.isOutgoing) {
                                         viewModel.senderFor(message.address)
                                     } else null,
+                                    senderSeed = if (isGroup && !message.isOutgoing) {
+                                        viewModel.seedFor(message.address)
+                                    } else null,
                                     isGroup = isGroup,
                                     bubblePair = bubblePair,
+                                    threadBackground = threadBackground,
+                                    darkTheme = darkTheme,
                                     maxBubbleWidth = maxBubbleWidth,
                                     onAvatarClick = { sender ->
                                         onOpenDetails(sender.address)
@@ -1410,8 +1415,11 @@ private fun LocationBubble(
     selectionActive: Boolean,
     onToggleSelect: () -> Unit,
     sender: Participant? = null,
+    senderSeed: Color? = null,
     isGroup: Boolean = false,
     bubblePair: ChatBubblePair? = null,
+    threadBackground: Color,
+    darkTheme: Boolean,
     maxBubbleWidth: Dp,
     onAvatarClick: (Participant) -> Unit = {},
     onShowReactions: (Message) -> Unit = {},
@@ -1421,15 +1429,21 @@ private fun LocationBubble(
     var showReactMenu by remember { mutableStateOf(false) }
     val outgoing = message.isOutgoing
     val groupIncoming = isGroup && !outgoing && sender != null
+    // Per-sender colors for group-incoming pins, same as text bubbles
+    // (a picked colorway still wins the fill via bubblePair).
+    val (senderContainer, senderOnContainer, senderNameTone) =
+        senderBubbleColors(senderSeed, threadBackground, darkTheme, MaterialTheme.colorScheme)
     val containerColor = when {
         selected -> MaterialTheme.colorScheme.secondaryContainer
         outgoing -> bubblePair?.outgoing ?: MaterialTheme.colorScheme.primaryContainer
+        groupIncoming -> bubblePair?.incoming ?: senderContainer
         else -> bubblePair?.incoming ?: MaterialTheme.colorScheme.surfaceContainerHigh
     }
     val contentColor = when {
         selected -> MaterialTheme.colorScheme.onSecondaryContainer
         outgoing -> bubblePair?.onOutgoing
             ?: MaterialTheme.colorScheme.onPrimaryContainer
+        groupIncoming -> bubblePair?.onIncoming ?: senderOnContainer
         else -> bubblePair?.onIncoming ?: MaterialTheme.colorScheme.onSurface
     }
     val coordinates = remember(location) {
@@ -1534,24 +1548,27 @@ private fun LocationBubble(
         if (groupIncoming) {
             Row(verticalAlignment = Alignment.Top) {
                 ContactAvatar(
-                    name = sender!!.displayName,
-                    photoUri = sender.photoUri,
-                    seed = sender.stableSeed(),
+                    photoUri = sender!!.photoUri,
+                    name = sender.displayName.ifBlank { sender.address },
                     size = 28.dp,
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .clickable { onAvatarClick(sender) },
+                    shapeKey = sender.address,
+                    textStyle = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onAvatarClick(sender) },
+                    ),
                 )
                 Spacer(Modifier.width(8.dp))
                 Column {
                     Text(
-                        text = sender.displayName,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = if (sender.isUnknownSenderGhost()) sender.address
+                        else sender.displayName.ifBlank { sender.address },
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
-                        color = senderColor(sender.displayName),
-                        modifier = Modifier
-                            .padding(bottom = 2.dp)
-                            .clickable { onAvatarClick(sender) },
+                        color = senderNameTone,
+                        maxLines = 1,
+                        modifier = Modifier.padding(bottom = 2.dp),
                     )
                     card()
                 }

@@ -65,6 +65,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -100,12 +101,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -154,6 +160,7 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -1272,12 +1279,17 @@ private fun MediaBubble(
                     )
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
-                Text(
-                    message.body,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimaryContainer
-                    else MaterialTheme.colorScheme.onSurface,
-                )
+                // Caption text is selectable too (Garrett 2026-10-20:
+                // partial text selection); the caption bubble carries no
+                // gestures of its own, so nothing competes here.
+                SelectionContainer {
+                    Text(
+                        message.body,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimaryContainer
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
         }
     }
@@ -1808,6 +1820,12 @@ private fun BubbleBox(
     onReact: (String) -> Unit = {},
 ) {
     var showReactMenu by remember { mutableStateOf(false) }
+    // Bounds of the body text within the bubble (bubble-local coordinates),
+    // so long-presses can be split by WHERE they started: on the text ->
+    // partial text selection (Garrett 2026-10-20); on the surrounding
+    // bubble padding -> the reaction picker, exactly as before.
+    var textBounds by remember { mutableStateOf<Rect?>(null) }
+    val latestTextBounds = rememberUpdatedState(textBounds)
     Box(
         modifier = Modifier
             .widthIn(max = maxBubbleWidth)
@@ -1815,18 +1833,104 @@ private fun BubbleBox(
             .background(containerColor)
             .combinedClickable(
                 onClick = { if (selectionActive) onToggleSelect() },
-                // Long-press opens the reaction picker (Google Messages
-                // style); Select stays one tap away inside the menu.
-                onLongClick = { showReactMenu = true },
+                // No onLongClick here on purpose: the position-aware
+                // long-press observer right below owns long-press now.
             )
+            // Long-press observer (Garrett 2026-10-20: partial text
+            // selection). Watches presses in the Initial pass and consumes
+            // NOTHING, so taps (toggle-select) and text selection are
+            // completely untouched. A press still down past the system
+            // long-press timeout, inside the touch slop, opens the
+            // reaction picker — but only when it STARTED outside the body
+            // text. Presses starting on the text belong to the
+            // SelectionContainer below (selection handles + the standard
+            // Copy / Select all floating toolbar), so a long-press on the
+            // words selects text and a long-press on the bubble's padded
+            // ring still opens reactions — neither gesture is deleted.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val down = awaitPointerEvent(PointerEventPass.Initial)
+                            .changes.firstOrNull { it.changedToDown() } ?: continue
+                        val downId = down.id
+                        val downPos = down.position
+                        val deadline =
+                            down.uptimeMillis + viewConfiguration.longPressTimeoutMillis
+                        var change = down
+                        var decided = false
+                        while (!decided) {
+                            val remaining = deadline - change.uptimeMillis
+                            val event = if (remaining > 0) {
+                                withTimeoutOrNull(remaining) {
+                                    awaitPointerEvent(PointerEventPass.Initial)
+                                }
+                            } else {
+                                null
+                            }
+                            when {
+                                // Still down at the deadline: a long-press.
+                                // Fire the picker unless it began on the text.
+                                event == null -> {
+                                    val bounds = latestTextBounds.value
+                                    if (bounds == null || !bounds.contains(downPos)) {
+                                        showReactMenu = true
+                                    }
+                                    decided = true
+                                }
+                                else -> {
+                                    val c = event.changes
+                                        .firstOrNull { it.id == downId }
+                                    when {
+                                        c == null -> decided = true
+                                        !c.pressed -> {
+                                            change = c
+                                            decided = true
+                                        }
+                                        (c.position - downPos).getDistance() >
+                                            viewConfiguration.touchSlop -> {
+                                            // Moved past slop: a scroll or a
+                                            // selection-handle drag, not a press.
+                                            change = c
+                                            decided = true
+                                        }
+                                        else -> change = c
+                                    }
+                                }
+                            }
+                        }
+                        // Sit out the rest of this gesture so one press
+                        // can't be re-watched mid-flight.
+                        while (change.pressed) {
+                            val e = awaitPointerEvent(PointerEventPass.Initial)
+                            e.changes.firstOrNull { it.id == downId }
+                                ?.let { change = it }
+                        }
+                    }
+                }
+            }
             // Uniform interior padding on every bubble.
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        Text(
-            body,
-            style = MaterialTheme.typography.bodyLarge,
-            color = contentColor,
-        )
+        // Per-bubble selection scope (never the whole list): long-pressing
+        // the words highlights them in place with the standard handles +
+        // toolbar, so any word or sentence can be copied on its own
+        // instead of the whole bubble. In-bubble text carries no link
+        // spans today (URLs only feed the unfurl card under the bubble),
+        // so nothing else competes for the text's gestures.
+        SelectionContainer(
+            // The container wraps exactly the text, and its parent is the
+            // bubble Box — so boundsInParent() is the text's rect in the
+            // same bubble-local coordinates the press observer sees.
+            modifier = Modifier.onGloballyPositioned { coords ->
+                textBounds = coords.boundsInParent()
+            },
+        ) {
+            Text(
+                body,
+                style = MaterialTheme.typography.bodyLarge,
+                color = contentColor,
+            )
+        }
     }
     ReactionPickerMenu(
         expanded = showReactMenu,

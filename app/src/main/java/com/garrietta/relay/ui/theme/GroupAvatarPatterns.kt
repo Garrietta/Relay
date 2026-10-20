@@ -87,6 +87,14 @@ private fun zigzagPlacements(n: Int): List<Placement> =
         Placement(x, y, 0.42f - i * 0.015f)
     }
 
+/** Airiness factor (Garrett 2026-10-19): larger counts get slightly
+ * smaller avatars so the cluster fills the 1:1 square without ever
+ * feeling cramped — larger scale for 2, smaller as counts rise. */
+private fun countScale(n: Int): Float = when {
+    n <= 3 -> 1f
+    n == 4 -> 0.95f
+    else -> 0.9f
+}
 /** Deterministic slight rotation per member (±11°) — the scattered feel. */
 private fun memberRotation(address: String): Float {
     val h = address.hashCode() and 1023
@@ -113,16 +121,20 @@ fun GroupAvatarCluster(
     val shown = members.take(maxShown)
     val remaining = members.size - shown.size
     val placements = remember(pattern, shown.size) {
+        val air = countScale(shown.size)
         when (pattern) {
             GroupPattern.SPIRAL -> spiralPlacements(shown.size)
             GroupPattern.GRID -> gridPlacements(shown.size)
             GroupPattern.ZIGZAG -> zigzagPlacements(shown.size)
         }.map { p ->
             // 1:1 BOUND RULE (Garrett 2026-10-19): the whole cluster must
-            // fill exactly the square a single avatar occupies — clamp
-            // every placement so no avatar spills outside the box.
-            val half = p.sizeFrac / 2f
+            // fill exactly the square a single avatar occupies — scale for
+            // airiness, then clamp every placement so no avatar spills
+            // outside the box.
+            val sizeFrac = p.sizeFrac * air
+            val half = sizeFrac / 2f
             p.copy(
+                sizeFrac = sizeFrac,
                 xFrac = p.xFrac.coerceIn(half, 1f - half),
                 yFrac = p.yFrac.coerceIn(half, 1f - half),
             )

@@ -157,6 +157,16 @@ class SettingsViewModel(
      */
     fun mergedDuplicatesCount(): Int = repository.mergedDuplicatesCount()
 
+    /**
+     * Conversations whose own participant list claims a group while
+     * their messages all come from one other sender (Garrett
+     * 2026-10-20) — Diagnostics shows participantAnomalies=N plus the
+     * affected titles so contradictory server data is visible.
+     */
+    fun participantAnomalyCount(): Int = repository.participantAnomalyCount()
+
+    fun participantAnomalyTitles(): List<String> = repository.participantAnomalyTitles()
+
     data class AppInfo(
         val versionName: String,
         val versionCode: Long,

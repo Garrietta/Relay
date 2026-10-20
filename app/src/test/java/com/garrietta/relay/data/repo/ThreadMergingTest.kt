@@ -311,4 +311,49 @@ class ThreadMergingTest {
         assertEquals("Dad, Grace Ambrose", out[0].displayName)
         assertEquals("Dad", out[0].participants[0].displayName)
     }
+
+    // ---- Participant integrity (Garrett 2026-10-20) ----
+
+    @Test fun `group row with empty participant list never merges`() {
+        // A group that cannot name its members from its OWN payload
+        // must not key on its fallback address and merge into a real
+        // 1:1 with that person.
+        fun headlessGroup(id: String, date: Long) = Conversation(
+            threadId = ("rcs:" + id).hashCode().toLong(),
+            address = "+18125550101",
+            displayName = "Dad, Grace Ambrose",
+            snippet = "hi",
+            date = date,
+            unread = false,
+            messageCount = 3,
+            transportLabel = "RCS",
+            photoUri = null,
+            rcsConversationId = id,
+            participants = emptyList(),
+            isGroup = true,
+        )
+        val dadChat = row(
+            name = "Dad", date = 300L, rcsId = "dad1to1",
+            members = listOf("+18125550101" to "Dad"),
+        )
+        assertEquals(null, participantSetKey(headlessGroup("g1", 100L)))
+        val out = mergeDuplicateConversations(
+            listOf(headlessGroup("g1", 100L), headlessGroup("g2", 200L), dadChat),
+        )
+        assertEquals(3, out.size)
+    }
+
+    @Test fun `participant anomaly needs a group claim and one-sided evidence`() {
+        // The Dad/Grace shape: list claims 2 others, only Dad ever sends.
+        assertTrue(participantAnomaly(claimedOthers = 2, distinctOtherSenders = 1, incomingMessages = 10))
+        // Nobody else has spoken yet in the loaded window — still one-sided.
+        assertTrue(participantAnomaly(claimedOthers = 3, distinctOtherSenders = 0, incomingMessages = 5))
+        // A second other sender HAS spoken: the claim checks out.
+        assertFalse(participantAnomaly(claimedOthers = 2, distinctOtherSenders = 2, incomingMessages = 10))
+        // Too little message evidence to judge.
+        assertFalse(participantAnomaly(claimedOthers = 2, distinctOtherSenders = 1, incomingMessages = 2))
+        // A 1:1 claim can never be anomalous.
+        assertFalse(participantAnomaly(claimedOthers = 1, distinctOtherSenders = 1, incomingMessages = 10))
+        assertFalse(participantAnomaly(claimedOthers = 0, distinctOtherSenders = 0, incomingMessages = 10))
+    }
 }

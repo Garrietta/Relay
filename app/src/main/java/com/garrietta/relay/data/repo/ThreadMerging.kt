@@ -121,6 +121,13 @@ private fun MergeCandidate.toConversation(ids: List<Long>): Conversation =
  * the same rule as [mergeKey]).
  */
 fun participantSetKey(row: Conversation): Set<String>? {
+    // Participant-integrity guard (Garrett 2026-10-20): a row classified
+    // as a GROUP whose own participant list is empty must never key on
+    // its single fallback address — that would merge a group into a real
+    // 1:1 with the first member and drag the group's identity with it.
+    // A group that cannot name its members from its OWN payload does
+    // not merge at all.
+    if (row.isGroup && row.participants.isEmpty()) return null
     val addresses = if (row.participants.isNotEmpty()) {
         row.participants.map { it.address }
     } else {
@@ -129,6 +136,25 @@ fun participantSetKey(row: Conversation): Set<String>? {
     val keys = addresses.map { mergeKey(it) ?: return null }
     return keys.toSet().ifEmpty { null }
 }
+
+/**
+ * Participant-integrity anomaly (Garrett 2026-10-20): a conversation's
+ * own participant list claims a group ([claimedOthers] > 1) but its
+ * loaded messages were sent by at most ONE distinct other participant.
+ * The list and the message evidence contradict each other — his "Dad,
+ * Grace Ambrose" chat whose messages are all Dad's. The server list
+ * still wins for display and merging (it is the only membership data
+ * there is); the contradiction is SURFACED in Diagnostics instead of
+ * silently trusted. Requires enough message evidence to judge: a group
+ * where a member simply hasn't spoken in the last couple of messages
+ * is not an anomaly.
+ */
+fun participantAnomaly(
+    claimedOthers: Int,
+    distinctOtherSenders: Int,
+    incomingMessages: Int,
+): Boolean =
+    claimedOthers > 1 && incomingMessages >= 3 && distinctOtherSenders <= 1
 
 /**
  * Garrett's hard verification rule (2026-10-20): "if a two-person chat

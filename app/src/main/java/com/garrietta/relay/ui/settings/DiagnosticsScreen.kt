@@ -205,6 +205,16 @@ fun DiagnosticsScreen(
                     onAction = null,
                 )
                 SettingsRow(
+                    title = "Participant anomalies",
+                    subtitle = "participantAnomalies=${viewModel.participantAnomalyCount()}" +
+                        viewModel.participantAnomalyTitles()
+                            .takeIf { it.isNotEmpty() }
+                            ?.joinToString(separator = "; ", prefix = " — ")
+                            .orEmpty(),
+                    actionLabel = null,
+                    onAction = null,
+                )
+                SettingsRow(
                     title = "Group chats",
                     subtitle = conversations.count { it.isGroup }.toString(),
                     actionLabel = null,

@@ -111,7 +111,7 @@ import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
 import com.garrietta.relay.ui.theme.WavyBlobShapePressed
 import com.garrietta.relay.ui.theme.expressiveShape
-import com.garrietta.relay.ui.theme.expressiveShape
+import com.garrietta.relay.ui.theme.expressiveStretchedShape
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -1309,6 +1309,11 @@ private fun ConversationRow(
             // transparent expressive polygon OVER the selected chat's row
             // — part of the M3E language, not a flat highlight. Bouncy
             // alpha in/out as the selection moves between rows.
+            // The shape is the STRETCHED fit (Garrett 2026-10-20): the
+            // vocabulary's uniform fit would paint "Puffy" at its 1:1
+            // aspect — a narrow blob centered in the wide row — so the
+            // wide variant stretches the same shape across the row's
+            // full box, edge to edge, at the row's own height.
             val overlayAlpha by animateFloatAsState(
                 targetValue = if (isSelected) 1f else 0f,
                 animationSpec = RelaySprings.bouncy(),
@@ -1319,7 +1324,7 @@ private fun ConversationRow(
                     modifier = Modifier
                         .matchParentSize()
                         .graphicsLayer { alpha = overlayAlpha * 0.22f }
-                        .clip(expressiveShape("Puffy"))
+                        .clip(expressiveStretchedShape("Puffy"))
                         .background(MaterialTheme.colorScheme.primary),
                 )
             }

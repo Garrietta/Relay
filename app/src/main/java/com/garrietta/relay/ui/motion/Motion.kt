@@ -99,6 +99,32 @@ object RelaySprings {
 const val SHARED_AXIS_TRAVEL_DIVISOR = 4
 
 /**
+ * Shared-axis travel math (pure, unit-tested): the horizontal offsets
+ * the FORWARD and BACKWARD pane transforms start and end at.
+ * BACKWARD is the EXACT geometric mirror of FORWARD (Garrett
+ * 2026-10-20) — every offset negated, the same divisor and specs — so
+ * a pop retraces the push path precisely. Extracted from
+ * [buildTransforms] so the mirror property is proven by tests
+ * (SharedAxisTravelTest), not eyeballed at the call site.
+ */
+object SharedAxisTravel {
+
+    /** Where an ENTERING destination starts (it animates to 0). */
+    fun enterOffset(kind: MotionKind, fullWidth: Int): Int = when (kind) {
+        MotionKind.FORWARD -> fullWidth / SHARED_AXIS_TRAVEL_DIVISOR
+        MotionKind.BACKWARD -> -fullWidth / SHARED_AXIS_TRAVEL_DIVISOR
+        else -> 0
+    }
+
+    /** Where an EXITING destination ends (it animates from 0). */
+    fun exitOffset(kind: MotionKind, fullWidth: Int): Int = when (kind) {
+        MotionKind.FORWARD -> -fullWidth / SHARED_AXIS_TRAVEL_DIVISOR
+        MotionKind.BACKWARD -> fullWidth / SHARED_AXIS_TRAVEL_DIVISOR
+        else -> 0
+    }
+}
+
+/**
  * Concrete motion specs. On material3 1.4.0 (stable) there is no MotionScheme,
  * so these use the official M3 expressive token values directly.
  */
@@ -165,7 +191,9 @@ private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTran
             MotionKind.FORWARD,
             // Fluid bouncy travel: the spring overshoots slightly and
             // settles — no linear slides anywhere.
-            (slideInHorizontally(RelaySprings.bouncy()) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
+            (slideInHorizontally(RelaySprings.bouncy()) { full ->
+                SharedAxisTravel.enterOffset(MotionKind.FORWARD, full)
+            } +
                 fadeIn(
                     tween(
                         M3Duration.FADE_IN,
@@ -173,26 +201,28 @@ private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTran
                         easing = M3Easing.EmphasizedDecelerate,
                     ),
                 )) togetherWith
-                (slideOutHorizontally(RelaySprings.bouncy()) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
+                (slideOutHorizontally(RelaySprings.bouncy()) { full ->
+                    SharedAxisTravel.exitOffset(MotionKind.FORWARD, full)
+                } +
                     fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))),
         )
 
         put(
             MotionKind.BACKWARD,
             // Pop = the EXACT geometric mirror of FORWARD (Garrett
-            // 2026-10-20): every horizontal offset is negated and the very
-            // same specs are reused, so each screen retraces the path it
-            // took in — the returning inbox slides in from the -travel
-            // side it exited to, and the chat slides out to the +travel
-            // side it entered from, on the identical bouncy spring and
-            // fade tokens. No scale settle, no different animation: the
-            // exit IS the entrance played in reverse. The avatar
-            // shared-element morph (motionSharedAvatar) likewise runs in
-            // both directions now; its old pop-flash was rooted in the
-            // inbox returning at scroll position 0 (a wrong/absent morph
-            // target), which the inbox scroll restore point fixed at the
-            // source.
-            (slideInHorizontally(RelaySprings.bouncy()) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
+            // 2026-10-20): [SharedAxisTravel] negates every offset and
+            // the very same specs are reused, so each screen retraces
+            // the path it took in — the returning inbox slides in from
+            // the -travel side it exited to, and the chat slides out to
+            // the +travel side it entered from, on the identical bouncy
+            // spring and fade tokens. No scale settle, no different
+            // animation: the exit IS the entrance played in reverse.
+            // The shared-element morphs (container bounds + avatar)
+            // likewise run in both directions; see [motionSharedBounds]
+            // for why their registration must never be direction-gated.
+            (slideInHorizontally(RelaySprings.bouncy()) { full ->
+                SharedAxisTravel.enterOffset(MotionKind.BACKWARD, full)
+            } +
                 fadeIn(
                     tween(
                         M3Duration.FADE_IN,
@@ -200,7 +230,9 @@ private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTran
                         easing = M3Easing.EmphasizedDecelerate,
                     ),
                 )) togetherWith
-                (slideOutHorizontally(RelaySprings.bouncy()) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
+                (slideOutHorizontally(RelaySprings.bouncy()) { full ->
+                    SharedAxisTravel.exitOffset(MotionKind.BACKWARD, full)
+                } +
                     fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))),
         )
     }
@@ -240,15 +272,6 @@ val LocalSharedTransitionScope = staticCompositionLocalOf<SharedTransitionScope?
 val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
 /**
- * Navigation direction for the current transition, provided by the nav root.
- * CONTAINER bounds / shared-element morphs ([motionSharedBounds],
- * [motionSharedElement]) run on push only. The AVATAR morph
- * ([motionSharedAvatar]) ignores this flag: it is bidirectional, running
- * the exact reverse on pop (Garrett 2026-10-20).
- */
-val LocalNavForward = staticCompositionLocalOf { true }
-
-/**
  * Master switch for shared-element registration in a subtree. The two-pane
  * detail pane provides `false`: its chat has no shared-element counterpart
  * in the list pane (the rows register under the inbox's own internal
@@ -256,6 +279,11 @@ val LocalNavForward = staticCompositionLocalOf { true }
  * SharedTransitionLayout overlay during the detail crossfade — the
  * two-pane transition flash. With registration off, the detail pane is a
  * pure crossfade and nothing can flash in the overlay.
+ *
+ * This is the ONLY registration gate left (Garrett 2026-10-20): it is a
+ * static per-subtree property, never flipped in response to navigation,
+ * so it cannot tear a match mid-transition the way the old
+ * direction-based gate did (see [motionSharedBounds]).
  */
 val LocalSharedElementsEnabled = staticCompositionLocalOf { true }
 
@@ -269,6 +297,25 @@ object SharedElementKeys {
  * CONTAINER TRANSFORM — put the SAME key on the tapped origin AND the detail target.
  * Pass each side's own [shape] so corners round correctly in the transition overlay.
  *
+ * BIDIRECTIONAL (Garrett 2026-10-20, close-flash root-cause fix): the
+ * registration is unconditional — the morph runs on pop as the exact
+ * reverse of the push, same [BoundsTransform] spring, endpoints
+ * swapped, every frame clipped to the animated bounds by the overlay
+ * clip. The previous push-only gate (a nav-direction flag read during
+ * composition) REMOVED this registration in the same frame a pop
+ * began. The shared-transition scope samples its matches from the
+ * settled registrations as the transition starts, so the chat-side
+ * entry was torn mid-flight — its orphaned overlay copy rendered for
+ * several frames, unfaded and outside any morph path: the whole thread
+ * surface displaced right/down over the returning inbox, text and
+ * images readable at the wrong position, while the destination
+ * underneath slid away (his device video, 2026-10-20 11:49; the same
+ * ActiveMatchRemovedDuringTransition class the inbox's firstLoad
+ * comment documents for the avatar). A registration that is never
+ * added or removed in response to navigation cannot be torn: close
+ * is now the true mirror of open at the shared layer too, matching
+ * the pane transforms ([SharedAxisTravel]).
+ *
  * IMPORTANT: apply at the actual visual endpoint only. Never inside reusable item
  * composables that may also be composed in measurement/offscreen layers — duplicate
  * shared-content registrations break the transition.
@@ -281,10 +328,6 @@ fun Modifier.motionSharedBounds(
     scaleToFit: ContentScale? = null,
 ): Modifier {
     if (!LocalSharedElementsEnabled.current) return this
-    // No shared morph on pop: the transition overlay renders above both
-    // destinations, so a morphing exiting screen would draw over the
-    // incoming one (e.g. thread text ghosting over the inbox pill).
-    if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()
@@ -378,13 +421,14 @@ fun Modifier.motionSharedAvatar(key: String, shape: Shape? = null): Modifier {
 
 /**
  * Shared ELEMENT (not bounds) — the content itself morphs. Use for a single icon/image
- * that travels between two layouts. Same key + scope rules as [motionSharedBounds].
+ * that travels between two layouts. Same key + scope rules as [motionSharedBounds]:
+ * registration is unconditional and bidirectional (see the close-flash
+ * note there); no call sites exist today.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.motionSharedElement(key: String, shape: Shape? = null): Modifier {
     if (!LocalSharedElementsEnabled.current) return this
-    if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()

@@ -18,6 +18,16 @@ package com.garrietta.relay.ui.chat
  * the expanded cluster row — in every state (entry, any scroll offset,
  * return from details). The collapse state machine keeps serving the
  * 1:1 header exactly as before; it simply never reaches a group.
+ *
+ * The cluster's scroll-EXIT is a separate axis (Garrett 2026-10-20,
+ * clarifying the height directive): on vertical scroll the group
+ * cluster still slides away to the left, as it did before #169 —
+ * "just maintaining the header height as is." [groupClusterCollapsed]
+ * decides ONLY the cluster's horizontal presence; it is never an
+ * input to the height decision ([headerCollapsed]), and the header
+ * composable pins the row height outright, so the exit animation is
+ * height-neutral by construction. The two axes are tested
+ * independently (ChatHeaderLogicTest).
  * Pure JVM logic; unit-tested (ChatHeaderLogicTest).
  */
 object ChatHeaderLogic {
@@ -38,4 +48,15 @@ object ChatHeaderLogic {
      */
     fun headerCollapsed(isGroup: Boolean, scrollCollapsed: Boolean): Boolean =
         !isGroup && scrollCollapsed
+
+    /**
+     * Whether a GROUP header's avatar cluster is scrolled away: the
+     * raw scroll-collapse state drives it, for groups only, and it
+     * affects ONLY the cluster's horizontal presence inside the
+     * pinned-height row — the names column takes the freed width.
+     * 1:1 chats have no cluster to exit (their own [headerCollapsed]
+     * path is untouched).
+     */
+    fun groupClusterCollapsed(isGroup: Boolean, scrollCollapsed: Boolean): Boolean =
+        isGroup && scrollCollapsed
 }

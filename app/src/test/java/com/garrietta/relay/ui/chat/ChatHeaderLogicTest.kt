@@ -39,4 +39,43 @@ class ChatHeaderLogicTest {
         // to move this constant deliberately, with the header height.
         assertEquals(76, ChatHeaderLogic.GROUP_HEADER_HEIGHT_DP)
     }
+
+    @Test
+    fun `group cluster scrolls away only for groups, only when scrolled`() {
+        // The restored behavior (Garrett 2026-10-20): on vertical
+        // scroll the group cluster exits to the left; at the top it
+        // is in line. 1:1 chats have no cluster — their header follows
+        // the separate collapse path and this axis never fires.
+        assertTrue(
+            ChatHeaderLogic.groupClusterCollapsed(isGroup = true, scrollCollapsed = true),
+        )
+        assertFalse(
+            ChatHeaderLogic.groupClusterCollapsed(isGroup = true, scrollCollapsed = false),
+        )
+        assertFalse(
+            ChatHeaderLogic.groupClusterCollapsed(isGroup = false, scrollCollapsed = true),
+        )
+        assertFalse(
+            ChatHeaderLogic.groupClusterCollapsed(isGroup = false, scrollCollapsed = false),
+        )
+    }
+
+    @Test
+    fun `cluster state can never change the group header height decision`() {
+        // Height-neutrality, proven at the decision level: the height
+        // axis (headerCollapsed) takes no cluster input, so for BOTH
+        // cluster states — present and scrolled away — the group
+        // header stays at the same pinned height, and the pinned
+        // value does not move.
+        for (scrolled in listOf(true, false)) {
+            assertFalse(
+                ChatHeaderLogic.headerCollapsed(isGroup = true, scrollCollapsed = scrolled),
+            )
+            assertEquals(76, ChatHeaderLogic.GROUP_HEADER_HEIGHT_DP)
+        }
+        // And the two axes genuinely vary independently: same scroll
+        // state, opposite cluster verdicts would be a coupling bug.
+        assertTrue(ChatHeaderLogic.groupClusterCollapsed(true, true))
+        assertFalse(ChatHeaderLogic.groupClusterCollapsed(true, false))
+    }
 }

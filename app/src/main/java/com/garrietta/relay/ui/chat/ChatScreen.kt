@@ -79,9 +79,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Forward
-import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
@@ -144,7 +142,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.RelayApp
 import com.garrietta.relay.data.model.Conversation
-import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.allRcsIds
@@ -432,6 +429,13 @@ fun ChatScreen(
     // header was what flipped it between two heights (and jumped the
     // message list's top inset) mid-scroll.
     val scrolled = ChatHeaderLogic.headerCollapsed(isGroup, headerCollapsed)
+    // The group cluster's scroll-exit is the OTHER axis (Garrett
+    // 2026-10-20 clarification): the raw collapse state slides the
+    // cluster out to the left on scroll — inside the pinned-height
+    // row, so the exit can never move the height. Independent of
+    // [scrolled] by construction (see ChatHeaderLogic).
+    val groupClusterCollapsed =
+        ChatHeaderLogic.groupClusterCollapsed(isGroup, headerCollapsed)
     // The REAL transport label: the ViewModel refreshes it from the
     // server's Conversation.type for RCS rows (never hardcoded).
     val liveTransportLabel by viewModel.transportLabel.collectAsState()
@@ -589,6 +593,7 @@ fun ChatScreen(
                     threadId = threadId,
                     transportLabel = liveTransportLabel,
                     scrolled = scrolled,
+                    groupClusterCollapsed = groupClusterCollapsed,
                     patternKey = patternKey,
                     // The header takes the wallpaper's TOP tone flat:
                     // the thread container owns the gradient starting
@@ -1160,41 +1165,11 @@ private fun TypingDot(phaseDelayMs: Int) {
     )
 }
 
-/**
- * Google Messages-style delivery ticks for outgoing bubbles: SENT = single
- * check, DELIVERED = double check, READ = double check filled blue.
- * SENDING/NONE show nothing (matches Google Messages).
- */
-@Composable
-private fun DeliveryTicks(
-    status: DeliveryStatus,
-    modifier: Modifier = Modifier,
-) {
-    val (icon, tint) = when (status) {
-        DeliveryStatus.SENT -> Icons.Filled.Done to MaterialTheme.colorScheme.onSurfaceVariant
-        DeliveryStatus.DELIVERED -> Icons.Filled.DoneAll to MaterialTheme.colorScheme.onSurfaceVariant
-        DeliveryStatus.READ -> Icons.Filled.DoneAll to MaterialTheme.colorScheme.primary
-        else -> null to Color.Unspecified
-    }
-    if (icon != null) {
-        Row(
-            modifier = modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                icon,
-                contentDescription = when (status) {
-                    DeliveryStatus.READ -> "Read"
-                    DeliveryStatus.DELIVERED -> "Delivered"
-                    else -> "Sent"
-                },
-                tint = tint,
-                modifier = Modifier.size(14.dp),
-            )
-        }
-    }
-}
+// Outgoing delivery state renders through SendStatusIndicator
+// (SendStatusIndicator.kt) — the seven-shape spinner beside the bubble
+// while a send is in flight, morphing into the delivered check —
+// which REPLACED the under-bubble DeliveryTicks row (Garrett
+// 2026-10-20): one status language per message, never two markers.
 
 /** Which header layout a thread gets — from the OTHER-participant count (self excluded, deduped). */
 private enum class HeaderMode { OneToOne, Group }
@@ -1202,12 +1177,14 @@ private enum class HeaderMode { OneToOne, Group }
 /**
  * Chat header dispatch. 1:1 = their face centered at the top with their
  * name directly under (compact: ~half the old footprint); on scroll it
- * collapses (RelaySprings) to the height of the top bar. Group = a static
+ * collapses (RelaySprings) to the height of the top bar. Group = an
  * inline row at a CONSTANT height (the expanded cluster row — back arrow,
  * the group's unique avatar cluster (spiral / grid / zigzag, max five,
- * then a "+N" circle), comma-separated member names with ellipsis): it
- * never collapses or resizes on scroll (Garrett 2026-10-20 — see
- * ChatHeaderLogic). Background matches the thread container — no seam.
+ * then a "+N" circle), comma-separated member names with ellipsis): the
+ * height never collapses or resizes on scroll (Garrett 2026-10-20 — see
+ * ChatHeaderLogic); the cluster alone slides out to the left on scroll,
+ * inside that pinned height. Background matches the thread container —
+ * no seam.
  */
 @Composable
 private fun ChatHeader(
@@ -1220,6 +1197,7 @@ private fun ChatHeader(
     threadId: Long,
     transportLabel: String,
     scrolled: Boolean,
+    groupClusterCollapsed: Boolean,
     patternKey: String,
     /** Picked chat wallpaper's top tone; the header tints to match the
      * thread's gradient start so the two read as one surface.
@@ -1262,6 +1240,7 @@ private fun ChatHeader(
             HeaderMode.Group -> GroupHeader(
                 others = others,
                 transportLabel = transportLabel,
+                clusterCollapsed = groupClusterCollapsed,
                 patternKey = patternKey,
                 threadId = threadId,
                 onBack = onBack,
@@ -1414,7 +1393,7 @@ private fun OneToOneHeader(
 }
 
 /**
- * Group header: a static inline row — back arrow, the group's UNIQUE avatar
+ * Group header: an inline row — back arrow, the group's UNIQUE avatar
  * cluster (spiral / grid / zigzag, deterministic per conversation: different
  * sizes, shapes and rotations, overlapping), then the comma-separated member
  * names, ellipsized before the right edge. The row's height is CONSTANT at
@@ -1422,14 +1401,27 @@ private fun OneToOneHeader(
  * in every state (Garrett 2026-10-20): an earlier version consumed the 1:1
  * header's scroll-collapse state and dropped the cluster once scrolled,
  * which flipped the header between two heights and shifted the whole
- * message list. The cluster is always in line now. For NAVIGATION the
- * cluster carries the same shared-avatar morph as a 1:1 photo (in on
- * open, reverse on exit) — one movement language for every chat.
+ * message list.
+ *
+ * The cluster's own scroll-exit is back (Garrett 2026-10-20, his
+ * clarification of the height directive): on vertical scroll it slides
+ * away to the LEFT — a horizontal-only AnimatedVisibility inside the
+ * pinned-height row — and returns at the top. The height cannot move
+ * in any frame of the exit: the row is pinned outright, the animation
+ * changes only the cluster slot's width, and the names column absorbs
+ * it. For NAVIGATION the composed cluster carries the same
+ * shared-avatar morph as a 1:1 photo (in on open, reverse on exit);
+ * scrolled fully away it leaves composition, so an exit from deep in
+ * the thread has no morph target — the same accepted degradation as a
+ * collapsed 1:1 header. The driver is frozen until the open-time
+ * scroll restore lands, so the cluster can never appear or vanish
+ * mid-transition.
  */
 @Composable
 private fun GroupHeader(
     others: List<Participant>,
     transportLabel: String,
+    clusterCollapsed: Boolean,
     patternKey: String,
     threadId: Long,
     onBack: () -> Unit,
@@ -1461,36 +1453,51 @@ private fun GroupHeader(
         IconButton(onClick = onBack) {
             Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
         }
-        // The cluster is ALWAYS in line (Garrett 2026-10-20): the
-        // scroll-driven AnimatedVisibility that used to drop it (and
-        // shrink this header to top-bar height) is gone.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            // Header tap opens the details page (Garrett 2026-10-19).
-            modifier = Modifier.clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onOpenDetails,
+        // The cluster's scroll-exit (Garrett 2026-10-20): horizontal
+        // only — it shrinks away toward the left edge on scroll and
+        // expands back at the top, on the house spring. The row's
+        // height is pinned above, so this animation is height-neutral
+        // by construction (the #169 guarantee): no frame of it can
+        // change the Scaffold's top inset or shift the message list.
+        AnimatedVisibility(
+            visible = !clusterCollapsed,
+            enter = expandHorizontally(
+                animationSpec = RelaySprings.bouncy(),
+                expandFrom = Alignment.Start,
+            ),
+            exit = shrinkHorizontally(
+                animationSpec = RelaySprings.bouncy(),
+                shrinkTowards = Alignment.Start,
             ),
         ) {
-            GroupAvatarCluster(
-                members = visibleOthers.map {
-                    ClusterMember(
-                        photoUri = it.photoUri,
-                        name = it.displayName.ifBlank { it.address },
-                        address = it.address,
-                    )
-                },
-                conversationKey = patternKey,
-                boxSize = 76.dp,
-                // Morph target matching the inbox group row's
-                // cluster (Garrett 2026-10-20: same picture movement
-                // for group chats as for 1:1, in both directions).
-                modifier = Modifier.motionSharedAvatar(
-                    SharedElementKeys.avatar(threadId),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                // Header tap opens the details page (Garrett 2026-10-19).
+                modifier = Modifier.clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onOpenDetails,
                 ),
-            )
-            Spacer(Modifier.width(10.dp))
+            ) {
+                GroupAvatarCluster(
+                    members = visibleOthers.map {
+                        ClusterMember(
+                            photoUri = it.photoUri,
+                            name = it.displayName.ifBlank { it.address },
+                            address = it.address,
+                        )
+                    },
+                    conversationKey = patternKey,
+                    boxSize = 76.dp,
+                    // Morph target matching the inbox group row's
+                    // cluster (Garrett 2026-10-20: same picture movement
+                    // for group chats as for 1:1, in both directions).
+                    modifier = Modifier.motionSharedAvatar(
+                        SharedElementKeys.avatar(threadId),
+                    ),
+                )
+                Spacer(Modifier.width(10.dp))
+            }
         }
         Column(
             modifier = Modifier
@@ -1723,16 +1730,17 @@ private fun LocationBubble(
                 }
             }
         } else {
-            card()
-        }
-        // The Maps-link text that rode along is NOT rendered as a second
-        // text bubble — the card is the message (the raw link would also
-        // unfurl a redundant preview). Outgoing pins still get receipts.
-        if (outgoing) {
-            DeliveryTicks(
-                status = message.deliveryStatus,
-                modifier = Modifier.padding(top = 2.dp, end = 4.dp),
-            )
+            // Outgoing pins carry the send indicator to their LEFT,
+            // bottom-aligned, exactly like text bubbles (Garrett
+            // 2026-10-20) — the Maps-link text that rode along is NOT
+            // rendered as a second bubble; the card is the message.
+            Row(verticalAlignment = Alignment.Bottom) {
+                if (outgoing) {
+                    SendStatusIndicator(message = message)
+                    Spacer(Modifier.width(6.dp))
+                }
+                card()
+            }
         }
     }
 }
@@ -1831,6 +1839,16 @@ private fun MediaBubble(
     // outgoing text bubbles' trailing edge.
     @Composable
     fun MediaContent() {
+        // Outgoing media carries the send indicator to its LEFT,
+        // bottom-aligned (Garrett 2026-10-20): hidden during the
+        // upload (the bubble's progress scrim owns that phase — see
+        // SendIndicatorLogic), it appears for the post-upload delivery
+        // phase, spinner until DELIVERED, then the morphed check.
+        Row(verticalAlignment = Alignment.Bottom) {
+        if (message.isOutgoing) {
+            SendStatusIndicator(message = message)
+            Spacer(Modifier.width(6.dp))
+        }
         Box {
             Box(
                 modifier = Modifier
@@ -2084,6 +2102,7 @@ private fun MediaBubble(
             }
             ReactionBadgeOverlay(message, onShowReactions)
         }
+        } // Row (send indicator + media box)
         if (message.body.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
             // Caption as a compact bubble under the media.
@@ -2629,18 +2648,28 @@ private fun MessageBubble(
                 }
             }
         } else {
-            Box {
-                BubbleBox(
-                    shape = shape,
-                    containerColor = containerColor,
-                    contentColor = contentColor,
-                    selectionActive = selectionActive,
-                    onToggleSelect = onToggleSelect,
-                    body = message.body,
-                    maxBubbleWidth = maxBubbleWidth,
-                    onReact = onReact,
-                )
-                ReactionBadgeOverlay(message, onShowReactions)
+            // Outgoing bubbles carry the send indicator immediately to
+            // their LEFT, bottom-aligned (Garrett 2026-10-20): the
+            // seven-shape spinner while the send is in flight, morphing
+            // into the delivered check — see SendStatusIndicator.
+            Row(verticalAlignment = Alignment.Bottom) {
+                if (message.isOutgoing) {
+                    SendStatusIndicator(message = message)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Box {
+                    BubbleBox(
+                        shape = shape,
+                        containerColor = containerColor,
+                        contentColor = contentColor,
+                        selectionActive = selectionActive,
+                        onToggleSelect = onToggleSelect,
+                        body = message.body,
+                        maxBubbleWidth = maxBubbleWidth,
+                        onReact = onReact,
+                    )
+                    ReactionBadgeOverlay(message, onShowReactions)
+                }
             }
         }
         if (message.isMms) {
@@ -2660,14 +2689,9 @@ private fun MessageBubble(
         if (message.media == null && !groupIncoming) {
             LinkUnfurl(message = message, maxBubbleWidth = maxBubbleWidth)
         }
-        // Read/delivery receipts (Garrett 2026-10-19): Google Messages-style
-        // ticks under outgoing bubbles — sent ✓, delivered ✓✓, read ✓✓ blue.
-        if (message.isOutgoing) {
-            DeliveryTicks(
-                status = message.deliveryStatus,
-                modifier = Modifier.padding(top = 2.dp, end = 4.dp),
-            )
-        }
+        // (No under-bubble receipt row anymore — the beside-bubble
+        // SendStatusIndicator above is the one status language,
+        // Garrett 2026-10-20.)
     }
 }
 

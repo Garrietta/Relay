@@ -2,9 +2,6 @@ package com.garrietta.relay.ui.theme
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -16,12 +13,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import coil.compose.AsyncImage
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -122,13 +117,22 @@ fun GroupAvatarCluster(
             GroupPattern.SPIRAL -> spiralPlacements(shown.size)
             GroupPattern.GRID -> gridPlacements(shown.size)
             GroupPattern.ZIGZAG -> zigzagPlacements(shown.size)
+        }.map { p ->
+            // 1:1 BOUND RULE (Garrett 2026-10-19): the whole cluster must
+            // fill exactly the square a single avatar occupies — clamp
+            // every placement so no avatar spills outside the box.
+            val half = p.sizeFrac / 2f
+            p.copy(
+                xFrac = p.xFrac.coerceIn(half, 1f - half),
+                yFrac = p.yFrac.coerceIn(half, 1f - half),
+            )
         }
     }
-    // Two-person chats (Garrett 2026-10-19): ONE composite avatar — a
-    // single circle split between the two members — instead of two
-    // separate circles. The 5-avatar collage keeps its patterns.
+    // Two-person chats (Garrett 2026-10-19, corrected 21:10): two FULL
+    // avatar icons at 75% size, overlapped with deterministic random
+    // positions/orientations per conversation — NOT a split circle.
     if (members.size == 2) {
-        TwoAvatarComposite(members[0], members[1], boxSize, modifier)
+        TwoAvatarOverlap(members[0], members[1], conversationKey, boxSize, modifier)
         return
     }
     val smallText = boxSize < 80.dp
@@ -180,56 +184,62 @@ fun GroupAvatarCluster(
 }
 
 /**
- * Two-person composite avatar: a single circle, left half = first member,
- * right half = second member (photo or initial on the deterministic
- * per-contact fallback color). Reads as one avatar, not two.
+ * Two-person avatar layout (Garrett 2026-10-19): two FULL avatar icons,
+ * each 75% of normal size, overlapped on a diagonal with deterministic
+ * random positions and orientations per conversation — the default
+ * 2-person chat layout. Each keeps its per-contact expressive shape,
+ * photo, and initial; one deterministically overlaps the other.
  */
 @Composable
-private fun TwoAvatarComposite(
+private fun TwoAvatarOverlap(
     a: ClusterMember,
     b: ClusterMember,
+    conversationKey: String,
     boxSize: Dp,
     modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = modifier
-            .size(boxSize)
-            .clip(CircleShape),
-    ) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            CompositeHalf(a, Modifier.weight(1f).fillMaxHeight())
-            CompositeHalf(b, Modifier.weight(1f).fillMaxHeight())
-        }
-    }
-}
-
-@Composable
-private fun CompositeHalf(member: ClusterMember, modifier: Modifier) {
-    val scheme = MaterialTheme.colorScheme
-    val (bg, fg) = remember(member.address, scheme) {
-        val palette = listOf(
-            scheme.primaryContainer to scheme.onPrimaryContainer,
-            scheme.secondaryContainer to scheme.onSecondaryContainer,
-            scheme.tertiaryContainer to scheme.onTertiaryContainer,
+    val h = conversationKey.hashCode()
+    // Diagonal direction (↘ or ↙), deterministic per conversation.
+    val flipX = (h and 1) == 1
+    // Deterministic jitter ±0.02 around the diagonal slots; centers are
+    // clamped to [0.375, 0.625] so with the 0.375 half-size the avatars
+    // never cross the box edges.
+    fun jitter(shift: Int): Float = (((h ushr shift) and 255) / 255f) * 0.04f - 0.02f
+    val axC = (0.375f + jitter(1)).coerceIn(0.375f, 0.625f)
+    val ayC = (0.375f + jitter(9)).coerceIn(0.375f, 0.625f)
+    val bxC = (0.625f + jitter(17)).coerceIn(0.375f, 0.625f)
+    val byC = (0.625f + jitter(25)).coerceIn(0.375f, 0.625f)
+    val ax = if (flipX) 1f - axC else axC
+    val bx = if (flipX) 1f - bxC else bxC
+    val aOnTop = ((h ushr 5) and 1) == 1
+    val s = boxSize * 0.75f
+    val smallText = boxSize < 80.dp
+    Box(modifier = modifier.size(boxSize)) {
+        val rotA = remember(a.address) { memberRotation(a.address) }
+        val rotB = remember(b.address) { memberRotation(b.address) }
+        ContactAvatar(
+            photoUri = a.photoUri,
+            name = a.name,
+            size = s,
+            shapeKey = a.address,
+            textStyle = if (smallText) MaterialTheme.typography.labelMedium
+                else MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .offset(x = boxSize * ax - s / 2, y = boxSize * ayC - s / 2)
+                .graphicsLayer { rotationZ = rotA }
+                .zIndex(if (aOnTop) 2f else 1f),
         )
-        palette[(member.address.hashCode().and(Int.MAX_VALUE)) % palette.size]
-    }
-    Box(
-        modifier = modifier.background(bg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = member.name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-            style = MaterialTheme.typography.titleMedium,
-            color = fg,
+        ContactAvatar(
+            photoUri = b.photoUri,
+            name = b.name,
+            size = s,
+            shapeKey = b.address,
+            textStyle = if (smallText) MaterialTheme.typography.labelMedium
+                else MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .offset(x = boxSize * bx - s / 2, y = boxSize * byC - s / 2)
+                .graphicsLayer { rotationZ = rotB }
+                .zIndex(if (aOnTop) 1f else 2f),
         )
-        if (member.photoUri != null) {
-            AsyncImage(
-                model = member.photoUri,
-                contentDescription = "Profile photo for ${member.name}",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-        }
     }
 }

@@ -960,9 +960,11 @@ private fun ForwardTargetRow(
 
 /**
  * Remote typing indicator (Garrett 2026-10-19): three animated dots in a
- * received-style bubble. The paired web protocol's typingEvent carries no
- * sender id, so groups show this generic indicator. Bouncy pop-in/out via
- * the surrounding AnimatedVisibility in the message list.
+ * received-style bubble. Driven by the transport's typing store (the
+ * same store the inbox rows read); the wire event does carry the
+ * typist's number — the inbox names the typist with it, while in-chat
+ * the dots stay generic. Bouncy pop-in/out via the surrounding
+ * AnimatedVisibility in the message list.
  */
 @Composable
 private fun TypingIndicatorBubble() {

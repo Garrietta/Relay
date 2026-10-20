@@ -1,6 +1,7 @@
 package com.garrietta.relay.data.repo
 
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.Participant
 
 /**
  * Pure, JVM-testable thread merging. The repository resolves contact
@@ -137,3 +138,70 @@ fun participantAnomaly(
     incomingMessages: Int,
 ): Boolean =
     claimedOthers > 1 && incomingMessages >= 3 && distinctOtherSenders <= 1
+
+// ---------- Snippet prefixes + typing labels (Garrett 2026-10-20) ----------
+
+/** First name from a display name: the first whitespace-separated token. */
+fun firstNameOf(displayName: String): String =
+    displayName.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
+
+/**
+ * Google Messages snippet prefix for a conversation's latest message
+ * (Garrett 2026-10-20, GM parity from his side-by-side screenshots):
+ *  - latest message is OUTGOING -> "You: " (any chat, self-chat included),
+ *  - latest is incoming in a GROUP -> "{FirstName}: " from the sender's
+ *    display name (the server's LatestMessage.displayName on the RCS
+ *    path; a contact-resolved name on the Telephony path),
+ *  - incoming in a 1:1, or no sender name to show -> "" (GM shows the
+ *    bare text there).
+ * Applied to the FINAL snippet text (reaction snippets keep their
+ * existing format; the same rule prefixes them). Never applied to a
+ * blank snippet — the row's "No messages" fallback must stay bare.
+ */
+fun snippetPrefix(latestFromMe: Boolean, isGroup: Boolean, latestSenderName: String): String =
+    when {
+        latestFromMe -> "You: "
+        isGroup -> firstNameOf(latestSenderName)
+            .takeIf { it.isNotBlank() }?.let { "$it: " } ?: ""
+        else -> ""
+    }
+
+/** Digits-only form of a phone number for comparison. */
+private fun digitsOnly(number: String): String = number.filter { it.isDigit() }
+
+/**
+ * Number equality tolerant of country-code formatting (the repository's
+ * standing rule): exact digit match, or last-10 match when both sides
+ * have at least 10 digits.
+ */
+fun samePhoneNumber(a: String, b: String): Boolean {
+    val da = digitsOnly(a)
+    val db = digitsOnly(b)
+    if (da.isEmpty() || db.isEmpty()) return false
+    if (da == db) return true
+    return da.length >= 10 && db.length >= 10 && da.takeLast(10) == db.takeLast(10)
+}
+
+/**
+ * The inbox typing label for one conversation (Garrett 2026-10-20):
+ * "{FirstName} is typing..." with the typist resolved from the wire's
+ * TypingData number against the conversation's OTHER participants:
+ *  - number matches a participant -> that participant's first name;
+ *  - no usable number but exactly ONE other participant (a 1:1) -> them;
+ *  - a group whose typist can't be resolved -> "Someone is typing..."
+ *    (a generic label, never a fabricated name);
+ *  - no other participants at all (self-chat) -> null, no label.
+ */
+fun typingLabel(
+    others: List<Participant>,
+    typistNumber: String?,
+): String? {
+    if (others.isEmpty()) return null
+    val byNumber = typistNumber?.takeIf { it.isNotBlank() }?.let { n ->
+        others.firstOrNull { samePhoneNumber(it.address, n) }
+    }
+    val named = byNumber ?: others.singleOrNull()
+    val first = named?.let { firstNameOf(it.displayName.ifBlank { it.address }) }
+    return if (!first.isNullOrBlank()) "$first is typing..."
+    else "Someone is typing..."
+}

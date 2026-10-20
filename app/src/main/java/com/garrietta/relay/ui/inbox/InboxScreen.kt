@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -129,6 +130,9 @@ fun InboxScreen(
     // True-muted conversations (Garrett 2026-10-20): their rows carry a
     // subtle bell-off indicator; suppression lives in the pipeline.
     val mutedKeys by viewModel.mutedKeys.collectAsState()
+    // Active typing labels by threadId (Garrett 2026-10-20): a row with
+    // an entry swaps its snippet for the italic "{FirstName} is typing...".
+    val typingLabels by viewModel.typingLabels.collectAsState()
     // The built-in tabs are synthetic: Unread goes FIRST in this list so
     // it sits directly after the pill bar's implicit "All" (ahead of the
     // user's custom categories), and Unknown is appended LAST, always at
@@ -382,6 +386,7 @@ fun InboxScreen(
                                     ) {
                                         ConversationRow(
                                             conversation = conversation,
+                                            typingLabel = typingLabels[conversation.threadId],
                                             muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                             isSelected = conversation.threadId == selectedThreadId,
                                             onClick = { openChat(conversation) },
@@ -395,6 +400,7 @@ fun InboxScreen(
                                 } else {
                                     ConversationRow(
                                         conversation = conversation,
+                                        typingLabel = typingLabels[conversation.threadId],
                                         muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                         isSelected = conversation.threadId == selectedThreadId,
                                         onClick = { openChat(conversation) },
@@ -425,6 +431,7 @@ fun InboxScreen(
                     query = query,
                     onQueryChange = viewModel::setQuery,
                     results = conversations,
+                    typingLabels = typingLabels,
                     selectedThreadId = selectedThreadId,
                     dismissSignal = searchDismissSignal,
                     onDismiss = {
@@ -537,6 +544,7 @@ private fun ConversationSearchPopup(
     query: String,
     onQueryChange: (String) -> Unit,
     results: List<Conversation>,
+    typingLabels: Map<Long, String>,
     selectedThreadId: Long?,
     dismissSignal: Int,
     onDismiss: () -> Unit,
@@ -563,6 +571,7 @@ private fun ConversationSearchPopup(
             ) { conversation ->
                 SearchResultRow(
                     conversation = conversation,
+                    typingLabel = typingLabels[conversation.threadId],
                     isSelected = conversation.threadId == selectedThreadId,
                     onClick = { requestExit { onOpenChat(conversation) } },
                 )
@@ -592,6 +601,7 @@ private fun SearchResultRow(
     conversation: Conversation,
     isSelected: Boolean,
     onClick: () -> Unit,
+    typingLabel: String? = null,
 ) {
     Row(
         modifier = Modifier
@@ -637,15 +647,30 @@ private fun SearchResultRow(
                     )
                     Spacer(Modifier.width(6.dp))
                 }
-                Text(
-                    conversation.snippet.ifBlank { "No messages" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (conversation.unread) FontWeight.Medium else FontWeight.Normal,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+                if (typingLabel != null) {
+                    // Typing replaces the snippet (Garrett 2026-10-20, GM
+                    // parity): "{FirstName} is typing..." in italic.
+                    Text(
+                        typingLabel,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontStyle = FontStyle.Italic,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                } else {
+                    Text(
+                        conversation.snippet.ifBlank { "No messages" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (conversation.unread) FontWeight.Medium else FontWeight.Normal,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
                 Spacer(Modifier.width(8.dp))
                 TransportChip(conversation.transportLabel)
             }
@@ -895,6 +920,7 @@ private fun ConversationRow(
     onDelete: () -> Unit,
     isSelected: Boolean = false,
     muted: Boolean = false,
+    typingLabel: String? = null,
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
@@ -1032,15 +1058,32 @@ private fun ConversationRow(
                         )
                         Spacer(Modifier.width(6.dp))
                     }
-                    Text(
-                        conversation.snippet.ifBlank { "No messages" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = if (conversation.unread) FontWeight.Medium else FontWeight.Normal,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
+                    if (typingLabel != null) {
+                        // Typing replaces the snippet (Garrett 2026-10-20,
+                        // GM parity): "{FirstName} is typing..." in italic.
+                        // Display-only — the unread dot and the row's
+                        // position/read state are untouched.
+                        Text(
+                            typingLabel,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontStyle = FontStyle.Italic,
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    } else {
+                        Text(
+                            conversation.snippet.ifBlank { "No messages" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (conversation.unread) FontWeight.Medium else FontWeight.Normal,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
                     TransportChip(conversation.transportLabel)
                 }

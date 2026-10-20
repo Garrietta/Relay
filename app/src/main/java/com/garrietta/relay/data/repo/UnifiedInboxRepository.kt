@@ -255,6 +255,9 @@ class UnifiedInboxRepository(
             }
             var rows = 0
             var dropped = 0
+            // Own number, for the snippet prefix's group test (recipients
+            // minus self) — resolved once for the whole list.
+            val selfNorm = runCatching { ownAddress() }.getOrNull()
             cursor.use { c ->
                 val idI = c.getColumnIndex("_id")
                 val dateI = c.getColumnIndex("date")
@@ -271,12 +274,23 @@ class UnifiedInboxRepository(
                         continue
                     }
                     val providerSnippet = if (snippetI >= 0) c.getString(snippetI).orEmpty() else ""
-                    val snippet = providerSnippet.ifBlank { fallbackSnippet(threadId) }
+                    val rawSnippet = providerSnippet.ifBlank { fallbackSnippet(threadId) }
+                    val recipients = threadRecipients(threadId)
+                    // GM snippet prefixes (Garrett 2026-10-20), same rule
+                    // as the RCS path: "You: " for his latest message,
+                    // "{FirstName}: " for a group member's — from the
+                    // thread's own newest message (see latestSnippetPrefix).
+                    // Group-ness mirrors mergeThreads: recipients minus
+                    // self, more than one other.
+                    val isGroupThread =
+                        recipients.count { !isSelfAddress(it, selfNorm) } > 1
+                    val snippet = if (rawSnippet.isBlank()) rawSnippet
+                        else latestSnippetPrefix(threadId, isGroupThread) + rawSnippet
                     raw.add(
                         RawThread(
                             threadId = threadId,
                             address = address,
-                            recipients = threadRecipients(threadId),
+                            recipients = recipients,
                             date = if (dateI >= 0) c.getLong(dateI) else 0L,
                             snippet = snippet,
                             unread = !(readI >= 0 && c.getInt(readI) == 1),
@@ -404,8 +418,21 @@ class UnifiedInboxRepository(
         // Reaction traffic is not message traffic (Garrett 2026-10-19): a
         // reaction that arrives as formatted text must not render as the
         // inbox snippet — it renders as an inline badge in the thread.
-        val snippet = parseReaction(c.snippet)?.let { (emoji, _) -> "$emoji reaction" }
+        val baseSnippet = parseReaction(c.snippet)?.let { (emoji, _) -> "$emoji reaction" }
             ?: c.snippet
+        // The authoritative group flag (Garrett 2026-10-20): the server's
+        // own isGroup (Conversation field 10), with the cleaned others
+        // count as backstop — computed once here; the row, the chat header
+        // and the details page all read it, so they can't diverge.
+        val group = c.isGroup || others.size > 1
+        // GM snippet prefixes (Garrett 2026-10-20): the server's own
+        // LatestMessage fields say who sent the snippet's message —
+        // fromMe (field 2) and displayName (field 4). "You: " when the
+        // latest is his, "{FirstName}: " when it's a group member's, bare
+        // text for a 1:1 — exactly Google Messages' rendering. Applied to
+        // the final snippet text, reaction form included.
+        val snippet = if (baseSnippet.isBlank()) baseSnippet
+            else snippetPrefix(c.latestFromMe, group, c.latestSenderName) + baseSnippet
         return Conversation(
             threadId = ("rcs:" + c.id).hashCode().toLong(),
             address = address,
@@ -429,13 +456,7 @@ class UnifiedInboxRepository(
                     photoUri = contactLookup.photoUri(it.number),
                 )
             },
-            // The authoritative group flag (Garrett 2026-10-20): the
-            // server's own isGroup (Conversation field 10), with the
-            // cleaned others count as backstop — the chat header and
-            // details page read THIS (via the nav args), never a
-            // re-derived count of their own, so the surfaces can't
-            // diverge the way "No Dad" did.
-            isGroup = c.isGroup || others.size > 1,
+            isGroup = group,
         )
     }
 
@@ -1287,6 +1308,69 @@ class UnifiedInboxRepository(
     }
 
     // ---- provider helpers ----
+
+    /**
+     * GM snippet prefix for a Telephony thread (Garrett 2026-10-20): the
+     * thread's newest message across its SMS and MMS legs decides —
+     * outgoing -> "You: "; incoming in a group -> "{FirstName}: " with
+     * the sender resolved through contacts (never a bare number);
+     * otherwise "". Same per-thread latest-message query pattern as
+     * [latestTransportLabel]; the prefix describes the same message the
+     * snippet text came from.
+     */
+    private fun latestSnippetPrefix(threadId: Long, isGroup: Boolean): String {
+        var smsDate = -1L
+        var smsFromMe = false
+        var smsAddress: String? = null
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://sms"),
+                arrayOf("type", "address", "date"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    // Telephony.Sms types: 1 = inbox; 2..6 are the sent
+                    // side (sent, draft, outbox, failed, queued).
+                    smsFromMe = c.getInt(0) != 1
+                    smsAddress = c.getString(1)
+                    smsDate = c.getLong(2)
+                }
+            }
+        } catch (_: Exception) { }
+        var mmsDate = -1L
+        var mmsFromMe = false
+        var mmsId = -1L
+        try {
+            context.contentResolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id", "date", "msg_box"), "thread_id=?", arrayOf(threadId.toString()),
+                "date DESC LIMIT 1",
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    mmsId = c.getLong(0)
+                    mmsDate = c.getLong(1) * 1000L
+                    // Telephony.Mms boxes: 1 = inbox; 2..5 the sent side.
+                    mmsFromMe = c.getInt(2) != 1
+                }
+            }
+        } catch (_: Exception) { }
+        val fromMe: Boolean
+        val senderAddress: String?
+        if (mmsDate > smsDate) {
+            fromMe = mmsFromMe
+            senderAddress = if (mmsId >= 0) mmsAddress(mmsId) else null
+        } else {
+            fromMe = smsFromMe
+            senderAddress = smsAddress
+        }
+        if (fromMe) return "You: "
+        if (!isGroup) return ""
+        val sender = senderAddress?.takeIf { it.isNotBlank() } ?: return ""
+        // Contact name or nothing — never prefix with a bare number.
+        val name = contactLookup.displayName(sender)
+        if (name.isBlank() || name == sender) return ""
+        return snippetPrefix(latestFromMe = false, isGroup = true, latestSenderName = name)
+    }
 
     /**
      * Newest message text for [threadId], used when the conversations

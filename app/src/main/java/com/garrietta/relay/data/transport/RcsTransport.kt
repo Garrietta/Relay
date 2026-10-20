@@ -42,6 +42,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
@@ -144,16 +145,35 @@ class RcsTransport(context: Context) : Transport {
     private val mediaUnhealable = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
-     * Remote typing state (Garrett 2026-10-19): the paired web protocol
-     * delivers `UpdateEvents.typingEvent` on the long-poll — the wire
-     * carries it, but nothing consumed it until now. Emitted as
-     * (conversationId, typing, wall-clock ms) for the chat UI's typing
-     * indicator. The event carries no sender id, so groups show a generic
-     * indicator.
+     * Remote typing state (Garrett 2026-10-19; typist identity 2026-10-20):
+     * the paired web protocol delivers `UpdateEvents.typingEvent` on the
+     * long-poll. TypingData carries the typist's phone number (its User
+     * payload, field 2) — the #128 decode dropped it, which is why groups
+     * used to show a generic indicator; it is decoded now and resolved
+     * against the conversation's participants by the UI layer.
      */
-    data class TypingState(val conversationId: String, val typing: Boolean, val atMs: Long)
-    private val _typingEvents = MutableSharedFlow<TypingState>(extraBufferCapacity = 32)
-    val typingEvents: SharedFlow<TypingState> = _typingEvents.asSharedFlow()
+    data class TypingState(
+        val conversationId: String,
+        val typing: Boolean,
+        val atMs: Long,
+        /** Typist's phone number from the wire; null when the server sent none. */
+        val typistNumber: String? = null,
+    )
+
+    /**
+     * THE typing store (Garrett 2026-10-20): the one source both the
+     * inbox rows ("{FirstName} is typing...") and the in-chat indicator
+     * read — no divergent per-surface logic. Keyed by server conversation
+     * id; an entry exists only while that conversation has an active
+     * typist. An entry is removed when the server sends typing=false,
+     * when a message lands in the conversation, or when it goes
+     * [TYPING_TTL_MS] without a refresh (the server doesn't reliably send
+     * typing=false — app backgrounded, connection drop — so a state can
+     * never stick). Display-only: nothing here reorders rows or touches
+     * read state.
+     */
+    private val _typingStates = MutableStateFlow<Map<String, TypingState>>(emptyMap())
+    val typingStates: StateFlow<Map<String, TypingState>> = _typingStates.asStateFlow()
 
     /** Last-good server conversation list — the paired inbox's source. */
     fun currentRcsConversations(): List<RcsConversation> = _rcsConversations.value
@@ -379,9 +399,23 @@ class RcsTransport(context: Context) : Transport {
             session.events.collect { event ->
                 when (event) {
                     is SessionEvent.Typing -> {
-                        _typingEvents.tryEmit(
-                            TypingState(event.conversationId, event.typing, System.currentTimeMillis())
-                        )
+                        // Feed THE typing store (inbox rows + in-chat
+                        // indicator both read it). typing=true (re)arms the
+                        // entry with the wire's typist number; typing=false
+                        // removes it immediately.
+                        if (event.conversationId.isNotBlank()) {
+                            _typingStates.value =
+                                if (event.typing) {
+                                    _typingStates.value + (event.conversationId to TypingState(
+                                        conversationId = event.conversationId,
+                                        typing = true,
+                                        atMs = System.currentTimeMillis(),
+                                        typistNumber = event.typistNumber,
+                                    ))
+                                } else {
+                                    _typingStates.value - event.conversationId
+                                }
+                        }
                     }
                     is SessionEvent.AuthExpired, SessionEvent.Unpaired -> {
                         // One recovery attempt before declaring the pairing
@@ -414,6 +448,14 @@ class RcsTransport(context: Context) : Transport {
         }
         scope.launch {
             session.incoming.collect { msg ->
+                // A landed message ends typing in that conversation (GM
+                // semantics) — clear the store entry the moment it arrives
+                // instead of waiting for the TTL.
+                if (msg.conversationId.isNotBlank() &&
+                    _typingStates.value.containsKey(msg.conversationId)
+                ) {
+                    _typingStates.value = _typingStates.value - msg.conversationId
+                }
                 _incoming.emit(
                     IncomingMessage(
                         transportId = id,
@@ -423,6 +465,20 @@ class RcsTransport(context: Context) : Transport {
                         isMms = false,
                     ),
                 )
+            }
+        }
+        // Typing TTL prune: the server doesn't reliably send typing=false,
+        // so stale entries expire here — one enforcement point for every
+        // surface that reads the store.
+        scope.launch {
+            while (true) {
+                delay(1_000)
+                val now = System.currentTimeMillis()
+                val current = _typingStates.value
+                if (current.isNotEmpty()) {
+                    val fresh = current.filterValues { now - it.atMs <= TYPING_TTL_MS }
+                    if (fresh.size != current.size) _typingStates.value = fresh
+                }
             }
         }
     }
@@ -1646,6 +1702,13 @@ class RcsTransport(context: Context) : Transport {
         private const val FINISH_MAX_ATTEMPTS = 3
         private const val FINISH_ATTEMPT_TIMEOUT_MS = 45_000L
         private const val FINISH_TIMEOUT_MS = 120_000L
+        /**
+         * Typing-state TTL: typing=true events repeat while the typist
+         * types, so a state that goes this long without a refresh is
+         * stale and pruned (the same 15s the in-chat indicator has always
+         * used, now enforced once, in the store).
+         */
+        private const val TYPING_TTL_MS = 15_000L
     }
 }
 

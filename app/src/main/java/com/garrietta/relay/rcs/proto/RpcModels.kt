@@ -88,6 +88,19 @@ data class RcsConversation(
      * IDs excluding me — the server's own answer, no heuristics needed.
      */
     val otherParticipantIds: List<String> = emptyList(),
+    /**
+     * conversations.LatestMessage.fromMe (field 2 of Conversation field 4):
+     * the server's own direction flag for the snippet's message — drives
+     * the inbox "You: " snippet prefix (Garrett 2026-10-20, GM parity).
+     */
+    val latestFromMe: Boolean = false,
+    /**
+     * conversations.LatestMessage.displayName (field 4 of Conversation
+     * field 4): the latest message's sender display name as the server
+     * renders it — drives the group "{FirstName}: " snippet prefix.
+     * Blank when the server sent none.
+     */
+    val latestSenderName: String = "",
 ) {
     /**
      * The REAL per-conversation transport from conversations.Conversation
@@ -1095,7 +1108,20 @@ fun decodeMessageEvent(
 sealed interface UpdateEvent {
     data class Messages(val messages: List<RcsMessage>) : UpdateEvent
     data class Conversations(val conversations: List<RcsConversation>) : UpdateEvent
-    data class Typing(val conversationId: String, val typing: Boolean) : UpdateEvent
+
+    /**
+     * events.TypingEvent{2: TypingData}. TypingData is
+     * {1: conversationID, 2: User, 3: type (0=stopped, 1=started)} and
+     * User is {1: int64 (opaque), 2: number} — the typist's phone number
+     * IS on the wire (Garrett 2026-10-20: the inbox must name the typist,
+     * groups included). [typistNumber] is null only when the server sent
+     * no User payload.
+     */
+    data class Typing(
+        val conversationId: String,
+        val typing: Boolean,
+        val typistNumber: String? = null,
+    ) : UpdateEvent
     data object Other : UpdateEvent
 }
 
@@ -1109,17 +1135,22 @@ fun decodeUpdateEvents(m: Map<Int, List<FieldVal>>): UpdateEvent {
         return UpdateEvent.Typing(
             conversationId = d?.firstStr(1).orEmpty(),
             typing = d?.firstVarint(3)?.toInt() == 1,
+            typistNumber = d?.firstMsg(2)?.firstStr(2)?.takeIf { it.isNotBlank() },
         )
     }
     return UpdateEvent.Other
 }
 
 fun decodeConversation(m: Map<Int, List<FieldVal>>): RcsConversation {
+    // Conversation field 4 is a LatestMessage (NOT a full Message):
+    // {1: displayContent, 2: fromMe, 4: displayName, 5: status}.
     val latest = m.firstMsg(4)
     return RcsConversation(
         id = m.firstStr(1).orEmpty(),
         name = m.firstStr(2).orEmpty(),
         snippet = latest?.firstStr(1).orEmpty(),
+        latestFromMe = (latest?.firstVarint(2) ?: 0L) != 0L,
+        latestSenderName = latest?.firstStr(4).orEmpty(),
         timestampMs = normalizeServerTimestamp(m.firstVarint(5) ?: 0L),
         unread = m.firstBool(6) ?: false,
         isGroup = m.firstBool(10) ?: false,

@@ -60,8 +60,6 @@ class ChatViewModel(
         const val HISTORY_DAYS = 21L
         /** Safety cap on the background deep fill (messages). */
         const val MAX_HISTORY_COUNT = 2000L
-        /** Remote typing indicator auto-clear (server may never send false). */
-        const val TYPING_TIMEOUT_MS = 15_000L
         /** Pacing between forwarded sends so the target thread keeps order. */
         const val FORWARD_PACING_MS = 300L
     }
@@ -75,14 +73,14 @@ class ChatViewModel(
     val sendError: StateFlow<String?> = _sendError
 
     /**
-     * Remote typing indicator (Garrett 2026-10-19): the paired web
-     * protocol delivers typingEvent on the long-poll. True while the
-     * remote party is typing; auto-clears on typing=false or after the
-     * timeout (the server doesn't always send the false).
+     * Remote typing indicator (Garrett 2026-10-19): true while this
+     * conversation has an entry in the transport's ONE typing store
+     * (RcsTransport.typingStates — the same store the inbox rows read).
+     * Expiry (typing=false, message arrival, TTL) is enforced in the
+     * store, not here.
      */
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping
-    private var lastTypingTrueMs = 0L
 
     /**
      * Long-press bubble selection (M3E shape-as-state: selected bubbles
@@ -452,32 +450,14 @@ class ChatViewModel(
                 publishMessages(repository.rcsMessages(conversationId, rcsHistoryCount))
             }
         }
-        // Remote typing: conversation-scoped; the wire event carries no
-        // sender id, so groups show a generic indicator.
+        // Remote typing: read the transport's typing store — the same
+        // store the inbox rows read (Garrett 2026-10-20: one source, no
+        // divergent logic). The wire event carries the typist's number;
+        // the in-chat surface only needs the boolean for this
+        // conversation. The store enforces expiry.
         viewModelScope.launch {
-            repository.rcsTransport.typingEvents.collect { te ->
-                if (te.conversationId != conversationId) {
-                    return@collect
-                }
-                if (te.typing) {
-                    lastTypingTrueMs = te.atMs
-                    _isTyping.value = true
-                } else {
-                    _isTyping.value = false
-                }
-            }
-        }
-        // Typing timeout watchdog: the server doesn't reliably send
-        // typing=false (app backgrounded, connection drop), so a stale
-        // true clears itself.
-        viewModelScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(2_000)
-                if (_isTyping.value &&
-                    System.currentTimeMillis() - lastTypingTrueMs > TYPING_TIMEOUT_MS
-                ) {
-                    _isTyping.value = false
-                }
+            repository.rcsTransport.typingStates.collect { states ->
+                _isTyping.value = conversationId in states
             }
         }
         if (address.isNotBlank()) loadContactTheme(address)

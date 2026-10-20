@@ -767,7 +767,9 @@ class RcsSession(context: Context) {
                                 when (update) {
                                     is UpdateEvent.Messages -> update.messages.forEach { _incoming.emit(it) }
                                     is UpdateEvent.Conversations -> _events.emit(SessionEvent.ConversationsChanged(update.conversations))
-                                    is UpdateEvent.Typing -> _events.emit(SessionEvent.Typing(update.conversationId, update.typing))
+                                    is UpdateEvent.Typing -> _events.emit(
+                                        SessionEvent.Typing(update.conversationId, update.typing, update.typistNumber)
+                                    )
                                     else -> Unit
                                 }
                             }
@@ -851,7 +853,12 @@ sealed interface SessionEvent {
     data object Unpaired : SessionEvent
     data object TokenRefreshed : SessionEvent
     data class ConversationsChanged(val conversations: List<RcsConversation>) : SessionEvent
-    data class Typing(val conversationId: String, val typing: Boolean) : SessionEvent
+    data class Typing(
+        val conversationId: String,
+        val typing: Boolean,
+        /** Typist's phone number from TypingData's User payload; null when absent. */
+        val typistNumber: String? = null,
+    ) : SessionEvent
 }
 
 open class RcsException(message: String, cause: Throwable? = null) : Exception(message, cause)

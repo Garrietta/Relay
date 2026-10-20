@@ -9,6 +9,7 @@ import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.data.repo.MuteStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
+import com.garrietta.relay.data.repo.typingLabel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -97,6 +98,37 @@ class InboxViewModel(
                     it.snippet.contains(q, ignoreCase = true)
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Inbox typing labels (Garrett 2026-10-20): threadId -> "{FirstName}
+     * is typing..." for every conversation with an active typist in the
+     * transport's ONE typing store (the same store the in-chat indicator
+     * reads). The typist is resolved from the wire's TypingData number
+     * against the row's own participants. Display-only — derived from
+     * the unfiltered conversation list so a typing chat shows its label
+     * in every category/search view, and typing never reorders rows or
+     * touches read state.
+     */
+    val typingLabels: StateFlow<Map<Long, String>> =
+        combine(
+            repository.conversations,
+            repository.rcsTransport.typingStates,
+        ) { list, states ->
+            if (states.isEmpty()) {
+                emptyMap()
+            } else {
+                val byRcsId = list.mapNotNull { c ->
+                    c.rcsConversationId?.let { it to c }
+                }.toMap()
+                val out = mutableMapOf<Long, String>()
+                for ((rcsId, state) in states) {
+                    val conv = byRcsId[rcsId] ?: continue
+                    val label = typingLabel(conv.participants, state.typistNumber)
+                    if (label != null) out[conv.threadId] = label
+                }
+                out
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     /**
      * Verbatim RCS sync errors (paired mode). Garrett has no logcat access,

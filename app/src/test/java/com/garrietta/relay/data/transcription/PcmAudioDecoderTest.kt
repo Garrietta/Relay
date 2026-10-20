@@ -19,12 +19,12 @@ class PcmAudioDecoderTest {
         assertEquals("WAVE", String(wav, 8, 4, Charsets.US_ASCII))
         assertEquals("fmt ", String(wav, 12, 4, Charsets.US_ASCII))
         assertEquals(16, bb.getInt(16))
-        assertEquals(1, bb.getShort(20)) // PCM
-        assertEquals(1, bb.getShort(22)) // mono
+        assertEquals(1, bb.getShort(20).toInt()) // PCM
+        assertEquals(1, bb.getShort(22).toInt()) // mono
         assertEquals(16_000, bb.getInt(24))
         assertEquals(32_000, bb.getInt(28)) // byte rate
-        assertEquals(2, bb.getShort(32)) // block align
-        assertEquals(16, bb.getShort(34)) // bits per sample
+        assertEquals(2, bb.getShort(32).toInt()) // block align
+        assertEquals(16, bb.getShort(34).toInt()) // bits per sample
         assertEquals("data", String(wav, 36, 4, Charsets.US_ASCII))
         assertEquals(3200, bb.getInt(40))
         // Payload passes through untouched.

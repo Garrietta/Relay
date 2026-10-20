@@ -13,6 +13,9 @@ import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.notifications.MessageNotifications
+import com.garrietta.relay.notifications.MissedMessage
+import com.garrietta.relay.notifications.MissedMessageStore
+import com.garrietta.relay.notifications.notificationBodyText
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +47,15 @@ class RelayApp : Application() {
 
     /** Per-conversation true mute for notifications (see MuteStore). */
     val muteStore: MuteStore by lazy { MuteStore(this) }
+
+    /**
+     * Per-conversation backlog of missed messages behind the posted
+     * notifications (see MissedMessageStore): appended only at the
+     * [handleIncomingRcsMessage] choke point, cleared exactly where a
+     * conversation's notification is cancelled. In-memory, with this
+     * Application's lifetime — the same as [notifiedMessageIds].
+     */
+    val missedMessageStore: MissedMessageStore = MissedMessageStore()
 
     /** Per-conversation chat themes — local presentation (see ChatThemeStore). */
     val chatThemeStore: ChatThemeStore by lazy { ChatThemeStore(this) }
@@ -256,15 +268,15 @@ class RelayApp : Application() {
                 val convRow = repository.conversations.value
             .firstOrNull { msg.conversationId in it.allRcsIds() }
         val convTitle = convRow?.displayName?.ifBlank { null } ?: "New message"
-        val body = msg.body.ifBlank {
-            when {
-                msg.media != null -> "\uD83D\uDCF7 Photo"
-                // A bare location pin (no text part rode along): name it.
-                msg.location != null -> "\uD83D\uDCCD " +
-                    (msg.location?.name?.ifBlank { null } ?: "Location")
-                else -> "New message"
-            }
-        }
+        // Placeholder conventions shared with the inbox snippet (a
+        // media message reads "📷 Photo"); the derivation is pure and
+        // unit tested with the missed-message store it feeds.
+        val body = notificationBodyText(
+            body = msg.body,
+            hasMedia = msg.media != null,
+            hasLocation = msg.location != null,
+            locationName = msg.location?.name,
+        )
         // Group notifications identify the SENDER (Garrett 2026-10-19
         // 22:00, Google Messages parity): the message's participant (via
         // participantId) is resolved to their contact name + photo; the
@@ -299,6 +311,25 @@ class RelayApp : Application() {
         val photoUri = senderNumber.ifBlank { null }?.let {
             runCatching { repository.resolvePhotoUri(it) }.getOrNull()
         }
+        // Missed-message backlog (Garrett 2026-10-20): every notified
+        // message joins its conversation's backlog so the ONE posted
+        // notification can expand to everything missed since the last
+        // read — not just this latest message. Appending HERE, after
+        // all the skip decisions above, means anything that never
+        // notifies (muted, open chat, own echo) never accumulates.
+        // The backlog is cleared at the notification-cancel seams in
+        // MessageNotifications.cancelForConversation.
+        val missed = missedMessageStore.append(
+            msg.conversationId,
+            MissedMessage(
+                messageId = msg.id,
+                senderName = senderName,
+                senderNumber = senderNumber,
+                body = body,
+                timestampMs = msg.timestampMs,
+                photoUri = photoUri,
+            ),
+        )
         MessageNotifications.showIncoming(
             context = this@RelayApp,
             conversationId = msg.conversationId,
@@ -310,6 +341,7 @@ class RelayApp : Application() {
             timestamp = msg.timestampMs,
             photoUri = photoUri,
             isGroup = isGroup,
+            missed = missed,
         )
         // Garrett 2026-10-19: a posted notification FORCES the RCS refresh
         // (the same one the Diagnostics Refresh button does) so the inbox

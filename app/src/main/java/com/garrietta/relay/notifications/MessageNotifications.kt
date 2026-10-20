@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.garrietta.relay.MainActivity
 import com.garrietta.relay.R
+import com.garrietta.relay.RelayApp
 
 /**
  * Incoming-message notifications for Relay itself. (The old comment here
@@ -46,8 +47,17 @@ object MessageNotifications {
      * notification tap — retires its shade entry. (A tapped
      * notification also auto-cancels itself; this covers the manual
      * opens that used to leave it sitting in the shade as unread.)
+     *
+     * This is also THE seam that clears the conversation's
+     * missed-message backlog (Garrett 2026-10-20): every path that
+     * retires the notification — chat opens in both hosts, the
+     * Mark-as-read action, the inline Reply action — funnels through
+     * here, so the backlog can never outlive its notification or
+     * resurrect after a read.
      */
     fun cancelForConversation(context: Context, conversationId: String) {
+        (context.applicationContext as? RelayApp)
+            ?.missedMessageStore?.clear(conversationId)
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.cancel(notificationIdFor(conversationId))
     }
@@ -131,6 +141,12 @@ object MessageNotifications {
      * conversation-name-as-sender the old build showed. The sender's photo
      * is clipped to their per-contact expressive M3E shape
      * ([NotificationAvatar]); Mark as read + inline Reply actions included.
+     *
+     * [missed] is the conversation's full missed-message backlog
+     * (oldest → newest, ending with this message): the MessagingStyle
+     * carries ALL of it, so expanding the notification shows every
+     * message missed since the last read (Garrett 2026-10-20), while
+     * the collapsed form still glances the latest one.
      */
     fun showIncoming(
         context: Context,
@@ -143,6 +159,7 @@ object MessageNotifications {
         timestamp: Long,
         photoUri: String? = null,
         isGroup: Boolean = false,
+        missed: List<MissedMessage> = emptyList(),
     ) {
         // Android 13+: posting without the runtime grant throws. Record the
         // block (visible in Diagnostics) and no-op; never crash.
@@ -184,7 +201,39 @@ object MessageNotifications {
             .apply { avatar?.let { setIcon(IconCompat.createWithBitmap(it)) } }
             .build()
         val style = NotificationCompat.MessagingStyle(sender)
-            .addMessage(body, timestamp, sender)
+        if (missed.isEmpty()) {
+            style.addMessage(body, timestamp, sender)
+        } else {
+            // ALL missed messages, oldest → newest (Garrett
+            // 2026-10-20): the collapsed shade still glances the
+            // latest message exactly as before; expanding the
+            // notification lists the whole backlog. Each message
+            // carries its OWN sender as a Person — in a group, Mom's
+            // messages are Mom's and Haley's are Haley's, each with
+            // their shaped avatar — while the style's user stays the
+            // latest sender, as the single-message build had it.
+            // Persons are built once per distinct sender.
+            val persons = HashMap<String, Person>()
+            fun personFor(m: MissedMessage): Person {
+                if (m.senderName == senderName && m.senderNumber == senderNumber) {
+                    return sender
+                }
+                val key = m.senderNumber.ifBlank { m.senderName }
+                return persons.getOrPut(key) {
+                    val icon = NotificationAvatar.shapedAvatar(
+                        context,
+                        m.photoUri,
+                        shapeKey = m.senderNumber.ifBlank { m.senderName },
+                        displayName = m.senderName,
+                    )
+                    Person.Builder()
+                        .setName(m.senderName)
+                        .apply { icon?.let { setIcon(IconCompat.createWithBitmap(it)) } }
+                        .build()
+                }
+            }
+            missed.forEach { m -> style.addMessage(m.body, m.timestampMs, personFor(m)) }
+        }
         if (isGroup) style.conversationTitle = conversationTitle
         val notifId = conversationId.hashCode()
         // Mark as read.

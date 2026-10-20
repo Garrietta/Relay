@@ -1,6 +1,5 @@
 package com.garrietta.relay.notifications
 
-import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -18,12 +17,11 @@ class NotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext as? RelayApp ?: return
         val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
-        val notifId = intent.getIntExtra(EXTRA_NOTIF_ID, 0)
         when (intent.action) {
             ACTION_MARK_READ -> {
                 app.appScope.launch {
                     runCatching { app.repository.markRcsRead(conversationId) }
-                    cancel(context, notifId)
+                    cancel(context, conversationId)
                 }
             }
             ACTION_REPLY -> {
@@ -34,14 +32,27 @@ class NotificationActionReceiver : BroadcastReceiver() {
                     runCatching {
                         app.repository.sendRcs(conversationId, text, UUID.randomUUID().toString())
                     }
-                    cancel(context, notifId)
+                    // A sent reply means the conversation is read:
+                    // retire the notification AND its missed-message
+                    // backlog, same as Mark as read (Garrett
+                    // 2026-10-20 — the backlog clears exactly where
+                    // the notification is cancelled).
+                    cancel(context, conversationId)
                 }
             }
         }
     }
 
-    private fun cancel(context: Context, notifId: Int) {
-        context.getSystemService(NotificationManager::class.java)?.cancel(notifId)
+    /**
+     * Retires the conversation's notification through the ONE seam
+     * that also clears its missed-message backlog —
+     * [MessageNotifications.cancelForConversation] cancels the same
+     * id this receiver used to cancel directly
+     * (notificationIdFor(conversationId) == the EXTRA_NOTIF_ID the
+     * actions were built with).
+     */
+    private fun cancel(context: Context, conversationId: String) {
+        MessageNotifications.cancelForConversation(context, conversationId)
     }
 
     companion object {

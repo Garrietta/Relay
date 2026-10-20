@@ -130,6 +130,7 @@ class ChatHistoryCache(dir: File) {
                 "msize" to (a?.size?.toString() ?: ""),
                 "mtmid" to (a?.thumbnailMediaId ?: ""),
                 "mtkey" to b64(a?.thumbnailKey ?: byteArrayOf()),
+                "mname" to (a?.name ?: ""),
             )
             pairs.joinToString(",", "{", "}") { (k, v) -> "\"$k\":\"${escape(v)}\"" }
         }
@@ -163,6 +164,7 @@ class ChatHistoryCache(dir: File) {
                 inlineData = null, // text-only cache: never image bytes
                 thumbnailMediaId = get("mtmid").orEmpty(),
                 thumbnailKey = unb64(get("mtkey").orEmpty()),
+                name = get("mname").orEmpty(),
             )
         return Message(
             id = get("id")?.toLongOrNull() ?: return null,

@@ -11,9 +11,11 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -51,6 +53,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -279,6 +282,13 @@ fun ChatScreen(
     // A null option renders EXACTLY today's look; nothing here touches
     // the wire, the inbox, or other conversations.
     val themeStore = remember { (chatContext.applicationContext as RelayApp).chatThemeStore }
+    // Sticker recents (Garrett 2026-10-20, feature queue 5/7): the
+    // composer's smiley panel surfaces last-used stickers first.
+    val stickerStore = remember { (chatContext.applicationContext as RelayApp).stickerRecentsStore }
+    val recentStickerIds by stickerStore.recentIds.collectAsState()
+    val recentStickerDefs = remember(recentStickerIds) {
+        recentStickerIds.mapNotNull { StickerPack.byId(it) }
+    }
     val chatThemes by themeStore.themes.collectAsState()
     val themeKey = remember(rcsConversationId, threadId) {
         CategoryStore.conversationKey(rcsConversationId, threadId)
@@ -642,6 +652,11 @@ fun ChatScreen(
                         onAttach = { uri ->
                             viewModel.sendAttachment(uri, chatContext.contentResolver)
                         },
+                        onSticker = { def ->
+                            viewModel.sendSticker(def)
+                            stickerStore.record(def.id)
+                        },
+                        recentStickers = recentStickerDefs,
                     )
                 }
             }
@@ -1402,6 +1417,15 @@ private fun MediaBubble(
     val loadedBounds = if (loadedBytes != null && media.isImage) {
         remember(message.id) { decodeImageBounds(loadedBytes) }
     } else null
+    // Sticker rendering (Garrett 2026-10-20, feature queue 5/7): a
+    // Relay-tagged sticker send — or any small transparent PNG/WebP —
+    // renders WITHOUT the bubble background at sticker size instead of
+    // the uniform photo treatment (see Stickers.kt for the rule).
+    val stickerLook = if (loadedBytes != null && media.isImage) {
+        remember(message.id, loadedBytes) {
+            looksLikeSticker(media, loadedBounds, loadedBytes)
+        }
+    } else false
 
     // The media + caption block, emitted into whichever layout hosts it
     // below: the plain full-width column, or — for group-incoming
@@ -1417,8 +1441,14 @@ private fun MediaBubble(
             Box(
                 modifier = Modifier
                     .widthIn(max = maxBubbleWidth)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    // Stickers float on the thread: no bubble
+                    // background, no rounded-rect clip.
+                    .then(
+                        if (stickerLook) Modifier
+                        else Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    )
                 .combinedClickable(
                     onClick = {
                         if (selectionActive) {
@@ -1504,6 +1534,20 @@ private fun MediaBubble(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(16.dp),
+                        )
+                    } else if (stickerLook) {
+                        // Sticker: natural size with the long edge
+                        // capped — never the 0.66-width photo treatment,
+                        // never upscaled past its pixels.
+                        val density = LocalDensity.current
+                        val naturalW = with(density) { bounds.first.toDp() }
+                        val naturalH = with(density) { bounds.second.toDp() }
+                        val (w, h) = stickerDisplaySize(naturalW, naturalH)
+                        AsyncImage(
+                            model = b,
+                            contentDescription = "Sticker",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(w, h),
                         )
                     } else {
                         val density = LocalDensity.current
@@ -2376,9 +2420,16 @@ private fun Composer(
      * 2026-10-19: [+] finally SENDS — the "coming soon" toast is gone for
      * the four picker options; only the voice-mic stub keeps it). */
     onAttach: (Uri) -> Unit = {},
+    /** Sends a starter-pack sticker (Garrett 2026-10-20, feature queue
+     * 5/7): tapping a sticker in the smiley panel sends it immediately
+     * through the attachment pipeline. */
+    onSticker: (StickerDef) -> Unit = {},
+    /** Recently used stickers, most recent first (smiley panel). */
+    recentStickers: List<StickerDef> = emptyList(),
 ) {
     var text by remember { mutableStateOf("") }
     var showAttachSheet by remember { mutableStateOf(false) }
+    var showStickers by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
     val focusManager = LocalFocusManager.current
@@ -2393,6 +2444,18 @@ private fun Composer(
     val expanded = focused
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
+    // The sticker panel takes the keyboard's place, so it takes the
+    // keyboard's height too: remember the last real IME height and
+    // reuse it when the panel opens (by then the IME inset itself is
+    // already animating to zero because opening the panel drops focus).
+    val density = LocalDensity.current
+    var lastImeHeight by remember { mutableStateOf(0.dp) }
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    LaunchedEffect(imeBottomPx) {
+        if (imeBottomPx > 0) lastImeHeight = with(density) { imeBottomPx.toDp() }
+    }
+    val stickerPanelHeight =
+        if (lastImeHeight in 180.dp..440.dp) lastImeHeight else 300.dp
     // Attachment pickers (Garrett 2026-10-19): the [+] sheet's four
     // options launch real pickers. GIFs come through as image/gif and are
     // sent with their bytes untouched (never transcoded to JPEG), so they
@@ -2439,6 +2502,7 @@ private fun Composer(
         }
     }
 
+    Column {
     Surface(
         shape = RoundedCornerShape(32.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -2568,18 +2632,30 @@ private fun Composer(
                         ),
                         modifier = Modifier
                             .weight(1f)
-                            .onFocusChanged { focused = it.isFocused },
+                            .onFocusChanged { state ->
+                                focused = state.isFocused
+                                // Typing wins: focusing the field
+                                // closes the sticker panel.
+                                if (state.isFocused) showStickers = false
+                            },
                         minLines = 1,
                         maxLines = 5,
                     )
-                    // Smiley: emoji picker stub for now.
+                    // Smiley: toggles the sticker panel (Garrett
+                    // 2026-10-20, feature queue 5/7). Opening it drops
+                    // text focus so the keyboard makes room; tapping
+                    // the text field closes it again.
                     IconButton(
-                        onClick = onAttachmentSoon,
+                        onClick = {
+                            val opening = !showStickers
+                            showStickers = opening
+                            if (opening) focusManager.clearFocus()
+                        },
                         modifier = Modifier.requiredSize(40.dp),
                     ) {
                         Icon(
                             Icons.Filled.SentimentSatisfied,
-                            contentDescription = "Emoji",
+                            contentDescription = "Stickers",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(22.dp),
                         )
@@ -2621,6 +2697,29 @@ private fun Composer(
                 }
             }
         }
+    }
+
+    // Sticker panel (Garrett 2026-10-20, feature queue 5/7): springs
+    // open under the composer pill at keyboard height; tapping a
+    // sticker sends it immediately and the panel stays up for
+    // follow-ups — the smiley or the text field closes it.
+    AnimatedVisibility(
+        visible = showStickers,
+        enter = expandVertically(
+            expandFrom = Alignment.Top,
+            animationSpec = RelaySprings.bouncy(),
+        ) + fadeIn(),
+        exit = shrinkVertically(
+            shrinkTowards = Alignment.Top,
+            animationSpec = tween(180),
+        ) + fadeOut(animationSpec = tween(120)),
+    ) {
+        StickerPanel(
+            recents = recentStickers,
+            onPick = { def -> onSticker(def) },
+            modifier = Modifier.height(stickerPanelHeight),
+        )
+    }
     }
 
     if (showAttachSheet) {

@@ -742,7 +742,6 @@ class ChatViewModel(
         _sending.value = true
         _sendError.value = null
         viewModelScope.launch {
-            var tmpId: String? = null
             try {
                 val mime = resolver.getType(uri) ?: "application/octet-stream"
                 var name = "attachment"
@@ -755,90 +754,131 @@ class ChatViewModel(
                 if (bytes.isEmpty()) {
                     throw IllegalStateException("media unavailable: the selected file is empty")
                 }
-                val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
-                    runCatching { repository.rcsConversationFor(address) }
-                        .getOrNull()?.also { rcsConversationId = it }
-                } else null
-                if (convId == null || repository.rcsConversationType(convId) == 1) {
-                    _sendError.value = "Attachments need an RCS chat"
-                    return@launch
-                }
-                // Image dimensions for the MediaContent dimensions field.
-                var w = 0L
-                var h = 0L
-                if (mime.startsWith("image/")) {
-                    val opts = android.graphics.BitmapFactory.Options().apply {
-                        inJustDecodeBounds = true
-                    }
-                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                    if (opts.outWidth > 0 && opts.outHeight > 0) {
-                        w = opts.outWidth.toLong(); h = opts.outHeight.toLong()
-                    }
-                }
-                tmpId = java.util.UUID.randomUUID().toString()
-                val optimistic = Message(
-                    id = -System.currentTimeMillis(),
-                    threadId = threadId,
-                    address = "",
-                    body = "",
-                    date = System.currentTimeMillis(),
-                    isOutgoing = true,
-                    isMms = false,
-                    read = true,
-                    tmpId = tmpId,
-                    media = com.garrietta.relay.rcs.proto.RcsMediaAttachment(
-                        mediaId = "",
-                        mimeType = mime,
-                        decryptionKey = byteArrayOf(),
-                        width = w,
-                        height = h,
-                        size = bytes.size.toLong(),
-                        inlineData = bytes,
-                    ),
-                    deliveryStatus = DeliveryStatus.SENDING,
-                    uploadProgress = 0f,
-                )
-                pendingOptimistic[tmpId] = optimistic
-                setMessages((_messages.value + optimistic).sortedByDescending { it.date })
-                val uploaded = repository.uploadRcsMedia(bytes, mime, name) { p ->
-                    val cur = _messages.value
-                    val idx = cur.indexOfFirst { it.tmpId == tmpId }
-                    if (idx >= 0) {
-                        setMessages(cur.toMutableList().apply {
-                            this[idx] = this[idx].copy(uploadProgress = p)
-                        })
-                    }
-                }
-                when (val outcome = repository.sendRcsMedia(
-                    convId, uploaded.copy(width = w, height = h), "", tmpId,
-                )) {
-                    is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
-                        val cur = _messages.value
-                        val idx = cur.indexOfFirst { it.tmpId == tmpId }
-                        if (idx >= 0) {
-                            setMessages(cur.toMutableList().apply {
-                                this[idx] = this[idx].copy(uploadProgress = null)
-                            })
-                        }
-                        pendingOptimistic[tmpId]?.let {
-                            pendingOptimistic[tmpId] = it.copy(uploadProgress = null)
-                        }
-                    }
-                    is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
-                        pendingOptimistic.remove(tmpId)
-                        setMessages(_messages.value.filterNot { it.tmpId == tmpId })
-                        _sendError.value = outcome.reason
-                    }
-                }
+                sendMediaBytes(bytes, mime, name)
             } catch (e: Exception) {
-                if (tmpId != null) {
-                    pendingOptimistic.remove(tmpId)
-                    setMessages(_messages.value.filterNot { it.tmpId == tmpId })
-                }
                 _sendError.value = e.message ?: "Attachment send failed"
             } finally {
                 _sending.value = false
             }
+        }
+    }
+
+    /**
+     * Sends a starter-pack sticker (Garrett 2026-10-20, feature queue
+     * 5/7): the artwork is rasterized to a transparent PNG in code (see
+     * [StickerRenderer]) and sent through the exact same media pipeline
+     * as a photo attachment — optimistic bubble, live upload progress,
+     * verbatim failures. The upload's file name is the sticker tag
+     * ([stickerFileName]) that receiving Relays recognize. RCS-only,
+     * exactly like photo sends: an SMS chat gets the same "Attachments
+     * need an RCS chat" refusal (Relay never sends MMS).
+     */
+    fun sendSticker(def: StickerDef) {
+        if (_sending.value) return
+        _sending.value = true
+        _sendError.value = null
+        viewModelScope.launch {
+            try {
+                val bytes = kotlinx.coroutines.withContext(
+                    kotlinx.coroutines.Dispatchers.Default,
+                ) { StickerRenderer.pngBytes(def) }
+                sendMediaBytes(bytes, "image/png", stickerFileName(def))
+            } catch (e: Exception) {
+                _sendError.value = e.message ?: "Sticker send failed"
+            } finally {
+                _sending.value = false
+            }
+        }
+    }
+
+    /**
+     * The shared media-send core behind [sendAttachment] and
+     * [sendSticker]: resolves the RCS conversation, shows an optimistic
+     * bubble carrying the local bytes + live upload progress, uploads
+     * through the RCS file-transfer path, then sends the media message;
+     * the server echo replaces the optimistic bubble via tmpId. Throws
+     * with the VERBATIM reason on any failure (the optimistic bubble is
+     * removed first); callers surface it as the send error. RCS-only.
+     */
+    private suspend fun sendMediaBytes(bytes: ByteArray, mime: String, name: String) {
+        val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
+            runCatching { repository.rcsConversationFor(address) }
+                .getOrNull()?.also { rcsConversationId = it }
+        } else null
+        if (convId == null || repository.rcsConversationType(convId) == 1) {
+            throw IllegalStateException("Attachments need an RCS chat")
+        }
+        // Image dimensions for the MediaContent dimensions field.
+        var w = 0L
+        var h = 0L
+        if (mime.startsWith("image/")) {
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                w = opts.outWidth.toLong(); h = opts.outHeight.toLong()
+            }
+        }
+        val tmpId = java.util.UUID.randomUUID().toString()
+        val optimistic = Message(
+            id = -System.currentTimeMillis(),
+            threadId = threadId,
+            address = "",
+            body = "",
+            date = System.currentTimeMillis(),
+            isOutgoing = true,
+            isMms = false,
+            read = true,
+            tmpId = tmpId,
+            media = com.garrietta.relay.rcs.proto.RcsMediaAttachment(
+                mediaId = "",
+                mimeType = mime,
+                decryptionKey = byteArrayOf(),
+                width = w,
+                height = h,
+                size = bytes.size.toLong(),
+                inlineData = bytes,
+                name = name,
+            ),
+            deliveryStatus = DeliveryStatus.SENDING,
+            uploadProgress = 0f,
+        )
+        pendingOptimistic[tmpId] = optimistic
+        setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+        try {
+            val uploaded = repository.uploadRcsMedia(bytes, mime, name) { p ->
+                val cur = _messages.value
+                val idx = cur.indexOfFirst { it.tmpId == tmpId }
+                if (idx >= 0) {
+                    setMessages(cur.toMutableList().apply {
+                        this[idx] = this[idx].copy(uploadProgress = p)
+                    })
+                }
+            }
+            when (val outcome = repository.sendRcsMedia(
+                convId, uploaded.copy(width = w, height = h), "", tmpId,
+            )) {
+                is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
+                    val cur = _messages.value
+                    val idx = cur.indexOfFirst { it.tmpId == tmpId }
+                    if (idx >= 0) {
+                        setMessages(cur.toMutableList().apply {
+                            this[idx] = this[idx].copy(uploadProgress = null)
+                        })
+                    }
+                    pendingOptimistic[tmpId]?.let {
+                        pendingOptimistic[tmpId] = it.copy(uploadProgress = null)
+                    }
+                }
+                is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
+                    throw IllegalStateException(outcome.reason)
+                }
+            }
+        } catch (e: Exception) {
+            pendingOptimistic.remove(tmpId)
+            setMessages(_messages.value.filterNot { it.tmpId == tmpId })
+            throw e
         }
     }
 

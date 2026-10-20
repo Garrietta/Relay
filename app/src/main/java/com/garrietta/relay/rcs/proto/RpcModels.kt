@@ -257,6 +257,14 @@ data class RcsMediaAttachment(
      */
     val thumbnailMediaId: String = "",
     val thumbnailKey: ByteArray = byteArrayOf(),
+    /**
+     * Media name (MediaContent field 4) — the file name the sender's
+     * client attached. Relay's sticker sends name their PNG
+     * "relay-sticker-<id>.png" (see ui.chat.Stickers), which is how a
+     * receiving Relay recognizes its own stickers exactly instead of
+     * guessing from pixels.
+     */
+    val name: String = "",
 ) {
     /** True for image content types (renderable in a bubble). */
     val isImage: Boolean get() = mimeType.startsWith("image/")
@@ -279,6 +287,7 @@ fun decodeMediaContent(m: Map<Int, List<FieldVal>>): RcsMediaAttachment? {
         inlineData = inline,
         thumbnailMediaId = thumbnailMediaId,
         thumbnailKey = m.firstBytes(12) ?: byteArrayOf(),
+        name = m.firstStr(4).orEmpty(),
     )
 }
 

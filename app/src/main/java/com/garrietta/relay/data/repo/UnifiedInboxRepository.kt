@@ -20,6 +20,7 @@ import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
+import com.garrietta.relay.rcs.proto.cleanRcsParticipantList
 import com.garrietta.relay.rcs.proto.deriveRcsMembership
 import com.garrietta.relay.rcs.proto.displayNameOrNumber
 import com.garrietta.relay.rcs.proto.resolveMessageDirection
@@ -423,6 +424,25 @@ class UnifiedInboxRepository(
                 membershipRefinements.clear(c.id)
             }
         }
+        // A sender-union record retires when the payload catches up
+        // (the derivation now covers every evidenced sender — e.g. a
+        // later payload ships field 21 naming them) or when the
+        // conversation falls into the field-21-absent, not-a-group
+        // shape, where the collapse governs and the union must never
+        // apply (see MembershipRefinements).
+        for (c in payloads) {
+            if (!membershipRefinements.isUnionRecorded(c.id)) continue
+            val collapseShape =
+                c.otherParticipantIds.isEmpty() && !c.isGroup
+            val covered = !collapseShape && unionCoveredByDerivation(
+                senderCensuses[c.id]?.sentByPid?.keys.orEmpty(),
+                deriveMembership(c).others
+                    .map { it.participantId }.toSet(),
+            )
+            if (collapseShape || covered) {
+                membershipRefinements.clearUnion(c.id)
+            }
+        }
         val rows = payloads.map { mapRcsConversation(it) }
         return rows.sortedByDescending { it.date }
     }
@@ -611,32 +631,62 @@ class UnifiedInboxRepository(
         emptyMap()
 
     /**
+     * Sender census per server conversation (Garrett 2026-10-20, Game
+     * Night): who actually sends, accumulated from every history this
+     * session loads — merged monotonically per load (see
+     * [SenderCensus.mergedWith]). Drives the sender-union membership
+     * refinement and the Diagnostics dump's per-entry sent counts.
+     * In-memory only, like the refinements it feeds.
+     */
+    @Volatile
+    private var senderCensuses: Map<String, SenderCensus> = emptyMap()
+
+    /**
      * Ground-truth membership dump for Settings → Diagnostics
      * (Garrett 2026-10-20): for each server conversation, the RAW
      * decoded field 20 / field 21 / field 10 / field 22 next to the
      * derived others + group flag the UI renders, the anomaly flag,
-     * and the detector's own inputs. Marked conversations (anomaly or
-     * field-set mismatch) come first; see MembershipDump.kt.
+     * and the detector's own inputs. Each field-20 entry also carries
+     * its SmallInfo type and — from the sender census — how many
+     * loaded incoming messages it sent, the evidence that proved
+     * field 21 a subset rather than the roster. Marked conversations
+     * (anomaly or field-set mismatch) come first; see MembershipDump.kt.
      */
     suspend fun membershipDumpText(): String {
         val anomalies = participantAnomalies
         val inputs = participantAnomalyInputs
+        val censuses = senderCensuses
         val snapshots = rcsTransport.currentRcsConversations().map { c ->
             val membership = deriveMembership(c)
+            val census = censuses[c.id]
             // What the UI renders: the derivation's others — or, when
             // sender evidence has refined this conversation, the
-            // evidence peer the stored row actually shows.
+            // evidence peer the stored row actually shows; sender-union
+            // additions (evidenced senders field 21 left out) ride
+            // along, exactly as the stored row carries them.
             val refinedEntry = membershipRefinements.peerEntry(c.id)
             val derived = if (refinedEntry != null) {
                 listOf(refinedEntry)
             } else {
-                membership.others
+                val derivedPids = membership.others
+                    .map { it.participantId }.toSet()
+                membership.others + membershipRefinements.unionEntries(c.id)
+                    .filter { it.participantId !in derivedPids }
             }
             val title = _conversations.value.firstOrNull { row ->
                 row.rcsConversationId == c.id
             }?.displayName?.ifBlank { null }
                 ?: c.name.ifBlank { c.id }
             val inp = inputs[c.id]
+            fun entryOf(p: com.garrietta.relay.rcs.proto.RcsParticipant) =
+                MembershipEntry(
+                    participantId = p.participantId,
+                    number = p.number,
+                    isMe = p.isMe,
+                    name = p.fullName.ifBlank { p.firstName },
+                    infoType = p.infoType,
+                    sentCount = census?.sentByPid?.get(p.participantId),
+                )
             MembershipSnapshot(
                 conversationId = c.id,
                 title = title,
@@ -644,28 +694,21 @@ class UnifiedInboxRepository(
                 type = c.type,
                 serverIsGroup = c.isGroup,
                 field21 = c.otherParticipantIds,
-                field20 = c.participants.map { p ->
-                    MembershipEntry(
-                        participantId = p.participantId,
-                        number = p.number,
-                        isMe = p.isMe,
-                        name = p.fullName.ifBlank { p.firstName },
-                    )
+                field20 = c.participants.map(::entryOf),
+                derivedOthers = derived.map(::entryOf),
+                derivedIsGroup = when {
+                    refinedEntry != null -> false
+                    // A union-grown row re-derives group-ness from the
+                    // grown count (see MembershipRefinements.applyTo).
+                    membershipRefinements.isUnionRecorded(c.id) ->
+                        derived.size > 1
+                    else -> membership.isGroup
                 },
-                derivedOthers = derived.map { p ->
-                    MembershipEntry(
-                        participantId = p.participantId,
-                        number = p.number,
-                        isMe = p.isMe,
-                        name = p.fullName.ifBlank { p.firstName },
-                    )
-                },
-                derivedIsGroup =
-                    if (refinedEntry != null) false else membership.isGroup,
                 anomaly = c.id in anomalies,
                 detectorClaimedOthers = inp?.first,
                 detectorDistinctSenders = inp?.second,
                 detectorIncoming = inp?.third,
+                senderCensus = census,
             )
         }
         return formatMembershipDump(
@@ -768,6 +811,66 @@ class UnifiedInboxRepository(
                     )
                     _conversations.value =
                         membershipRefinements.applyTo(_conversations.value)
+                }
+            }
+            // Sender census + union (Garrett 2026-10-20, Game Night):
+            // field 21 is a SUBSET of membership, not the roster —
+            // its excluded field-20 entries are active senders. Who
+            // sends, resolved in THIS conversation's own participant
+            // table, is recorded as a census (the Diagnostics dump
+            // prints it; retirement checks read it), and — everywhere
+            // the collapse does not govern — unioned into the stored
+            // row's membership: anyone who sends in a conversation is
+            // a member of it. The detector above is untouched: it
+            // keeps measuring the derivation's pre-union claim.
+            if (conv != null && membership != null) {
+                val pool = cleanRcsParticipantList(
+                    participants, selfNumberSet(),
+                ).filterNot { it.isUnknownSenderGhost() }
+                val loadCensus = computeSenderCensus(
+                    incoming, byPid,
+                    pool.map { it.participantId }.toSet(),
+                )
+                val census = synchronized(participantAnomalyLock) {
+                    val merged = senderCensuses[conversationId]
+                        ?.mergedWith(loadCensus) ?: loadCensus
+                    senderCensuses =
+                        senderCensuses + (conversationId to merged)
+                    merged
+                }
+                if (senderUnionGoverns(
+                        conv.otherParticipantIds.isNotEmpty(), conv.isGroup,
+                    )
+                ) {
+                    val additions = unionAdditionEntries(
+                        pool, census.sentByPid.keys,
+                        membership.others.map { it.participantId }.toSet(),
+                    )
+                    // Re-recorded on EVERY governed load (replacing,
+                    // never accumulating): if the evidence or the
+                    // payload shifts so nothing is missing anymore,
+                    // the empty record retires the union by itself.
+                    membershipRefinements.recordUnion(
+                        conversationId,
+                        additions.map { entry ->
+                            MembershipRefinements.RefinedPeer(
+                                entry,
+                                Participant(
+                                    address = entry.number,
+                                    displayName = entry.fullName
+                                        .ifBlank { entry.firstName }
+                                        .ifBlank { entry.number },
+                                    photoUri = contactLookup.photoUri(
+                                        entry.number,
+                                    ),
+                                ),
+                            )
+                        },
+                    )
+                    if (additions.isNotEmpty()) {
+                        _conversations.value =
+                            membershipRefinements.applyTo(_conversations.value)
+                    }
                 }
             }
             // Once refined, the effective claim is the single peer;

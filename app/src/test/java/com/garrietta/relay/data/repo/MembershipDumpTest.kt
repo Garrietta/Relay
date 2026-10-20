@@ -134,6 +134,53 @@ class MembershipDumpTest {
         assertTrue(text.contains("detector: claimedOthers=2 distinctSenders=1 incoming=14 -> ANOMALY"))
     }
 
+    @Test fun `format prints SmallInfo types sent counts and the census line`() {
+        // The Game Night adjudication (Garrett 2026-10-20): field 21
+        // excludes Grace here, yet her entry carries a sent count —
+        // the excluded entries are the ones who actually send, which
+        // is what proved field 21 a subset rather than the roster.
+        val withCensus = MembershipSnapshot(
+            conversationId = "c-gn",
+            title = "Game Night",
+            timestampMs = 100,
+            type = 2,
+            serverIsGroup = true,
+            field21 = listOf("p-dad"),
+            field20 = listOf(
+                me.copy(infoType = 1),
+                dad.copy(infoType = 2, sentCount = 5),
+                grace.copy(infoType = 2, sentCount = 3),
+            ),
+            derivedOthers = listOf(dad, grace),
+            derivedIsGroup = true,
+            anomaly = false,
+            senderCensus = SenderCensus(
+                sentByPid = mapOf("p-dad" to 5, "p-grace" to 3),
+                unmatchedPids = setOf("p-stranger"),
+                unmatchedMessages = 2,
+            ),
+        )
+        val text = formatMembershipDump(listOf(withCensus), totalConversations = 1)
+        assertTrue(text.contains("id=p-me num=+15550001111 name=Me isMe type=1"))
+        assertTrue(text.contains("id=p-dad num=+15550002222 name=Dad type=2 sent=5"))
+        assertTrue(text.contains("id=p-grace num=+15550003333 name=Grace Ambrose type=2 sent=3"))
+        assertTrue(
+            text.contains(
+                "census: otherSenders=2 unmatchedPids=1 unmatchedMsgs=2 " +
+                    "(from loaded history)",
+            ),
+        )
+        // No census recorded (chat never opened): no census line, and
+        // entries carry a type but no sent marker.
+        val bare = formatMembershipDump(
+            listOf(snap("c-b", "Bare", 1, listOf("p-dad"), listOf(me, dad), listOf(dad))),
+            totalConversations = 1,
+        )
+        assertFalse(bare.contains("census:"))
+        assertTrue(bare.contains("type=0"))
+        assertFalse(bare.contains("sent="))
+    }
+
     @Test fun `format marks a missing field 21 as NO-F21 with absent list`() {
         val s = snap(
             "c-x", "X", ts = 5,

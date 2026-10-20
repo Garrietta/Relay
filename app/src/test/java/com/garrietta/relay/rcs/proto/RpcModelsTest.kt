@@ -216,6 +216,33 @@ class RpcModelsTest {
         assertEquals(listOf("p-dad"), m.others.map { it.participantId })
     }
 
+    @Test fun `participant decode reads the SmallInfo type`() {
+        // conversations.Participant field 1 is SmallInfo{1:type,
+        // 2:number, 3:participantID}: the type must survive decode —
+        // the Diagnostics membership dump prints it to learn what
+        // field 21 selects for (Garrett 2026-10-20, Game Night).
+        val bytes = bmsg(
+            1 to FieldVal.Bytes(
+                bmsg(
+                    1 to FieldVal.Varint(2),
+                    2 to FieldVal.Str("+17653182838"),
+                    3 to FieldVal.Str("25"),
+                ),
+            ),
+            2 to FieldVal.Str("Dad"),
+            3 to FieldVal.Str("Dad"),
+            6 to FieldVal.Varint(0),
+        )
+        val p = decodeRcsParticipant(ProtoCodec.decode(bytes))
+        assertEquals("25", p.participantId)
+        assertEquals("+17653182838", p.number)
+        assertEquals(2, p.infoType)
+        assertEquals(false, p.isMe)
+        // No SmallInfo at all: the type defaults to 0, never a crash.
+        val bare = decodeRcsParticipant(ProtoCodec.decode(bmsg()))
+        assertEquals(0, bare.infoType)
+    }
+
     // Fixtures from Garrett's actual Diagnostics membership dump
     // (2026-10-20): participant ids and numbers as the server shipped
     // them. 824 = Garrett (isMe), 822 = his unflagged self duplicate.

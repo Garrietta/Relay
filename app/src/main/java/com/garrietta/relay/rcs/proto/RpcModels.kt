@@ -128,6 +128,16 @@ data class RcsParticipant(
     val firstName: String,
     val fullName: String,
     val isMe: Boolean,
+    /**
+     * SmallInfo.type (Participant field 1 → SmallInfo field 1): the
+     * server's own classification of this entry, decoded 2026-10-20 so
+     * the Diagnostics membership dump can show it next to the raw
+     * fields — Garrett's Game Night evidence proved field 21 is a
+     * SUBSET of membership, and what field 21 selects for is an open
+     * question this value may answer. 0 when the payload carries none.
+     * Display/diagnostics only; no derivation reads it yet.
+     */
+    val infoType: Int = 0,
 )
 
 fun decodeRcsParticipant(m: Map<Int, List<FieldVal>>): RcsParticipant {
@@ -138,6 +148,7 @@ fun decodeRcsParticipant(m: Map<Int, List<FieldVal>>): RcsParticipant {
         firstName = m.firstStr(2).orEmpty(),
         fullName = m.firstStr(3).orEmpty(),
         isMe = m.firstBool(6) ?: false,
+        infoType = id?.firstVarint(1)?.toInt() ?: 0,
     )
 }
 
@@ -240,6 +251,15 @@ data class RcsMembership(
  * ID is in field 21, and group-ness is the derived count (more than
  * one other = group); the server isGroup flag (field 10) cannot
  * overrule the membership it itself shipped in the same payload.
+ *
+ * Field 21 is, however, only a SUBSET of membership, not the roster
+ * (Garrett's Game Night dump, 2026-10-20: field 21 named 4 of the 9
+ * field-20 others, and the 5 it excluded are active senders). This
+ * pure derivation stays payload-only; the repository layer unions
+ * the conversation's own sender evidence on top of this result (see
+ * MembershipRefinements' sender union) — anyone who sends in a
+ * conversation is a member of it. The one shape the union never
+ * touches is the field-21-absent collapse below.
  *
  * When field 21 is ABSENT there is no membership list to consult, and
  * Garrett's Diagnostics dump (2026-10-20) settled what decides

@@ -14,12 +14,29 @@ package com.garrietta.relay.data.repo
  * never arrives for this conversation (the cleaned field-20 fallback
  * then stands, Grace included) or field 21 itself names Grace. This
  * dump prints exactly the fields that distinguish those two worlds.
+ *
+ * Since the Game Night evidence (2026-10-20), the dump also prints
+ * each entry's SmallInfo type and the sender census: field 21 proved
+ * to be a SUBSET of membership (it excluded Game Night's bare-number
+ * entries, who are exactly the entries carrying sent counts), and the
+ * stored row's membership now unions sender evidence on top of the
+ * derivation — derivedOthers here reflects that, union included.
  */
 data class MembershipEntry(
     val participantId: String,
     val number: String,
     val isMe: Boolean,
     val name: String,
+    /** SmallInfo.type (Participant field 1 → SmallInfo field 1), raw. */
+    val infoType: Int = 0,
+    /**
+     * Incoming messages from this entry in the history the repository
+     * has loaded (the sender census), or null when no census covers
+     * this conversation yet. The Game Night evidence (Garrett
+     * 2026-10-20): the field-21-EXCLUDED entries are exactly the ones
+     * carrying sent counts — field 21 is a subset, not the roster.
+     */
+    val sentCount: Int? = null,
 )
 
 data class MembershipSnapshot(
@@ -44,6 +61,13 @@ data class MembershipSnapshot(
     val detectorClaimedOthers: Int? = null,
     val detectorDistinctSenders: Int? = null,
     val detectorIncoming: Int? = null,
+    /**
+     * Who actually sends in this conversation, from loaded history
+     * (see SenderCensus) — null when no message load has run this
+     * session. Field 21's excluded-but-sending entries are how the
+     * subset nature of field 21 was proven.
+     */
+    val senderCensus: SenderCensus? = null,
 ) {
     /** Field 21 shipped nothing: the field-20 fallback is in play. */
     val field21Absent: Boolean get() = field21.isEmpty()
@@ -85,7 +109,9 @@ fun formatMembershipDump(
         "Membership dump: ${selected.size} of $totalConversations " +
             "conversations (marked first). Flags: ANOMALY = participant " +
             "detector tripped; F20!=F21 = fields 20/21 disagree; " +
-            "NO-F21 = field 21 absent (field-20 fallback in play).",
+            "NO-F21 = field 21 absent (field-20 fallback in play). " +
+            "type = SmallInfo type; sent=N = incoming messages from " +
+            "that entry in loaded history.",
     )
     for (s in selected) {
         appendLine()
@@ -113,7 +139,9 @@ fun formatMembershipDump(
                 "    - id=${p.participantId.ifBlank { "(blank)" }} " +
                     "num=${p.number.ifBlank { "(blank)" }} " +
                     "name=${p.name.ifBlank { "(blank)" }}" +
-                    (if (p.isMe) " isMe" else ""),
+                    (if (p.isMe) " isMe" else "") +
+                    " type=${p.infoType}" +
+                    (p.sentCount?.let { " sent=$it" } ?: ""),
             )
         }
         appendLine(
@@ -122,6 +150,14 @@ fun formatMembershipDump(
                     "${it.participantId.ifBlank { "(blank)" }}:${it.number}"
                 }.ifBlank { "(none)" },
         )
+        s.senderCensus?.let { census ->
+            appendLine(
+                "  census: otherSenders=${census.sentByPid.size} " +
+                    "unmatchedPids=${census.unmatchedPids.size} " +
+                    "unmatchedMsgs=${census.unmatchedMessages} " +
+                    "(from loaded history)",
+            )
+        }
         if (s.detectorClaimedOthers != null) {
             appendLine(
                 "  detector: claimedOthers=${s.detectorClaimedOthers} " +

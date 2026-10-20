@@ -210,6 +210,8 @@ data class RcsMessage(
     val msgTransportType: Int = 0,
     /** Media attachment when the message carries one (MessageInfo field 3). */
     val media: RcsMediaAttachment? = null,
+    /** Shared location when the message carries one (MessageInfo field 5). */
+    val location: RcsLocation? = null,
     /**
      * Wire reactions attached to THIS message (conversations.Message field
      * 19, repeated ReactionEntry). The real reaction events from the
@@ -268,6 +270,70 @@ data class RcsMediaAttachment(
 ) {
     /** True for image content types (renderable in a bubble). */
     val isImage: Boolean get() = mimeType.startsWith("image/")
+}
+
+/**
+ * A shared location pin (conversations.LocationContent, MessageInfo
+ * field 5). [name] is the place/address label the sender's client
+ * attached, when it sent one.
+ */
+data class RcsLocation(
+    val latitude: Double,
+    val longitude: Double,
+    val name: String = "",
+)
+
+/**
+ * Decodes conversations.LocationContent from a MessageInfo field-5 map.
+ *
+ * Canonical layout (Google proto convention): field 1 = a LatLng
+ * submessage {1: double latitude, 2: double longitude}, field 2 = the
+ * optional place name. Google has shipped more than one client against
+ * this oneof, so decode is deliberately tolerant: flat double/float
+ * coordinate pairs and varint E7 pairs (degrees × 10^7, the other common
+ * Google encoding) are accepted too. Anything whose numbers don't land
+ * in valid lat/lng ranges is rejected — coordinates are never guessed.
+ */
+fun decodeLocationContent(m: Map<Int, List<FieldVal>>): RcsLocation? {
+    fun plausible(lat: Double, lng: Double): Boolean =
+        lat in -90.0..90.0 && lng in -180.0..180.0
+    // Canonical: nested LatLng at field 1, name at field 2 (or 3).
+    m.firstMsg(1)?.let { ll ->
+        val lat = ll.firstDouble(1)
+        val lng = ll.firstDouble(2)
+        if (lat != null && lng != null && plausible(lat, lng)) {
+            return RcsLocation(
+                lat, lng,
+                m.firstStr(2)?.ifBlank { null } ?: m.firstStr(3).orEmpty(),
+            )
+        }
+        val flat = ll.firstFloat(1)?.toDouble()
+        val flng = ll.firstFloat(2)?.toDouble()
+        if (flat != null && flng != null && plausible(flat, flng)) {
+            return RcsLocation(flat, flng, m.firstStr(2).orEmpty())
+        }
+    }
+    // Flat doubles / floats directly on the content message.
+    val lat = m.firstDouble(1)
+    val lng = m.firstDouble(2)
+    if (lat != null && lng != null && plausible(lat, lng)) {
+        return RcsLocation(lat, lng, "")
+    }
+    val flat = m.firstFloat(1)?.toDouble()
+    val flng = m.firstFloat(2)?.toDouble()
+    if (flat != null && flng != null && plausible(flat, flng)) {
+        return RcsLocation(flat, flng, "")
+    }
+    // Varint E7 pair (nested or flat).
+    val e7 = m.firstMsg(1) ?: m
+    val elat = e7.firstVarint(1)
+    val elng = e7.firstVarint(2)
+    if (elat != null && elng != null) {
+        val dlat = elat / 1e7
+        val dlng = elng / 1e7
+        if (plausible(dlat, dlng)) return RcsLocation(dlat, dlng, "")
+    }
+    return null
 }
 
 /** Decodes conversations.MediaContent from a MessageInfo field-3 map. */
@@ -615,6 +681,63 @@ fun encodeSendMediaMessageRequest(
         ),
     )
 }
+/**
+ * client.SendMessageRequest carrying a shared location (Garrett
+ * 2026-10-20, feature queue 6/7): same envelope as the text/media sends,
+ * but the MessagePayload carries TWO MessageInfo entries —
+ *
+ *  1. field 5 = LocationContent, the native pin: {1: LatLng{1: double
+ *     latitude, 2: double longitude}, 2: name (when known)}.
+ *  2. field 2 = MessageContent holding [linkText] — a Google Maps link
+ *     for the same coordinates, riding in the SAME send so any client
+ *     that doesn't render the native payload still shows the recipient
+ *     a tappable link instead of nothing. (The payload's field-6 content
+ *     mirrors the link text, exactly like a caption rides a media send.)
+ *
+ * Whether the phone's Google Messages renders the native field-5 pin
+ * from a web-client send is UNVERIFIED — the device test against Google
+ * Messages settles it; the link entry guarantees the share is never
+ * empty either way.
+ */
+fun encodeSendLocationMessageRequest(
+    conversationId: String,
+    tmpId: String,
+    latitude: Double,
+    longitude: Double,
+    name: String = "",
+    linkText: String,
+    forceRcs: Boolean = true,
+): ByteArray {
+    val locationContent = mutableMapOf<Int, FieldVal>(
+        1 to FieldVal.Msg(
+            mapOf(
+                1 to FieldVal.Fixed64(latitude.toRawBits()),
+                2 to FieldVal.Fixed64(longitude.toRawBits()),
+            ),
+        ),
+    )
+    if (name.isNotBlank()) locationContent[2] = FieldVal.Str(name)
+    val payload = mapOf(
+        1 to FieldVal.Str(tmpId),
+        6 to FieldVal.Msg(mapOf(1 to FieldVal.Msg(mapOf(1 to FieldVal.Str(linkText))))),
+        7 to FieldVal.Str(conversationId),
+        10 to FieldVal.Rep(
+            listOf(
+                FieldVal.Msg(mapOf(5 to FieldVal.Msg(locationContent))),
+                FieldVal.Msg(mapOf(2 to FieldVal.Msg(mapOf(1 to FieldVal.Str(linkText))))),
+            ),
+        ),
+    )
+    return ProtoCodec.encode(
+        mapOf(
+            2 to FieldVal.Str(conversationId),
+            3 to FieldVal.Msg(payload),
+            5 to FieldVal.Str(tmpId),
+            6 to FieldVal.Varint(if (forceRcs) 1 else 0),
+        ),
+    )
+}
+
 /** client.MessageReadRequest{2:conversationID, 3:messageID} as binary protobuf. */
 fun encodeMessageReadRequest(conversationId: String, messageId: String): ByteArray =
     ProtoCodec.encode(
@@ -883,6 +1006,9 @@ fun decodeRcsMessage(
 ): RcsMessage {
     val infos = m.repMsgs(10)
     val media = infos.mapNotNull { it.firstMsg(3)?.let(::decodeMediaContent) }.firstOrNull()
+    val location = infos.mapNotNull {
+        it.firstMsg(5)?.let(::decodeLocationContent)
+    }.firstOrNull()
     return RcsMessage(
         id = m.firstStr(1).orEmpty(),
         conversationId = m.firstStr(7).orEmpty(),
@@ -894,6 +1020,7 @@ fun decodeRcsMessage(
         participantId = m.firstStr(9).orEmpty(),
         msgTransportType = m.firstVarint(11)?.toInt() ?: 0,
         media = media,
+        location = location,
         wireReactions = decodeWireReactions(m),
     )
 }

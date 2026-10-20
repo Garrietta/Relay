@@ -23,6 +23,13 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Location sharing (Garrett 2026-10-20, feature queue 6/7): the
+         composer [+] sheet's Location entry requests FINE at runtime and
+         shares a one-shot current-position pin. COARSE covers the
+         approximate-only grant Android 12+ offers. No background location
+         access, ever. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- microG Google-account pairing: enumerate com.google accounts so
          microG's authenticator can mint the OAuthLogin token. -->
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />

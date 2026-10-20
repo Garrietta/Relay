@@ -1064,6 +1064,21 @@ class RcsTransport(context: Context) : Transport {
     ): String = session.sendMedia(conversationId, media, caption, tmpId)
 
     /**
+     * Sends a shared location via the RCS session (native LocationContent
+     * payload + the Maps-link text in the same send). Returns the tmpId
+     * for echo correlation; throws RcsException with the verbatim failure
+     * reason.
+     */
+    suspend fun sendRcsLocation(
+        conversationId: String,
+        latitude: Double,
+        longitude: Double,
+        name: String = "",
+        linkText: String,
+        tmpId: String = java.util.UUID.randomUUID().toString(),
+    ): String = session.sendLocation(conversationId, latitude, longitude, name, linkText, tmpId)
+
+    /**
      * A body that ended before its declared length. Carries the partial
      * bytes so the caller can resume with Range instead of starting over.
      * Extends IOException so the existing retry loop treats it as

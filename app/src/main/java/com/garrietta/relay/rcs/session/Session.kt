@@ -20,6 +20,7 @@ import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
 import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
 import com.garrietta.relay.rcs.proto.UpdateEvent
 import com.garrietta.relay.rcs.proto.UploadedMediaRef
+import com.garrietta.relay.rcs.proto.encodeSendLocationMessageRequest
 import com.garrietta.relay.rcs.proto.encodeSendMediaMessageRequest
 import com.garrietta.relay.rcs.proto.buildOutgoingRpcPblite
 import com.garrietta.relay.rcs.proto.decodeConversationsResponse
@@ -287,6 +288,32 @@ class RcsSession(context: Context) {
         val inner = rpc(
             Rpc.ACTION_SEND_MESSAGE,
             encodeSendMediaMessageRequest(conversationId, tmpId, media, caption, forceRcs = true),
+        )
+        val status = decodeSendMessageStatus(inner)
+        if (status != 1) throw RcsException("SendMessage status=$status")
+        return tmpId
+    }
+
+    /**
+     * Sends a shared location: the native LocationContent payload
+     * (MessageInfo field 5) with the Maps-link text riding in the same
+     * send as the human fallback. Returns the tmpID used for echo
+     * correlation. Throws on transport failure.
+     */
+    suspend fun sendLocation(
+        conversationId: String,
+        latitude: Double,
+        longitude: Double,
+        name: String = "",
+        linkText: String,
+        tmpId: String = UUID.randomUUID().toString(),
+    ): String {
+        val inner = rpc(
+            Rpc.ACTION_SEND_MESSAGE,
+            encodeSendLocationMessageRequest(
+                conversationId, tmpId, latitude, longitude, name, linkText,
+                forceRcs = true,
+            ),
         )
         val status = decodeSendMessageStatus(inner)
         if (status != 1) throw RcsException("SendMessage status=$status")

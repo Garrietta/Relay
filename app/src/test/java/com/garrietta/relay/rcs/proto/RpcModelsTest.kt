@@ -353,4 +353,102 @@ class RpcModelsTest {
         assertEquals("15551234567", part("15551234567").displayNameOrNumber())
         assertEquals("Alec", part("15551234567", fullName = "Alec").displayNameOrNumber())
     }
+
+    // ---- Location sharing (Garrett 2026-10-20, feature queue 6/7) ----
+
+    private val link = "https://maps.google.com/?q=40.7128,-74.006"
+
+    @Test fun `send location request is native payload first with link companion`() {
+        val req = ProtoCodec.decode(
+            encodeSendLocationMessageRequest(
+                "conv-1", "tmp-9", 40.7128, -74.006, "Central Park", link,
+            ),
+        )
+        assertEquals("conv-1", req.firstStr(2))
+        assertEquals("tmp-9", req.firstStr(5))
+        assertEquals(1L, req.firstVarint(6))
+        val payload = req.firstMsg(3)!!
+        assertEquals("tmp-9", payload.firstStr(1))
+        assertEquals("conv-1", payload.firstStr(7))
+        // Payload field 6 mirrors the link text, like a media caption.
+        assertEquals(link, payload.firstMsg(6)?.firstMsg(1)?.firstStr(1))
+        val infos = payload.repMsgs(10)
+        assertEquals(2, infos.size)
+        // First info: the native location payload (field 5), exact coords.
+        val loc = decodeLocationContent(infos[0].firstMsg(5)!!)!!
+        assertEquals(40.7128, loc.latitude, 0.0)
+        assertEquals(-74.006, loc.longitude, 0.0)
+        assertEquals("Central Park", loc.name)
+        // Second info: the human-fallback link as message text.
+        assertEquals(link, decodeMessageInfo(infos[1].firstMsg(2)!!))
+    }
+
+    @Test fun `send location request omits a blank name`() {
+        val req = ProtoCodec.decode(
+            encodeSendLocationMessageRequest("conv-1", "tmp-9", 40.7128, -74.006, "", link),
+        )
+        val infos = req.firstMsg(3)!!.repMsgs(10)
+        val loc = decodeLocationContent(infos[0].firstMsg(5)!!)!!
+        assertEquals("", loc.name)
+    }
+
+    @Test fun `incoming location message decodes its pin`() {
+        val locationContent = mapOf(
+            1 to FieldVal.Msg(
+                mapOf(
+                    1 to FieldVal.Fixed64(40.7128.toRawBits()),
+                    2 to FieldVal.Fixed64((-74.006).toRawBits()),
+                ),
+            ),
+            2 to FieldVal.Str("Central Park"),
+        )
+        val bytes = bmsg(
+            1 to FieldVal.Str("srv-7"),
+            10 to FieldVal.Rep(
+                listOf(FieldVal.Msg(mapOf(5 to FieldVal.Msg(locationContent)))),
+            ),
+        )
+        val decoded = decodeRcsMessage(ProtoCodec.decode(bytes))
+        assertEquals(RcsLocation(40.7128, -74.006, "Central Park"), decoded.location)
+        // A bare pin has no text part; the bubble renders from the pin.
+        assertEquals("", decoded.body)
+    }
+
+    @Test fun `decodeLocationContent accepts a flat double pair`() {
+        val loc = decodeLocationContent(
+            mapOf(
+                1 to listOf(FieldVal.Fixed64(40.7128.toRawBits())),
+                2 to listOf(FieldVal.Fixed64((-74.006).toRawBits())),
+            ),
+        )!!
+        assertEquals(40.7128, loc.latitude, 0.0)
+        assertEquals(-74.006, loc.longitude, 0.0)
+    }
+
+    @Test fun `decodeLocationContent accepts an E7 varint pair`() {
+        // Hand-built as a DECODED map: nested messages arrive as Bytes.
+        val latLngBytes = ProtoCodec.encode(
+            mapOf(
+                1 to FieldVal.Varint(407_128_000),
+                2 to FieldVal.Varint(-740_060_000),
+            ),
+        )
+        val loc = decodeLocationContent(
+            mapOf(1 to listOf(FieldVal.Bytes(latLngBytes))),
+        )!!
+        assertEquals(40.7128, loc.latitude, 0.0)
+        assertEquals(-74.006, loc.longitude, 0.0)
+    }
+
+    @Test fun `decodeLocationContent rejects out-of-range coordinates`() {
+        assertEquals(
+            null,
+            decodeLocationContent(
+                mapOf(
+                    1 to listOf(FieldVal.Fixed64(123.0.toRawBits())),
+                    2 to listOf(FieldVal.Fixed64(0.0.toRawBits())),
+                ),
+            ),
+        )
+    }
 }

@@ -63,12 +63,32 @@ class ProtoCodecTest {
         assertEquals("b", (items[1] as FieldVal.Bytes).v.toString(Charsets.UTF_8))
     }
 
-    @Test fun `unknown wire types are skipped`() {
-        // field 2 fixed32 (wire type 5): tag 0x15, 4 bytes payload; then field 1 varint
+    @Test fun `fixed32 fields are captured on decode`() {
+        // field 2 fixed32 (wire type 5): tag 0x15, 4 bytes payload
+        // (little-endian 0x04030201); then field 1 varint
         val bytes = hex(0x15, 0x01, 0x02, 0x03, 0x04, 0x08, 0x01)
         val decoded = ProtoCodec.decode(bytes)
         assertEquals(1L, decoded.firstVarint(1))
-        assertTrue(decoded[2] == null)
+        assertEquals(0x04030201, (decoded[2]!!.first() as FieldVal.Fixed32).v)
+    }
+
+    @Test fun `fixed64 double round-trips`() {
+        // field 1 fixed64 (wire type 1): tag 0x09 + 8 bytes little-endian
+        val bytes = ProtoCodec.encode(
+            mapOf(1 to FieldVal.Fixed64(40.7128.toRawBits())),
+        )
+        assertEquals(9, bytes.size)
+        assertEquals(0x09, bytes[0].toInt())
+        val decoded = ProtoCodec.decode(bytes)
+        assertEquals(40.7128, decoded.firstDouble(1)!!, 0.0)
+    }
+
+    @Test fun `fixed32 float round-trips`() {
+        val bytes = ProtoCodec.encode(
+            mapOf(2 to FieldVal.Fixed32((-74.006f).toRawBits())),
+        )
+        val decoded = ProtoCodec.decode(bytes)
+        assertEquals(-74.006f, decoded.firstFloat(2)!!, 0.0f)
     }
 
     @Test fun `empty message encodes to empty bytes`() {

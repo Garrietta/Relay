@@ -237,7 +237,13 @@ class RelayApp : Application() {
             .firstOrNull { msg.conversationId in it.allRcsIds() }
             ?.displayName?.ifBlank { null } ?: "New message"
         val body = msg.body.ifBlank {
-            if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
+            when {
+                msg.media != null -> "\uD83D\uDCF7 Photo"
+                // A bare location pin (no text part rode along): name it.
+                msg.location != null -> "\uD83D\uDCCD " +
+                    (msg.location?.name?.ifBlank { null } ?: "Location")
+                else -> "New message"
+            }
         }
         // Group notifications identify the SENDER (Garrett 2026-10-19
         // 22:00, Google Messages parity): the message's participant (via

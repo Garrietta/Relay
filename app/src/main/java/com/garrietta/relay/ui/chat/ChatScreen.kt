@@ -150,6 +150,7 @@ import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isTransportSystemNotice
+import com.garrietta.relay.rcs.proto.RcsLocation
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.TopSearchPopup
 import com.garrietta.relay.ui.motion.RelaySprings
@@ -169,10 +170,14 @@ import com.garrietta.relay.ui.theme.chatBubblePair
 import com.garrietta.relay.ui.theme.chatColorwayOption
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import com.garrietta.relay.ui.theme.senderBubbleColors
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.webkit.MimeTypeMap
 import android.widget.Toast
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -541,6 +546,30 @@ fun ChatScreen(
                             // RCS media: image/file bubble (downloaded +
                             // decrypted on first compose), never an empty
                             // placeholder.
+                            val msgLocation = message.location
+                            if (msgLocation != null) {
+                                LocationBubble(
+                                    message = message,
+                                    location = msgLocation,
+                                    selected = message.id in selectedIds,
+                                    selectionActive = selectedIds.isNotEmpty(),
+                                    onToggleSelect = { viewModel.toggleSelect(message.id) },
+                                    sender = if (isGroup && !message.isOutgoing) {
+                                        viewModel.senderFor(message.address)
+                                    } else null,
+                                    isGroup = isGroup,
+                                    bubblePair = bubblePair,
+                                    maxBubbleWidth = maxBubbleWidth,
+                                    onAvatarClick = { sender ->
+                                        onOpenDetails(sender.address)
+                                    },
+                                    onShowReactions = { reactionDetail = it },
+                                    onReact = { emoji ->
+                                        viewModel.sendReaction(message, emoji)
+                                    },
+                                )
+                                return@itemsIndexed
+                            }
                             val media = message.media
                             if (media != null) {
                                 MediaBubble(
@@ -657,6 +686,19 @@ fun ChatScreen(
                             stickerStore.record(def.id)
                         },
                         recentStickers = recentStickerDefs,
+                        onSendLocation = { latitude, longitude, name ->
+                            viewModel.sendLocation(recipient, latitude, longitude, name)
+                        },
+                        onLocationDenied = {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    "Relay needs location permission to share your " +
+                                        "location. Allow it in Settings \u2192 Apps \u2192 " +
+                                        "Relay \u2192 Permissions \u2192 Location.",
+                                )
+                            }
+                        },
+                        isSmsChat = liveTransportLabel == "SMS",
                     )
                 }
             }
@@ -1349,6 +1391,184 @@ private fun decodeImageBounds(bytes: ByteArray): Pair<Int, Int>? {
     val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     return if (opts.outWidth > 0 && opts.outHeight > 0) opts.outWidth to opts.outHeight else null
+}
+
+/**
+ * A shared-location bubble (Garrett 2026-10-20, feature queue 6/7): an
+ * expressive card — pin badge, the place label the sender attached (or
+ * "Shared location"), and the coordinates. Tapping opens the pin in the
+ * default maps app (geo: intent). Group-incoming pins carry the sender
+ * row (avatar + name + per-sender tone), matching the other bubbles;
+ * selection tap / long-press reactions wire up the same way.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LocationBubble(
+    message: Message,
+    location: RcsLocation,
+    selected: Boolean,
+    selectionActive: Boolean,
+    onToggleSelect: () -> Unit,
+    sender: Participant? = null,
+    isGroup: Boolean = false,
+    bubblePair: ChatBubblePair? = null,
+    maxBubbleWidth: Dp,
+    onAvatarClick: (Participant) -> Unit = {},
+    onShowReactions: (Message) -> Unit = {},
+    onReact: (String) -> Unit = {},
+) {
+    val context = LocalContext.current
+    var showReactMenu by remember { mutableStateOf(false) }
+    val outgoing = message.isOutgoing
+    val groupIncoming = isGroup && !outgoing && sender != null
+    val containerColor = when {
+        selected -> MaterialTheme.colorScheme.secondaryContainer
+        outgoing -> bubblePair?.outgoing ?: MaterialTheme.colorScheme.primaryContainer
+        else -> bubblePair?.incoming ?: MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val contentColor = when {
+        selected -> MaterialTheme.colorScheme.onSecondaryContainer
+        outgoing -> bubblePair?.onOutgoing
+            ?: MaterialTheme.colorScheme.onPrimaryContainer
+        else -> bubblePair?.onIncoming ?: MaterialTheme.colorScheme.onSurface
+    }
+    val coordinates = remember(location) {
+        String.format(
+            java.util.Locale.US, "%.5f, %.5f",
+            location.latitude, location.longitude,
+        )
+    }
+    val card: @Composable () -> Unit = {
+        Box {
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = containerColor,
+                modifier = Modifier
+                    .widthIn(min = 228.dp, max = maxBubbleWidth)
+                    .combinedClickable(
+                        onClick = {
+                            if (selectionActive) {
+                                onToggleSelect()
+                            } else {
+                                openLocationInMaps(
+                                    context,
+                                    location.latitude,
+                                    location.longitude,
+                                    location.name,
+                                )
+                            }
+                        },
+                        onLongClick = { showReactMenu = true },
+                    ),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (outgoing) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.tertiaryContainer
+                                },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.LocationOn,
+                            contentDescription = "Shared location",
+                            tint = if (outgoing) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onTertiaryContainer
+                            },
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = location.name.ifBlank { "Shared location" },
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = contentColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = coordinates,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = contentColor.copy(alpha = 0.75f),
+                        )
+                        Text(
+                            text = "Tap to open in Maps",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = contentColor.copy(alpha = 0.6f),
+                        )
+                    }
+                }
+            }
+            ReactionBadgeOverlay(message = message, onShowReactions = onShowReactions)
+            ReactionPickerMenu(
+                expanded = showReactMenu,
+                onDismiss = { showReactMenu = false },
+                onReact = { emoji ->
+                    showReactMenu = false
+                    onReact(emoji)
+                },
+                onSelect = {
+                    showReactMenu = false
+                    onToggleSelect()
+                },
+            )
+        }
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
+    ) {
+        if (groupIncoming) {
+            Row(verticalAlignment = Alignment.Top) {
+                ContactAvatar(
+                    name = sender!!.displayName,
+                    photoUri = sender.photoUri,
+                    seed = sender.stableSeed(),
+                    size = 28.dp,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable { onAvatarClick(sender) },
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(
+                        text = sender.displayName,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = senderColor(sender.displayName),
+                        modifier = Modifier
+                            .padding(bottom = 2.dp)
+                            .clickable { onAvatarClick(sender) },
+                    )
+                    card()
+                }
+            }
+        } else {
+            card()
+        }
+        // The Maps-link text that rode along is NOT rendered as a second
+        // text bubble — the card is the message (the raw link would also
+        // unfurl a redundant preview). Outgoing pins still get receipts.
+        if (outgoing) {
+            DeliveryTicks(
+                status = message.deliveryStatus,
+                modifier = Modifier.padding(top = 2.dp, end = 4.dp),
+            )
+        }
+    }
 }
 
 /**
@@ -2425,14 +2645,52 @@ private fun Composer(
     onSticker: (StickerDef) -> Unit = {},
     /** Recently used stickers, most recent first (smiley panel). */
     recentStickers: List<StickerDef> = emptyList(),
+    /** Sends a one-shot location pin (Garrett 2026-10-20, feature queue 6/7). */
+    onSendLocation: (latitude: Double, longitude: Double, name: String?) -> Unit =
+        { _, _, _ -> },
+    /** Location was tapped but permission is denied — surface the reason. */
+    onLocationDenied: () -> Unit = {},
+    /** The chat's live transport is SMS: the picker sheet says the pin
+     * will travel as a Maps link. */
+    isSmsChat: Boolean = false,
 ) {
     var text by remember { mutableStateOf("") }
     var showAttachSheet by remember { mutableStateOf(false) }
     var showStickers by remember { mutableStateOf(false) }
+    var showLocationSheet by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
+    // Location permission is requested at TAP time (feature queue 6/7):
+    // already granted → the picker opens directly; the system prompt's
+    // grant opens it too; a denial surfaces the verbatim reason through
+    // onLocationDenied — never a dead end. (Android 12+ may grant
+    // approximate-only, so either permission counts as granted.)
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ ->
+        val grantedNow = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_COARSE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
+        if (grantedNow) showLocationSheet = true else onLocationDenied()
+    }
+    val requestLocationShare: () -> Unit = {
+        val alreadyGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_COARSE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
+        if (alreadyGranted) {
+            showLocationSheet = true
+        } else {
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
     // Focus animation (Garrett's directive): tapping the text field expands
     // the inner Message pill to the full width of the outer pill while the
     // attachment buttons fade+shrink away. They spring back WHENEVER the
@@ -2733,15 +2991,26 @@ private fun Composer(
                     "GIF" -> gifLauncher.launch("image/gif")
                     "Camera" -> launchCamera()
                     "Files" -> filesLauncher.launch("*/*")
+                    "Location" -> requestLocationShare()
                 }
+            },
+        )
+    }
+    if (showLocationSheet) {
+        LocationShareSheet(
+            isSmsChat = isSmsChat,
+            onDismiss = { showLocationSheet = false },
+            onSend = { latitude, longitude, name ->
+                showLocationSheet = false
+                onSendLocation(latitude, longitude, name)
             },
         )
     }
 }
 
 /**
- * Attachment picker sheet: Gallery, Camera, GIF, Files. Picks are still
- * stubbed ("coming soon") — the sheet is the entry point for sends later.
+ * Attachment picker sheet: Gallery, Camera, GIF, Files, Location (the
+ * location entry runs the permission + picker flow in [Composer]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -2762,6 +3031,7 @@ private fun AttachmentSheet(
                 Icons.Filled.PhotoCamera to "Camera",
                 Icons.Filled.Gif to "GIF",
                 Icons.Filled.AttachFile to "Files",
+                Icons.Filled.LocationOn to "Location",
             )
             for ((icon, label) in options) {
                 Row(

@@ -140,6 +140,12 @@ class ChatHistoryCache(dir: File) {
                 "mtmid" to (a?.thumbnailMediaId ?: ""),
                 "mtkey" to b64(a?.thumbnailKey ?: byteArrayOf()),
                 "mname" to (a?.name ?: ""),
+                // Location pin (feature queue 6/7): coordinates + label,
+                // so a cached location message reopens as a location card,
+                // not a bare link bubble. Absent keys = no pin (old files).
+                "llat" to (m.location?.latitude?.toString() ?: ""),
+                "llng" to (m.location?.longitude?.toString() ?: ""),
+                "lname" to (m.location?.name ?: ""),
             )
             pairs.joinToString(",", "{", "}") { (k, v) -> "\"$k\":\"${escape(v)}\"" }
         }
@@ -186,6 +192,15 @@ class ChatHistoryCache(dir: File) {
             read = get("read") != "0",
             tmpId = get("tmp")?.ifBlank { null },
             media = media,
+            location = run {
+                val la = get("llat")?.toDoubleOrNull()
+                val lo = get("llng")?.toDoubleOrNull()
+                if (la != null && lo != null) {
+                    com.garrietta.relay.rcs.proto.RcsLocation(
+                        la, lo, get("lname").orEmpty(),
+                    )
+                } else null
+            },
             deliveryStatus = runCatching {
                 DeliveryStatus.valueOf(get("ds") ?: "NONE")
             }.getOrDefault(DeliveryStatus.NONE),

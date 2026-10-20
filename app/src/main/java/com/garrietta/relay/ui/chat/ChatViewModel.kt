@@ -8,6 +8,7 @@ import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.MessageReaction
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.locationMapsLink
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.repo.AppSeedStore
@@ -528,6 +529,7 @@ class ChatViewModel(
             isMms = false,
             read = true,
             tmpId = tmpId,
+            location = msg.location ?: optimistic.location,
             deliveryStatus = rcsStatusToDelivery(msg.status, true),
         )
         setMessages(
@@ -712,6 +714,93 @@ class ChatViewModel(
         // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
         when (val outcome = repository.sendRcs(conversationId, body, tmpId)) {
+            is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
+                // The server echo (same tmpId) replaces the optimistic bubble.
+            }
+            is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
+                pendingOptimistic.remove(tmpId)
+                setMessages(_messages.value.filterNot { it.tmpId == tmpId })
+                _sendError.value = outcome.reason
+            }
+        }
+    }
+
+    /**
+     * Shares the current location (Garrett 2026-10-20, feature queue
+     * 6/7) from the composer [+] sheet's Location entry. Routing mirrors
+     * text sends exactly: an RCS conversation gets the native
+     * locationContent payload with the Maps link riding in the same
+     * send; an SMS conversation (server type 1, or Telephony) gets the
+     * Maps link as a plain text message — the form that works in every
+     * client. One-shot pin only; nothing tracks in the background.
+     */
+    fun sendLocation(
+        recipient: String,
+        latitude: Double,
+        longitude: Double,
+        name: String?,
+    ) {
+        if (_sending.value) return
+        _sending.value = true
+        _sendError.value = null
+        viewModelScope.launch {
+            try {
+                // Same on-demand RCS resolution as send(): the init-time
+                // resolve may still be in flight.
+                val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
+                    runCatching { repository.rcsConversationFor(address) }
+                        .onFailure { e ->
+                            Log.w(TAG, "sendLocation: on-demand RCS resolve failed", e)
+                        }
+                        .getOrNull()?.also { rcsConversationId = it }
+                } else null
+                val link = locationMapsLink(latitude, longitude)
+                if (convId != null && repository.rcsConversationType(convId) != 1) {
+                    sendRcsLocation(convId, latitude, longitude, name.orEmpty(), link)
+                } else {
+                    // SMS: the link as plain text, through the normal SMS path.
+                    sendSms(recipient, link)
+                }
+            } finally {
+                _sending.value = false
+            }
+        }
+    }
+
+    /**
+     * RCS location send: optimistic location bubble (tmpId-keyed, body =
+     * the Maps link that rides along) → server → the long-poll echo
+     * replaces it via [onRcsIncoming]. Failures remove the optimistic
+     * bubble and surface the VERBATIM reason, exactly like text sends.
+     */
+    private suspend fun sendRcsLocation(
+        conversationId: String,
+        latitude: Double,
+        longitude: Double,
+        name: String,
+        link: String,
+    ) {
+        val tmpId = java.util.UUID.randomUUID().toString()
+        val optimistic = Message(
+            id = -System.currentTimeMillis(),
+            threadId = threadId,
+            address = "",
+            body = link,
+            date = System.currentTimeMillis(),
+            isOutgoing = true,
+            isMms = false,
+            read = true,
+            tmpId = tmpId,
+            location = com.garrietta.relay.rcs.proto.RcsLocation(
+                latitude, longitude, name,
+            ),
+            deliveryStatus = DeliveryStatus.SENDING,
+        )
+        pendingOptimistic[tmpId] = optimistic
+        setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+        when (val outcome = repository.sendRcsLocation(
+            conversationId, latitude, longitude, name, link, tmpId,
+        )) {
             is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
                 // The server echo (same tmpId) replaces the optimistic bubble.
             }

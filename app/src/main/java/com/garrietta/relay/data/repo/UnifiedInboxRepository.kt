@@ -570,6 +570,7 @@ class UnifiedInboxRepository(
                 read = true,
                 tmpId = m.tmpId.ifBlank { null },
                 media = m.media,
+                location = m.location,
                 deliveryStatus = rcsStatusToDelivery(m.status, outgoing),
                 serverId = m.id.ifBlank { null },
                 reactions = m.wireReactions.flatMap { wr ->
@@ -762,6 +763,32 @@ class UnifiedInboxRepository(
             RcsSendOutcome.Sent(tmpId)
         } catch (e: Exception) {
             RcsSendOutcome.Failed(e.message ?: "RCS send failed")
+        }
+    }
+
+    /**
+     * Sends a shared location (Garrett 2026-10-20, feature queue 6/7):
+     * the native locationContent payload with [linkText] riding in the
+     * same send as the human fallback. The echo reconciles via tmpId.
+     * Sends go to the opened conversation only, same as sendRcs.
+     */
+    suspend fun sendRcsLocation(
+        conversationId: String,
+        latitude: Double,
+        longitude: Double,
+        name: String,
+        linkText: String,
+        tmpId: String,
+    ): RcsSendOutcome {
+        return try {
+            rcsTransport.sendRcsLocation(
+                conversationId, latitude, longitude, name, linkText, tmpId,
+            )
+            rcsTransport.refreshConversations()
+            refresh()
+            RcsSendOutcome.Sent(tmpId)
+        } catch (e: Exception) {
+            RcsSendOutcome.Failed(e.message ?: "RCS location send failed")
         }
     }
 

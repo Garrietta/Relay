@@ -60,6 +60,16 @@ data class Conversation(
     val isGroup: Boolean = false,
 )
 
+/**
+ * The human-fallback link for a shared location (Garrett 2026-10-20,
+ * feature queue 6/7): rides inside every RCS location send as its text
+ * part, and IS the whole message on SMS chats, so the recipient always
+ * gets a tappable pin even when their client ignores the native
+ * location payload.
+ */
+fun locationMapsLink(latitude: Double, longitude: Double): String =
+    "https://maps.google.com/?q=$latitude,$longitude"
+
 /** A single message inside a conversation. */
 data class Message(
     val id: Long,
@@ -78,6 +88,13 @@ data class Message(
     val tmpId: String? = null,
     /** RCS media attachment (image/file); null for text messages. */
     val media: com.garrietta.relay.rcs.proto.RcsMediaAttachment? = null,
+    /**
+     * Shared location pin (RCS locationContent); null for non-location
+     * messages. A location message's [body] carries the Maps-link text
+     * that rode along with the native payload (or is blank when another
+     * client sent a bare pin).
+     */
+    val location: com.garrietta.relay.rcs.proto.RcsLocation? = null,
     /**
      * Delivery state for outgoing messages (Garrett 2026-10-19): Google
      * Messages-style ticks — sent → delivered → read. Wired from the RCS

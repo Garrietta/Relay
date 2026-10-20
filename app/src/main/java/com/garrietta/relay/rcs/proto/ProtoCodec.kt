@@ -7,14 +7,21 @@ import java.io.ByteArrayOutputStream
 /**
  * Minimal binary protobuf codec — clean-room implementation for Relay's RCS
  * transport. Covers exactly what the Messages-for-web protocol needs:
- * varints, length-delimited fields (bytes / strings / nested messages) and
- * repeated fields. Fixed32/fixed64 are skipped on decode for tolerance.
+ * varints, length-delimited fields (bytes / strings / nested messages),
+ * repeated fields, and fixed32/fixed64 (the wire forms of float/double —
+ * location coordinates travel as protobuf doubles).
  *
  * Field numbers are protocol facts transcribed from the reference .proto
  * schemas (see each message mapper); all encode/decode logic below is original.
  */
 sealed interface FieldVal {
     data class Varint(val v: Long) : FieldVal
+
+    /** Raw bits of a fixed64 field (a protobuf double via [Double.fromBits]). */
+    data class Fixed64(val v: Long) : FieldVal
+
+    /** Raw bits of a fixed32 field (a protobuf float via [Float.fromBits]). */
+    data class Fixed32(val v: Int) : FieldVal
     data class Bytes(val v: ByteArray) : FieldVal {
         override fun equals(other: Any?): Boolean = other is Bytes && v.contentEquals(other.v)
         override fun hashCode(): Int = v.contentHashCode()
@@ -45,6 +52,14 @@ object ProtoCodec {
                     is FieldVal.Varint -> {
                         cos.writeTag(n, WIRE_VARINT)
                         cos.writeInt64NoTag(v.v)
+                    }
+                    is FieldVal.Fixed64 -> {
+                        cos.writeTag(n, WIRE_FIXED64)
+                        cos.writeFixed64NoTag(v.v)
+                    }
+                    is FieldVal.Fixed32 -> {
+                        cos.writeTag(n, WIRE_FIXED32)
+                        cos.writeFixed32NoTag(v.v)
                     }
                     is FieldVal.Bytes -> {
                         cos.writeTag(n, WIRE_LEN)
@@ -81,8 +96,10 @@ object ProtoCodec {
                     val data = cis.readByteArray()
                     out.getOrPut(n) { mutableListOf() }.add(FieldVal.Bytes(data))
                 }
-                WIRE_FIXED64 -> cis.readFixed64()
-                WIRE_FIXED32 -> cis.readFixed32()
+                WIRE_FIXED64 -> out.getOrPut(n) { mutableListOf() }
+                    .add(FieldVal.Fixed64(cis.readFixed64()))
+                WIRE_FIXED32 -> out.getOrPut(n) { mutableListOf() }
+                    .add(FieldVal.Fixed32(cis.readFixed32()))
                 else -> cis.skipField(tag)
             }
         }
@@ -103,3 +120,11 @@ fun Map<Int, List<FieldVal>>.firstStr(n: Int): String? {
 }
 fun Map<Int, List<FieldVal>>.firstMsg(n: Int): Map<Int, List<FieldVal>>? =
     (this[n]?.firstOrNull() as? FieldVal.Bytes)?.let { ProtoCodec.decode(it.v) }
+
+/** Double (fixed64) at field [n]. */
+fun Map<Int, List<FieldVal>>.firstDouble(n: Int): Double? =
+    (this[n]?.firstOrNull() as? FieldVal.Fixed64)?.v?.let(Double::fromBits)
+
+/** Float (fixed32) at field [n]. */
+fun Map<Int, List<FieldVal>>.firstFloat(n: Int): Float? =
+    (this[n]?.firstOrNull() as? FieldVal.Fixed32)?.v?.let(Float::fromBits)

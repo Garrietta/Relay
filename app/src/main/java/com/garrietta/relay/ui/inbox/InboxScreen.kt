@@ -94,9 +94,12 @@ import com.garrietta.relay.ui.TopSearchPopup
 import com.garrietta.relay.ui.motion.ChromeBandClipMath
 import com.garrietta.relay.ui.motion.InboxChromeBand
 import com.garrietta.relay.ui.motion.RelaySprings
+import com.garrietta.relay.ui.motion.ScrollJiggle
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.motion.rememberScrollJiggle
+import com.garrietta.relay.ui.motion.scrollJiggle
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import com.garrietta.relay.ui.theme.CloverShape
 import com.garrietta.relay.ui.theme.ClusterMember
@@ -174,6 +177,11 @@ fun InboxScreen(
             LazyListState()
         }
     }
+    // Scroll-velocity jiggle (Garrett 2026-10-20): one smoothed signal
+    // for the conversation list — row avatars and clusters read it in
+    // the draw phase (see ScrollJiggle). Reduced motion disables it
+    // wholesale; the scroll behavior itself is untouched.
+    val jiggle = rememberScrollJiggle(listState)
     // Every chat entry point funnels through here so the scroll position
     // is captured BEFORE the chat opens, whichever surface opened it
     // (row tap or a search-popup result). The same funnel carries the
@@ -416,6 +424,8 @@ fun InboxScreen(
                                     ) {
                                         ConversationRow(
                                             conversation = conversation,
+                                            jiggle = jiggle,
+                                            jiggleIndex = index,
                                             typingLabel = typingLabels[conversation.threadId],
                                             muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                             isSelected = conversation.threadId == selectedThreadId,
@@ -430,6 +440,8 @@ fun InboxScreen(
                                 } else {
                                     ConversationRow(
                                         conversation = conversation,
+                                        jiggle = jiggle,
+                                        jiggleIndex = index,
                                         typingLabel = typingLabels[conversation.threadId],
                                         muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                         isSelected = conversation.threadId == selectedThreadId,
@@ -1111,6 +1123,9 @@ private fun ConversationRow(
     isSelected: Boolean = false,
     muted: Boolean = false,
     typingLabel: String? = null,
+    /** The list's scroll-jiggle signal + this row's index (its phase). */
+    jiggle: ScrollJiggle? = null,
+    jiggleIndex: Int = 0,
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
@@ -1205,7 +1220,7 @@ private fun ConversationRow(
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-            Avatar(conversation, pressed)
+            Avatar(conversation, pressed, jiggle, jiggleIndex)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1303,7 +1318,12 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun Avatar(conversation: Conversation, pressed: Boolean) {
+private fun Avatar(
+    conversation: Conversation,
+    pressed: Boolean,
+    jiggle: ScrollJiggle? = null,
+    jiggleIndex: Int = 0,
+) {
     // Shape-as-state: the blob morphs tighter while pressed, with a bouncy
     // press scale — the avatar feels alive under the finger. The avatar
     // shared-morphs in BOTH directions (motionSharedAvatar): up into the
@@ -1344,7 +1364,12 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
                     .graphicsLayer {
                         scaleX = pressScale
                         scaleY = pressScale
-                    },
+                    }
+                    // Scroll jiggle (Garrett 2026-10-20): INSIDE the
+                    // shared element, beside the press scale — a
+                    // draw-phase layer, so the morph's layout bounds
+                    // are untouched (see ScrollJiggle).
+                    .scrollJiggle(jiggle, jiggleIndex),
             )
         } else {
             // Overlay-clip fix (Garrett 2026-10-19: the avatar "bugs" at its
@@ -1369,7 +1394,10 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
                     .graphicsLayer {
                         scaleX = pressScale
                         scaleY = pressScale
-                    },
+                    }
+                    // Scroll jiggle: inside the shared element, as
+                    // with the cluster above (see ScrollJiggle).
+                    .scrollJiggle(jiggle, jiggleIndex),
                 size = 56.dp,
                 shape = if (pressed) WavyBlobShapePressed else WavyBlobShape,
             )

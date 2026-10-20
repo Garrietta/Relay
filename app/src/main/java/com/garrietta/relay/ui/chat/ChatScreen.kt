@@ -157,6 +157,8 @@ import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
 import com.garrietta.relay.ui.motion.motionSharedAvatar
 import com.garrietta.relay.ui.motion.motionSharedBounds
+import com.garrietta.relay.ui.motion.rememberScrollJiggle
+import com.garrietta.relay.ui.motion.scrollJiggle
 import com.garrietta.relay.ui.theme.AvatarShapeAssigner
 import com.garrietta.relay.ui.theme.ChatBubblePair
 import com.garrietta.relay.ui.theme.ClusterMember
@@ -240,6 +242,12 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val chatContext = LocalContext.current
     val listState = rememberLazyListState()
+    // Scroll-velocity jiggle (Garrett 2026-10-20): one smoothed signal
+    // for the message list — bubble rows (and the sender avatars inside
+    // them) read it in the draw phase (see ScrollJiggle). The landing,
+    // tail and restore logic above/below is untouched; this is a
+    // render-layer garnish only. Reduced motion disables it wholesale.
+    val jiggle = rememberScrollJiggle(listState)
     // Fullscreen image pager (Garrett 2026-10-19 21:42): tapping ANY image
     // opens a Google Photos-style pager across the conversation's images.
     // The message id of the tapped image; null = pager closed.
@@ -687,77 +695,81 @@ fun ChatScreen(
                             // placeholder.
                             val msgLocation = message.location
                             if (msgLocation != null) {
-                                LocationBubble(
-                                    message = message,
-                                    location = msgLocation,
-                                    selected = message.id in selectedIds,
-                                    selectionActive = selectedIds.isNotEmpty(),
-                                    onToggleSelect = { viewModel.toggleSelect(message.id) },
-                                    sender = if (isGroup && !message.isOutgoing) {
-                                        viewModel.senderFor(message.address)
-                                    } else null,
-                                    senderSeed = if (isGroup && !message.isOutgoing) {
-                                        viewModel.seedFor(message.address)
-                                    } else null,
-                                    isGroup = isGroup,
-                                    bubblePair = bubblePair,
-                                    threadBackground = threadBackground,
-                                    darkTheme = darkTheme,
-                                    maxBubbleWidth = maxBubbleWidth,
-                                    onAvatarClick = { sender ->
-                                        onOpenDetails(sender.address)
-                                    },
-                                    onShowReactions = { reactionDetail = it },
-                                    onReact = { emoji ->
-                                        viewModel.sendReaction(message, emoji)
-                                    },
-                                )
+                                Box(Modifier.scrollJiggle(jiggle, index)) {
+                                    LocationBubble(
+                                        message = message,
+                                        location = msgLocation,
+                                        selected = message.id in selectedIds,
+                                        selectionActive = selectedIds.isNotEmpty(),
+                                        onToggleSelect = { viewModel.toggleSelect(message.id) },
+                                        sender = if (isGroup && !message.isOutgoing) {
+                                            viewModel.senderFor(message.address)
+                                        } else null,
+                                        senderSeed = if (isGroup && !message.isOutgoing) {
+                                            viewModel.seedFor(message.address)
+                                        } else null,
+                                        isGroup = isGroup,
+                                        bubblePair = bubblePair,
+                                        threadBackground = threadBackground,
+                                        darkTheme = darkTheme,
+                                        maxBubbleWidth = maxBubbleWidth,
+                                        onAvatarClick = { sender ->
+                                            onOpenDetails(sender.address)
+                                        },
+                                        onShowReactions = { reactionDetail = it },
+                                        onReact = { emoji ->
+                                            viewModel.sendReaction(message, emoji)
+                                        },
+                                    )
+                                }
                                 return@itemsIndexed
                             }
                             val media = message.media
                             if (media != null) {
                                 val transcriptKey =
                                     com.garrietta.relay.data.repo.transcriptKeyFor(message)
-                                MediaBubble(
-                                    message = message,
-                                    media = media,
-                                    loadMedia = { att -> viewModel.mediaBytes(att) },
-                                    transcriptionProvider = transcriptionProvider,
-                                    transcriptEntry = transcripts[transcriptKey],
-                                    transcribing = transcriptKey in transcribingKeys,
-                                    onTranscribe = { viewModel.transcribe(message) },
-                                    selected = message.id in selectedIds,
-                                    selectionActive = selectedIds.isNotEmpty(),
-                                    onToggleSelect = { viewModel.toggleSelect(message.id) },
-                                    // Images get a UNIFORM preview width
-                                    // matching Google Messages (Garrett
-                                    // 2026-10-19 evening: measured 0.676 of
-                                    // screen width on his GM screenshot —
-                                    // between the old small size and #125's
-                                    // 0.92 overshoot). Every image bubble is
-                                    // the same width; height follows aspect
-                                    // ratio. Text bubbles keep the 0.8 cap.
-                                    maxBubbleWidth = maxWidth * 0.66f,
-                                    onShowReactions = { reactionDetail = it },
-                                    // Tapping an image opens the conversation
-                                    // image pager (Garrett 2026-10-19 21:42),
-                                    // landing on this image's page.
-                                    onOpenImage = { viewerMessageId = it.id },
-                                    onReact = { emoji ->
-                                        viewModel.sendReaction(message, emoji)
-                                    },
-                                    // Group mode: the media renders inside
-                                    // the sender column so its leading edge
-                                    // matches group text bubbles exactly
-                                    // (Garrett 2026-10-19).
-                                    sender = if (isGroup && !message.isOutgoing)
-                                        viewModel.senderFor(message.address) else null,
-                                    isGroup = isGroup,
-                                    bubblePair = bubblePair,
-                                    onAvatarClick = { sender ->
-                                        onOpenDetails(sender.address)
-                                    },
-                                )
+                                Box(Modifier.scrollJiggle(jiggle, index)) {
+                                    MediaBubble(
+                                        message = message,
+                                        media = media,
+                                        loadMedia = { att -> viewModel.mediaBytes(att) },
+                                        transcriptionProvider = transcriptionProvider,
+                                        transcriptEntry = transcripts[transcriptKey],
+                                        transcribing = transcriptKey in transcribingKeys,
+                                        onTranscribe = { viewModel.transcribe(message) },
+                                        selected = message.id in selectedIds,
+                                        selectionActive = selectedIds.isNotEmpty(),
+                                        onToggleSelect = { viewModel.toggleSelect(message.id) },
+                                        // Images get a UNIFORM preview width
+                                        // matching Google Messages (Garrett
+                                        // 2026-10-19 evening: measured 0.676 of
+                                        // screen width on his GM screenshot —
+                                        // between the old small size and #125's
+                                        // 0.92 overshoot). Every image bubble is
+                                        // the same width; height follows aspect
+                                        // ratio. Text bubbles keep the 0.8 cap.
+                                        maxBubbleWidth = maxWidth * 0.66f,
+                                        onShowReactions = { reactionDetail = it },
+                                        // Tapping an image opens the conversation
+                                        // image pager (Garrett 2026-10-19 21:42),
+                                        // landing on this image's page.
+                                        onOpenImage = { viewerMessageId = it.id },
+                                        onReact = { emoji ->
+                                            viewModel.sendReaction(message, emoji)
+                                        },
+                                        // Group mode: the media renders inside
+                                        // the sender column so its leading edge
+                                        // matches group text bubbles exactly
+                                        // (Garrett 2026-10-19).
+                                        sender = if (isGroup && !message.isOutgoing)
+                                            viewModel.senderFor(message.address) else null,
+                                        isGroup = isGroup,
+                                        bubblePair = bubblePair,
+                                        onAvatarClick = { sender ->
+                                            onOpenDetails(sender.address)
+                                        },
+                                    )
+                                }
                                 return@itemsIndexed
                             }
                             // reverseLayout: index+1 is visually above, index-1 below.
@@ -770,30 +782,32 @@ fun ChatScreen(
                                 belowDiff -> ItemPosition.LAST
                                 else -> ItemPosition.MIDDLE
                             }
-                            MessageBubble(
-                                message = message,
-                                position = position,
-                                selected = message.id in selectedIds,
-                                selectionActive = selectedIds.isNotEmpty(),
-                                onToggleSelect = { viewModel.toggleSelect(message.id) },
-                                // Group mode: resolve the sender for
-                                // per-sender bubble theming. 1:1 chats pass
-                                // null and render exactly as before.
-                                sender = if (isGroup && !message.isOutgoing)
-                                    viewModel.senderFor(message.address) else null,
-                                senderSeed = if (isGroup && !message.isOutgoing)
-                                    viewModel.seedFor(message.address) else null,
-                                isGroup = isGroup,
-                                bubblePair = bubblePair,
-                                threadBackground = threadBackground,
-                                darkTheme = darkTheme,
-                                maxBubbleWidth = maxBubbleWidth,
-                                onAvatarClick = { sender -> onOpenDetails(sender.address) },
-                                onShowReactions = { reactionDetail = it },
-                                onReact = { emoji ->
-                                    viewModel.sendReaction(message, emoji)
-                                },
-                            )
+                            Box(Modifier.scrollJiggle(jiggle, index)) {
+                                MessageBubble(
+                                    message = message,
+                                    position = position,
+                                    selected = message.id in selectedIds,
+                                    selectionActive = selectedIds.isNotEmpty(),
+                                    onToggleSelect = { viewModel.toggleSelect(message.id) },
+                                    // Group mode: resolve the sender for
+                                    // per-sender bubble theming. 1:1 chats pass
+                                    // null and render exactly as before.
+                                    sender = if (isGroup && !message.isOutgoing)
+                                        viewModel.senderFor(message.address) else null,
+                                    senderSeed = if (isGroup && !message.isOutgoing)
+                                        viewModel.seedFor(message.address) else null,
+                                    isGroup = isGroup,
+                                    bubblePair = bubblePair,
+                                    threadBackground = threadBackground,
+                                    darkTheme = darkTheme,
+                                    maxBubbleWidth = maxBubbleWidth,
+                                    onAvatarClick = { sender -> onOpenDetails(sender.address) },
+                                    onShowReactions = { reactionDetail = it },
+                                    onReact = { emoji ->
+                                        viewModel.sendReaction(message, emoji)
+                                    },
+                                )
+                            }
                         }
                         }
                     }

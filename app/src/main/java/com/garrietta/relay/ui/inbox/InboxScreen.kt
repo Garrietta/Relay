@@ -125,16 +125,23 @@ fun InboxScreen(
     val categories by viewModel.categories.collectAsState()
     val selectedCategoryId by viewModel.selectedCategoryId.collectAsState()
     val unknownEnabled by viewModel.unknownEnabled.collectAsState()
+    val unreadEnabled by viewModel.unreadEnabled.collectAsState()
     // True-muted conversations (Garrett 2026-10-20): their rows carry a
     // subtle bell-off indicator; suppression lives in the pipeline.
     val mutedKeys by viewModel.mutedKeys.collectAsState()
-    // The built-in Unknown tab is synthetic: appended LAST after the user's
-    // custom categories, always at the far right of the pill bar (Garrett
-    // 2026-10-19). The bar shows when custom categories exist OR the
-    // Unknown tab is on.
-    val pillCategories = remember(categories, unknownEnabled) {
-        if (unknownEnabled) categories + ChatCategory(CategoryStore.UNKNOWN_ID, "Unknown")
-        else categories
+    // The built-in tabs are synthetic: Unread goes FIRST in this list so
+    // it sits directly after the pill bar's implicit "All" (ahead of the
+    // user's custom categories), and Unknown is appended LAST, always at
+    // the far right of the pill bar (Garrett 2026-10-19 / 2026-10-20).
+    // Middle slots get the standard middle-chip geometry from the bar
+    // itself. The bar shows when custom categories exist OR either
+    // built-in tab is on.
+    val pillCategories = remember(categories, unknownEnabled, unreadEnabled) {
+        buildList {
+            if (unreadEnabled) add(ChatCategory(CategoryStore.UNREAD_ID, "Unread"))
+            addAll(categories)
+            if (unknownEnabled) add(ChatCategory(CategoryStore.UNKNOWN_ID, "Unknown"))
+        }
     }
     val snackbarHostState = remember { SnackbarHostState() }
     // One scroll state per category: switching categories starts the new
@@ -280,8 +287,8 @@ fun InboxScreen(
                 // `conversations`, which the view model already filters
                 // by selected category AND query together.
                 // Category bar — music-app style chips (no container pill).
-                // Rendered when custom categories exist or the built-in
-                // Unknown tab is on; otherwise the inbox shows no bar.
+                // Rendered when custom categories exist or either built-in
+                // tab (Unread / Unknown) is on; otherwise no bar.
                 CategoryPillBar(
                     categories = pillCategories,
                     selectedId = selectedCategoryId,

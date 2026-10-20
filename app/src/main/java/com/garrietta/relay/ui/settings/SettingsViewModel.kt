@@ -88,8 +88,11 @@ class SettingsViewModel(
     val categories: StateFlow<List<ChatCategory>> = categoryStore.categories
     val assignments: StateFlow<Map<String, String>> = categoryStore.assignments
     val unknownEnabled: StateFlow<Boolean> = categoryStore.unknownEnabled
+    val unreadEnabled: StateFlow<Boolean> = categoryStore.unreadEnabled
 
     fun setUnknownEnabled(on: Boolean) = categoryStore.setUnknownEnabled(on)
+
+    fun setUnreadEnabled(on: Boolean) = categoryStore.setUnreadEnabled(on)
 
     /** All conversations, for the per-category assignment UI. */
     val conversations: StateFlow<List<Conversation>> = repository.conversations

@@ -62,6 +62,25 @@ class CategoryStore(context: Context) {
         if (!on && _selectedId.value == UNKNOWN_ID) selectCategory(null)
     }
 
+    private val _unreadEnabled = MutableStateFlow(prefs.getBoolean(KEY_UNREAD, true))
+    /**
+     * Built-in "Unread" tab (Garrett 2026-10-20): toggleable, sits
+     * directly AFTER "All" in the pill bar (ahead of the user
+     * categories; Unknown keeps the far-right slot). Default ON,
+     * mirroring the Unknown tab's default. Unlike Unknown it is a
+     * FILTER VIEW, not a partition: enabling it never removes anything
+     * from All — the tab simply shows the conversations that currently
+     * have unread messages, live (a chat leaves the moment it is read,
+     * joins the moment a new message lands unread).
+     */
+    val unreadEnabled: StateFlow<Boolean> = _unreadEnabled.asStateFlow()
+
+    fun setUnreadEnabled(on: Boolean) {
+        _unreadEnabled.value = on
+        prefs.edit().putBoolean(KEY_UNREAD, on).apply()
+        if (!on && _selectedId.value == UNREAD_ID) selectCategory(null)
+    }
+
     /** Adds a category; returns its id. Blank names are rejected with null. */
     fun addCategory(name: String): String? {
         val clean = name.trim()
@@ -120,8 +139,11 @@ class CategoryStore(context: Context) {
 
     /** Null = "All". Unknown ids are ignored (stay on current selection). */
     fun selectCategory(id: String?) {
-        if (id != null && id != UNKNOWN_ID && _categories.value.none { it.id == id }) return
+        if (id != null && id != UNKNOWN_ID && id != UNREAD_ID &&
+            _categories.value.none { it.id == id }
+        ) return
         if (id == UNKNOWN_ID && !_unknownEnabled.value) return
+        if (id == UNREAD_ID && !_unreadEnabled.value) return
         _selectedId.value = id
         prefs.edit().putString(KEY_SELECTED, id).apply()
     }
@@ -132,12 +154,20 @@ class CategoryStore(context: Context) {
         private const val KEY_ASSIGNMENTS = "assignments_json"
         private const val KEY_SELECTED = "selected_id"
         private const val KEY_UNKNOWN = "unknown_enabled"
+        private const val KEY_UNREAD = "unread_enabled"
         /**
          * Synthetic id of the built-in Unknown tab. Never stored in
          * [_categories] (not user-created, not deletable/renamable/
          * reorderable) — the UI appends it LAST after the user categories.
          */
         const val UNKNOWN_ID = "unknown"
+
+        /**
+         * Synthetic id of the built-in Unread tab. Never stored in
+         * [_categories] either — the UI prepends it BEFORE the user
+         * categories so it sits directly after "All".
+         */
+        const val UNREAD_ID = "unread"
 
         /** Stable key for a conversation across restarts. */
         fun conversationKey(rcsConversationId: String?, threadId: Long): String =

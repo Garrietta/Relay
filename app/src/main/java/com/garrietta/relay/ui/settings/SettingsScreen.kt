@@ -302,6 +302,7 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
         // in the pill bar. While on, chats from bare unsaved numbers
         // (campaign spam, short codes) move out of All into their own tab.
         val unknownEnabled by viewModel.unknownEnabled.collectAsState()
+        val unreadEnabled by viewModel.unreadEnabled.collectAsState()
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -319,6 +320,29 @@ private fun CategoriesCard(viewModel: SettingsViewModel) {
             androidx.compose.material3.Switch(
                 checked = unknownEnabled,
                 onCheckedChange = viewModel::setUnknownEnabled,
+            )
+        }
+        // Built-in Unread tab (Garrett 2026-10-20): sits directly after
+        // "All" in the pill bar. A filter view, not a partition — All
+        // keeps every chat; the tab just shows the ones with unread
+        // messages, live as read state changes.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Unread messages", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Show a tab with only chats that have unread messages",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            androidx.compose.material3.Switch(
+                checked = unreadEnabled,
+                onCheckedChange = viewModel::setUnreadEnabled,
             )
         }
         Spacer(Modifier.height(4.dp))

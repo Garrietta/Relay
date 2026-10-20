@@ -28,6 +28,7 @@ class InboxViewModel(
     val categories: StateFlow<List<ChatCategory>> = categoryStore.categories
     val selectedCategoryId: StateFlow<String?> = categoryStore.selectedCategoryId
     val unknownEnabled: StateFlow<Boolean> = categoryStore.unknownEnabled
+    val unreadEnabled: StateFlow<Boolean> = categoryStore.unreadEnabled
 
     /**
      * Conversations with notifications truly muted (Garrett 2026-10-20).
@@ -63,7 +64,22 @@ class InboxViewModel(
             // chats — but auto-classification wins, so unknown threads never
             // leak into All or into a custom category while the toggle is on.
             // Stale assignments (to a deleted category) match nothing.
+            // The built-in Unread tab is a FILTER VIEW, not a partition
+            // (Garrett 2026-10-20): it shows only conversations with unread
+            // messages — the row's unread flag is already OR-ed across
+            // duplicate-merged members (ThreadMerging), and muted chats
+            // still count (mute silences notifications, not read state).
+            // Turning Unread on never changes what All shows. Auto-
+            // classification still wins inside it, exactly as in All and
+            // custom categories: while the Unknown tab is on, unknown
+            // threads live under Unknown, not here. Membership is live —
+            // this combine re-runs on every repository emission, so a
+            // chat joins/leaves the moment its read state flips.
             filtered = when {
+                selectedId == CategoryStore.UNREAD_ID ->
+                    filtered.filter {
+                        it.unread && !(unknownOn && it.isUnknownNumber())
+                    }
                 unknownOn && selectedId == CategoryStore.UNKNOWN_ID ->
                     filtered.filter { it.isUnknownNumber() }
                 selectedId != null ->

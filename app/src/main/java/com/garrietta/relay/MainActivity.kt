@@ -190,16 +190,20 @@ class MainActivity : ComponentActivity() {
     private fun RelaySinglePane() {
         val backStack = remember { mutableStateListOf<Screen>(Screen.Inbox) }
         var navForward by remember { mutableStateOf(true) }
-        // New-chat open counter (Garrett 2026-10-19): Screen.NewConversation
-        // is a singleton object, so AnimatedContent reuses its composition
-        // across opens — animation/remember state leaks from one open to the
-        // next and the sheet grows taller every time. Keying the dialog on a
-        // per-open nonce forces a genuinely fresh composition (and a locked
-        // sheet height) on every press.
+        // New-chat popup state (Garrett 2026-10-19 / 2026-10-20): the
+        // popup is an OVERLAY over the still-composed inbox (composed at
+        // the end of this function), never a navigation destination —
+        // as an AnimatedContent destination the screen swap removed the
+        // inbox from composition, so the popup's scrim dimmed only the
+        // flat window background and the popup read as a gray sheet,
+        // including the area a drag-to-dismiss uncovers. The per-open
+        // nonce keys the dialog so every open is a genuinely fresh
+        // composition: no animation/remember state leaks between opens
+        // and the sheet height can never accumulate.
+        var showNewConversation by remember { mutableStateOf(false) }
         var newConvNonce by remember { mutableStateOf(0L) }
         fun push(s: Screen) {
             navForward = true
-            if (s is Screen.NewConversation) newConvNonce++
             backStack.add(s)
         }
         fun pop() {
@@ -233,13 +237,7 @@ class MainActivity : ComponentActivity() {
                 transitionSpec = {
                     val incoming = targetState
                     val outgoing = initialState
-                    if (incoming is Screen.NewConversation || outgoing is Screen.NewConversation) {
-                        // The new-conversation sheet animates ITSELF (slide-up
-                        // entrance like a music player, inside
-                        // NewConversationDialog) — the screen swap underneath
-                        // is a plain quick fade so the two never fight.
-                        fadeIn(tween(120)) togetherWith fadeOut(tween(120))
-                    } else if (incoming is Screen.ChatDetails || outgoing is Screen.ChatDetails) {
+                    if (incoming is Screen.ChatDetails || outgoing is Screen.ChatDetails) {
                         // Same pattern: the details page slides itself up
                         // (bouncy, like new-chat); the swap underneath fades.
                         fadeIn(tween(120)) togetherWith fadeOut(tween(120))
@@ -275,7 +273,7 @@ class MainActivity : ComponentActivity() {
                                     push(Screen.Chat(it.threadId, it.address, it.displayName, it.threadIds, it.transportLabel, it.rcsConversationId, it.isGroup))
                                 },
                                 onOpenSettings = { push(Screen.Settings) },
-                                onNewConversation = { push(Screen.NewConversation) },
+                                onNewConversation = { newConvNonce++; showNewConversation = true },
                             )
                         }
                         is Screen.Chat -> {
@@ -344,23 +342,28 @@ class MainActivity : ComponentActivity() {
                                 onBack = ::pop,
                             )
                         }
-                        is Screen.NewConversation -> {
-                            // Fresh composition per open (see newConvNonce):
-                            // no animation or layout state survives between
-                            // opens, so the sheet height can never accumulate.
-                            key(newConvNonce) {
-                            NewConversationDialog(
-                                onDismiss = ::pop,
-                                onStart = { number ->
-                                    pop()
-                                    // threadId unknown until first message; use -1 placeholder.
-                                    push(Screen.Chat(-1L, number, number))
-                                },
-                            )
-                            }
-                        }
                     }
                 }
+            }
+        }
+
+        // New-conversation popup overlay (Garrett 2026-10-20): composed
+        // AFTER the navigation host, over the still-composed inbox —
+        // the identical host seam as the two-pane overlay below and as
+        // the inbox search popup inside InboxScreen — so the shared
+        // TopSearchPopup scrim dims the homepage itself, at rest and
+        // throughout the drag-to-dismiss. Fresh composition per open
+        // via the nonce key (see the state declaration above).
+        if (showNewConversation) {
+            key(newConvNonce) {
+                NewConversationDialog(
+                    onDismiss = { showNewConversation = false },
+                    onStart = { number ->
+                        showNewConversation = false
+                        // threadId unknown until first message; use -1 placeholder.
+                        push(Screen.Chat(-1L, number, number))
+                    },
+                )
             }
         }
     }

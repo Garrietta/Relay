@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -68,6 +69,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -141,6 +143,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.RelayApp
 import com.garrietta.relay.data.model.Conversation
@@ -258,6 +261,19 @@ fun ChatScreen(
     // callback corrects it on the first layout.
     var composerZoneHeight by remember { mutableStateOf(96.dp) }
     val chatDensity = LocalDensity.current
+    // The chat root's measured size (the Scaffold content area after
+    // its top padding and the IME inset). The shared surface's bounds
+    // and its content's pinned layout derive from it (see
+    // ChatSurfaceGeometry), so both are computed from the settled pane
+    // rather than from whatever box a transient layout offered.
+    var paneSize by remember { mutableStateOf(IntSize.Zero) }
+    // True once the bottom-chrome overlay has reported its first
+    // measured height. Open-time scroll placements (restore,
+    // notification landing, tail pinning) wait for it: before it, the
+    // surface height and the list's bottom padding are still computed
+    // from the seeded zone height, and a placement made against them
+    // visibly shifts when the measurement lands.
+    var composerZoneMeasured by remember { mutableStateOf(false) }
     // Scroll-velocity jiggle (Garrett 2026-10-20): one smoothed signal
     // for the message list — bubble rows (and the sender avatars inside
     // them) read it in the draw phase (see ScrollJiggle). The landing,
@@ -533,8 +549,14 @@ fun ChatScreen(
     // is ALREADY on screen (its nonce key re-fires it): no navigation
     // happens anywhere, the view just scrolls. Landing consumes the
     // request, after which the ordinary tail rules own the scroll.
-    LaunchedEffect(messages, pendingOpen) {
+    LaunchedEffect(messages, pendingOpen, composerZoneMeasured) {
         val request = pendingOpen ?: return@LaunchedEffect
+        // Placements are made against settled geometry only: until
+        // the bar zone's first measurement lands, the surface height
+        // and the list's bottom padding still derive from the seeded
+        // zone height, and a landing made against them shifts when
+        // the measurement corrects it.
+        if (!composerZoneMeasured) return@LaunchedEffect
         if (messages.isEmpty()) return@LaunchedEffect
         val targetId = NotificationOpenLogic.targetUiMessageId(request)
         val index = if (targetId != null) {
@@ -574,7 +596,11 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(messages) {
+    LaunchedEffect(messages, composerZoneMeasured) {
+        // Settled geometry first (see the notification effect above);
+        // the guard precedes every mutation so restore attempts never
+        // burn while waiting for the bar zone's first measurement.
+        if (!composerZoneMeasured) return@LaunchedEffect
         if (messages.isEmpty() || scrollRestored) return@LaunchedEffect
         // A pending notification open owns the landing instead (see
         // the effect above): the saved position is ignored for that
@@ -633,7 +659,11 @@ fun ChatScreen(
     // scrolled up into history, the view is never yanked. It also
     // completes the open-time rule when the first emission was the
     // cache (see tailRecheck, armed by the restore effect above).
-    LaunchedEffect(messages) {
+    LaunchedEffect(messages, composerZoneMeasured) {
+        // Same settled-geometry gate: the tail pin is an open-time
+        // placement too, and lastTailId must not prime against the
+        // seed geometry (the first post-measurement run primes it).
+        if (!composerZoneMeasured) return@LaunchedEffect
         if (!scrollRestored || messages.isEmpty()) return@LaunchedEffect
         val tail = messages.first()
         val previousTailId = lastTailId
@@ -715,6 +745,47 @@ fun ChatScreen(
                 else MaterialTheme.colorScheme.surfaceContainerLow,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { padding ->
+            // Settled surface geometry (see ChatSurfaceGeometry): the
+            // shared surface ends at the bar zone's top, and its
+            // content is pinned to the pane's full measured size.
+            val surfaceShape = RoundedCornerShape(
+                topStart = 28.dp, topEnd = 28.dp,
+            )
+            val zoneHeightPx = with(chatDensity) {
+                composerZoneHeight.roundToPx()
+            }
+            val surfaceHeightDp = if (paneSize != IntSize.Zero) {
+                with(chatDensity) {
+                    ChatSurfaceGeometry
+                        .surfaceHeightPx(paneSize.height, zoneHeightPx)
+                        .toDp()
+                }
+            } else {
+                null
+            }
+            val pinSize = ChatSurfaceGeometry.pinSize(
+                paneSize.width, paneSize.height, chatDensity.density,
+            )
+            // The content's own clip: the container's rounded top
+            // corners, with the sides extended a full height past the
+            // bottom so the clip never cuts the draw-behind overflow
+            // (the morph's overlay clip does the flight clipping).
+            val surfaceContentClip = remember(chatDensity) {
+                val r = with(chatDensity) { 28.dp.toPx() }
+                GenericShape { size, _ ->
+                    val extendedBottom = size.height * 2f
+                    moveTo(0f, r)
+                    arcTo(Rect(0f, 0f, r * 2f, r * 2f), 180f, 90f, false)
+                    lineTo(size.width - r, 0f)
+                    arcTo(
+                        Rect(size.width - r * 2f, 0f, size.width, r * 2f),
+                        270f, 90f, false,
+                    )
+                    lineTo(size.width, extendedBottom)
+                    lineTo(0f, extendedBottom)
+                    close()
+                }
+            }
             // Destination chrome vs traveling content (Garrett 2026-10-20):
             // the composer and the selection bar are this chat's OWN bars
             // — destination chrome, exactly like the header above (a
@@ -731,21 +802,38 @@ fun ChatScreen(
             //
             // The bars also FLOAT over the surface (Garrett 2026-10-20:
             // "the chat should draw behind the bar at the bottom of the
-            // chat"): the surface runs the full height of the pane and
-            // the bars overlay its bottom edge, so scrolled messages
-            // pass under the composer pill instead of stopping dead at
-            // its top edge. Rest stays honest — the list's bottom
-            // content padding tracks the measured bar zone
-            // (composerZoneHeight), so the newest message parks fully
-            // clear of the bar; drawing behind is a scroll-time visual
-            // only. Under the surface, the Scaffold's containerColor
-            // (the wallpaper's bottom tone) backs any strip the morph
-            // hasn't covered yet, so no seam ever shows.
+            // chat"): the surface's content runs the full height of the
+            // pane and overflows the surface's own bottom edge, so
+            // scrolled messages pass under the composer pill instead of
+            // stopping dead at its top edge. Rest stays honest — the
+            // list's bottom content padding tracks the measured bar
+            // zone (composerZoneHeight), so the newest message parks
+            // fully clear of the bar; drawing behind is a scroll-time
+            // visual only. Under the surface, the Scaffold's
+            // containerColor (the wallpaper's bottom tone) backs any
+            // strip the morph hasn't covered yet, so no seam ever
+            // shows.
+            //
+            // The surface itself, though, ends at the bar zone's top
+            // (Garrett 2026-10-20, follow-on: "the whole message bar
+            // is disappearing on first load of the chat — every single
+            // time"). While the surface ran full-height, the morph's
+            // overlay copy — the surface rendered above the whole
+            // pane — painted its opaque background across the bar's
+            // zone for the entire flight: the bar faded in UNDERNEATH
+            // the copy and popped into view only when the copy lifted
+            // at settle. The header never lagged because the surface
+            // starts below it and the copy never reaches it; the
+            // surface now ends above the bar zone for the same reason,
+            // so the copy can't cover the bar in either direction and
+            // the bar rides the pane transform whole from the first
+            // frame, exactly like the header.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
                     .imePadding()
+                    .onSizeChanged { size -> paneSize = size }
                     // Tap-outside clears the text field's focus: message
                     // bubbles consume their own taps (child clickables
                     // win), so this only fires on empty areas / the
@@ -757,32 +845,67 @@ fun ChatScreen(
                 // Thread container: the chat reads as one large rounded
                 // container below the app bar (M3E containment), visually
                 // independent of it. Shared-bounds target for the inbox
-                // conversation row. The surface spans the pane's full
-                // height — its bottom edge runs behind the floating
-                // bars, which are chrome, not content.
+                // conversation row. The surface's bounds end at the bar
+                // zone's top — its morph copy can never cover the
+                // floating bars, which are chrome, not content — while
+                // its content (below) is pinned to the pane's full
+                // height and overflows that bottom edge, so messages
+                // still draw behind the bars in place.
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
+                        .then(
+                            if (surfaceHeightDp != null) {
+                                Modifier.height(surfaceHeightDp)
+                            } else {
+                                Modifier.fillMaxHeight()
+                            },
+                        )
                         .motionSharedBounds(
                             SharedElementKeys.conversation(threadId),
-                            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                            shape = surfaceShape,
                         )
-                        .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                         // Chat wallpaper (Garrett 2026-10-20): the
                         // picked background gradient fills the thread;
                         // unthemed chats keep the flat scheme surface,
-                        // byte-for-byte today's look.
+                        // byte-for-byte today's look. The background
+                        // takes the container shape directly — no clip
+                        // on the surface itself, so its content stays
+                        // free to overflow the bottom edge (the
+                        // draw-behind); the morph's own overlay clip
+                        // still bounds the traveling copy.
                         .then(
-                            if (bgOption != null) Modifier.background(bgBrush)
-                            else Modifier.background(
-                                MaterialTheme.colorScheme.surfaceContainerLow,
-                            ),
+                            if (bgOption != null) {
+                                Modifier.background(bgBrush, surfaceShape)
+                            } else {
+                                Modifier.background(
+                                    MaterialTheme.colorScheme.surfaceContainerLow,
+                                    surfaceShape,
+                                )
+                            },
                         ),
                 ) {
                     // Bubbles never span the full width: received keep an
                     // empty right margin, sent an empty left one.
                     BoxWithConstraints(
-                        modifier = Modifier.fillMaxSize(),
+                        // Pinned to the pane's full measured size (see
+                        // ChatSurfaceGeometry): the list's viewport
+                        // and parking geometry are the settled pane's
+                        // even though the surface above ends at the bar
+                        // zone's top — the overflow IS the draw-behind.
+                        // The pin holds inside the morph's copy too,
+                        // so mid-flight every item already sits at its
+                        // final geometry and the copy's clip reveals
+                        // it: a growing window, never a re-layout
+                        // riding the animated bounds. The content clip
+                        // rounds the container's top corners and
+                        // extends past the bottom, so it never cuts
+                        // the overflow.
+                        modifier = (if (pinSize != null) {
+                            Modifier.requiredSize(pinSize)
+                        } else {
+                            Modifier.fillMaxSize()
+                        }).clip(surfaceContentClip),
                     ) {
                         val maxBubbleWidth = maxWidth * 0.8f
                         LazyColumn(
@@ -969,6 +1092,7 @@ fun ChatScreen(
                         .onSizeChanged { size ->
                             composerZoneHeight =
                                 with(chatDensity) { size.height.toDp() }
+                            composerZoneMeasured = true
                         },
                 ) {
                     // Selection action bar (Garrett 2026-10-20, feature

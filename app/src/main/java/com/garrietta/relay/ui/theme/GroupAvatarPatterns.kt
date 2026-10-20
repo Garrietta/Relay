@@ -2,6 +2,9 @@ package com.garrietta.relay.ui.theme
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -13,10 +16,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import coil.compose.AsyncImage
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -119,6 +124,13 @@ fun GroupAvatarCluster(
             GroupPattern.ZIGZAG -> zigzagPlacements(shown.size)
         }
     }
+    // Two-person chats (Garrett 2026-10-19): ONE composite avatar — a
+    // single circle split between the two members — instead of two
+    // separate circles. The 5-avatar collage keeps its patterns.
+    if (members.size == 2) {
+        TwoAvatarComposite(members[0], members[1], boxSize, modifier)
+        return
+    }
     val smallText = boxSize < 80.dp
     Box(modifier = modifier.size(boxSize)) {
         shown.forEachIndexed { i, member ->
@@ -163,6 +175,61 @@ fun GroupAvatarCluster(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/**
+ * Two-person composite avatar: a single circle, left half = first member,
+ * right half = second member (photo or initial on the deterministic
+ * per-contact fallback color). Reads as one avatar, not two.
+ */
+@Composable
+private fun TwoAvatarComposite(
+    a: ClusterMember,
+    b: ClusterMember,
+    boxSize: Dp,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(boxSize)
+            .clip(CircleShape),
+    ) {
+        Row(modifier = Modifier.fillMaxSize()) {
+            CompositeHalf(a, Modifier.weight(1f).fillMaxHeight())
+            CompositeHalf(b, Modifier.weight(1f).fillMaxHeight())
+        }
+    }
+}
+
+@Composable
+private fun CompositeHalf(member: ClusterMember, modifier: Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val (bg, fg) = remember(member.address, scheme) {
+        val palette = listOf(
+            scheme.primaryContainer to scheme.onPrimaryContainer,
+            scheme.secondaryContainer to scheme.onSecondaryContainer,
+            scheme.tertiaryContainer to scheme.onTertiaryContainer,
+        )
+        palette[(member.address.hashCode().and(Int.MAX_VALUE)) % palette.size]
+    }
+    Box(
+        modifier = modifier.background(bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = member.name.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+            style = MaterialTheme.typography.titleMedium,
+            color = fg,
+        )
+        if (member.photoUri != null) {
+            AsyncImage(
+                model = member.photoUri,
+                contentDescription = "Profile photo for ${member.name}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
         }
     }
 }

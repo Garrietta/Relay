@@ -426,6 +426,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenSettings = { showSettings = true },
                             onNewConversation = { newChatNonce++; showNewConversation = true },
+                            selectedThreadId = selected?.threadId,
                         )
                     }
                     // Draggable divider handle between the panes: a wide

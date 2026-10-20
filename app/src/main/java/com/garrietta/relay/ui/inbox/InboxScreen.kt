@@ -116,6 +116,11 @@ fun InboxScreen(
     onOpenChat: (Conversation) -> Unit,
     onOpenSettings: () -> Unit,
     onNewConversation: () -> Unit,
+    /**
+     * Thread currently open in the detail pane (unfolded two-pane mode).
+     * Its inbox row gets the expressive selection overlay.
+     */
+    selectedThreadId: Long? = null,
 ) {
     val conversations by viewModel.conversations.collectAsState()
     val query by viewModel.query.collectAsState()
@@ -239,19 +244,21 @@ fun InboxScreen(
                 // flip All/W/T mid-search to re-filter the results.
                 AnimatedVisibility(
                     visible = searchOpen,
-                    enter = fadeIn(animationSpec = tween(160)) +
+                    enter = fadeIn(animationSpec = tween(180)) +
                         scaleIn(
                             animationSpec = RelaySprings.bouncy(),
-                            initialScale = 0.82f,
+                            initialScale = 0.9f,
                         ) +
                         slideInVertically(
                             animationSpec = RelaySprings.bouncy(),
-                            initialOffsetY = { it / 3 },
+                            // Surges in OVER THE TOP of the screen, not a
+                            // bloom in place (Garrett 2026-10-19).
+                            initialOffsetY = { -it },
                         ),
                     exit = fadeOut(tween(150)) +
-                        shrinkVertically(
-                            shrinkTowards = Alignment.Top,
-                            animationSpec = tween(150),
+                        slideOutVertically(
+                            animationSpec = tween(180),
+                            targetOffsetY = { -it / 2 },
                         ),
                     label = "searchBar",
                 ) {
@@ -335,6 +342,7 @@ fun InboxScreen(
                                     ) {
                                         ConversationRow(
                                             conversation = conversation,
+                                            isSelected = conversation.threadId == selectedThreadId,
                                             onClick = { onOpenChat(conversation) },
                                             onMarkRead = {
                                                 if (conversation.unread) viewModel.markRead(conversation.threadIds)
@@ -346,6 +354,7 @@ fun InboxScreen(
                                 } else {
                                     ConversationRow(
                                         conversation = conversation,
+                                        isSelected = conversation.threadId == selectedThreadId,
                                         onClick = { onOpenChat(conversation) },
                                         onMarkRead = {
                                             if (conversation.unread) viewModel.markRead(conversation.threadIds)
@@ -411,7 +420,17 @@ fun InboxScreen(
                             .clickable(
                                 interactionSource = searchInteraction,
                                 indication = null,
-                                onClick = { searchOpen = true },
+                                // Tapping the search button while search is open
+                                // DISMISSES it (Garrett 2026-10-19) — the
+                                // button is a toggle, not a one-way door.
+                                onClick = {
+                                    if (searchOpen) {
+                                        searchOpen = false
+                                        viewModel.setQuery("")
+                                    } else {
+                                        searchOpen = true
+                                    }
+                                },
                                 role = Role.Button,
                             ),
                         contentAlignment = Alignment.Center,
@@ -706,6 +725,7 @@ private fun ConversationRow(
     onClick: () -> Unit,
     onMarkRead: () -> Unit,
     onDelete: () -> Unit,
+    isSelected: Boolean = false,
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
@@ -788,17 +808,18 @@ private fun ConversationRow(
     ) {
         // Flat row inside the list container — the container carries the
         // shape; the row itself stays neutral.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    onClick = onClick,
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = onClick,
+                    )
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             Avatar(conversation, pressed)
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -843,6 +864,25 @@ private fun ConversationRow(
                     Spacer(Modifier.width(8.dp))
                     TransportChip(conversation.transportLabel)
                 }
+            }
+        }
+            // Selection overlay (Garrett 2026-10-19): a slightly
+            // transparent expressive polygon OVER the selected chat's row
+            // — part of the M3E language, not a flat highlight. Bouncy
+            // alpha in/out as the selection moves between rows.
+            val overlayAlpha by animateFloatAsState(
+                targetValue = if (isSelected) 1f else 0f,
+                animationSpec = RelaySprings.bouncy(),
+                label = "selectionOverlay",
+            )
+            if (overlayAlpha > 0.01f) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .graphicsLayer { alpha = overlayAlpha * 0.22f }
+                        .clip(expressiveShape("Puffy"))
+                        .background(MaterialTheme.colorScheme.primary),
+                )
             }
         }
     }

@@ -163,6 +163,9 @@ class RelayApp : Application() {
     ) {
         MessageNotifications.recordIncomingObserved()
         if (!notifiedMessageIds.add(msg.id)) return
+        // LRU history: every new message bumps its conversation to the
+        // front of the 50-chat active set (Garrett 2026-10-19).
+        repository.touchHistory(msg.conversationId)
         if (notifiedMessageIds.size > 500) {
             // Bound the dedupe set: drop the oldest half.
             notifiedMessageIds.drop(250).forEach { notifiedMessageIds.remove(it) }
@@ -191,6 +194,11 @@ class RelayApp : Application() {
             if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
         }
         MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs)
+        // Garrett 2026-10-19: a posted notification FORCES the RCS refresh
+        // (the same one the Diagnostics Refresh button does) so the inbox
+        // and chat panes pick the message up — notification and UI stay
+        // in sync instead of the notification arriving alone.
+        repository.refresh()
     }
 
     /** First poll baseline: everything currently on the server is "seen". */

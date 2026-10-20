@@ -5,6 +5,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -152,6 +155,7 @@ fun ChatScreen(
     val selectedIds by viewModel.selectedIds.collectAsState()
     val participants by viewModel.participants.collectAsState()
     val others by viewModel.others.collectAsState()
+    val isTyping by viewModel.isTyping.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -332,6 +336,15 @@ fun ChatScreen(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier.fillMaxSize(),
                         ) {
+                            // Remote typing indicator (Garrett 2026-10-19):
+                            // animated dots in a received-style bubble at the
+                            // bottom of the thread. reverseLayout puts this
+                            // head item visually below the newest message.
+                            if (isTyping) {
+                                item(key = "typing-indicator", contentType = "typing") {
+                                    TypingIndicatorBubble()
+                                }
+                            }
                         itemsIndexed(
                             items = messages,
                             key = { _, it -> it.id },
@@ -409,6 +422,66 @@ fun ChatScreen(
             }
         }
     }
+}
+
+/**
+ * Remote typing indicator (Garrett 2026-10-19): three animated dots in a
+ * received-style bubble. The paired web protocol's typingEvent carries no
+ * sender id, so groups show this generic indicator. Bouncy pop-in/out via
+ * the surrounding AnimatedVisibility in the message list.
+ */
+@Composable
+private fun TypingIndicatorBubble() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.padding(vertical = 4.dp),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                repeat(3) { i -> TypingDot(phaseDelayMs = i * 160) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypingDot(phaseDelayMs: Int) {
+    val infinite = rememberInfiniteTransition(label = "typingDot")
+    val dotSpec = infiniteRepeatable<Float>(
+        animation = tween(durationMillis = 450, delayMillis = phaseDelayMs),
+        repeatMode = RepeatMode.Reverse,
+    )
+    val scale by infinite.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = dotSpec,
+        label = "typingDotScale",
+    )
+    val alpha by infinite.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = dotSpec,
+        label = "typingDotAlpha",
+    )
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                this.alpha = alpha
+            }
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.onSurfaceVariant),
+    )
 }
 
 /**

@@ -13,6 +13,7 @@ import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isUnknownSenderGhostName
+import com.garrietta.relay.rcs.proto.isUnknownSenderGhost
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
@@ -107,6 +108,38 @@ class UnifiedInboxRepository(
     @Synchronized
     fun putCachedMessages(conversationKey: String, messages: List<com.garrietta.relay.data.model.Message>) {
         messageCache[conversationKey] = messages
+        // Write-through to the persistent LRU (text only, never image
+        // bytes): the 50 most recently active chats survive restarts.
+        scope.launch { historyCache.write(conversationKey, messages) }
+    }
+
+    /**
+     * Persistent LRU text-history cache (Garrett 2026-10-19): the 50 most
+     * recently active conversations keep their text history on disk.
+     * Lazy so the files dir exists; all IO happens off the caller.
+     */
+    private val historyCache by lazy { ChatHistoryCache(context.filesDir) }
+
+    /**
+     * Disk-LRU read for instant paint on cold start. Call off the main
+     * thread; on a hit the memory cache is primed too. Returns null on a
+     * miss or corrupt file.
+     */
+    suspend fun cachedHistoryFromDisk(
+        conversationKey: String,
+    ): List<com.garrietta.relay.data.model.Message>? = withContext(Dispatchers.IO) {
+        val disk = historyCache.read(conversationKey) ?: return@withContext null
+        synchronized(this@UnifiedInboxRepository) { messageCache[conversationKey] = disk }
+        disk
+    }
+
+    /**
+     * Recency bump: a new incoming/outgoing message for [conversationKey]
+     * moves it to the front of the 50-chat active set (its file stays
+     * readable even after eviction — just no longer kept fresh).
+     */
+    fun touchHistory(conversationKey: String) {
+        scope.launch { historyCache.touch(conversationKey) }
     }
 
     private val refreshTick = MutableStateFlow(0)
@@ -331,7 +364,11 @@ class UnifiedInboxRepository(
     private suspend fun mapRcsConversation(
         c: com.garrietta.relay.rcs.proto.RcsConversation,
     ): Conversation {
+        // UNKNOWN_SENDER! ghosts vanish here — filtered at the RCS
+        // level, before any name is composed or Participant built.
+        // Display-layer only; the server data is untouched.
         val others = cleanRcsParticipants(c.participants)
+            .filterNot { it.isUnknownSenderGhost() }
         // Never trust a server conversation name containing "unknown" — the
         // server auto-names groups from raw participants ("Alec, Trenton,
         // Unknown"); rebuild from the cleaned list instead. A genuine custom
@@ -432,7 +469,7 @@ class UnifiedInboxRepository(
             conv.participants.filter { p ->
                 val norm = normalizedAddress(p.number)
                 if (norm.isEmpty()) true else seen.add(norm)
-            }.map { p ->
+            }.filterNot { it.isUnknownSenderGhost() }.map { p ->
                 Participant(
                     address = p.number,
                     displayName = p.fullName.ifBlank { p.firstName }.ifBlank { p.number },
@@ -455,6 +492,7 @@ class UnifiedInboxRepository(
                 ?: return@withContext emptyList()
             val selfNumbers = selfNumberSet()
             cleanRcsParticipantList(conv.participants, selfNumbers)
+                .filterNot { it.isUnknownSenderGhost() }
                 .map { p ->
                     Participant(
                         address = p.number,

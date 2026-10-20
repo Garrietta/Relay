@@ -56,6 +56,8 @@ class ChatViewModel(
         const val HISTORY_DAYS = 21L
         /** Safety cap on the background deep fill (messages). */
         const val MAX_HISTORY_COUNT = 2000L
+        /** Remote typing indicator auto-clear (server may never send false). */
+        const val TYPING_TIMEOUT_MS = 15_000L
     }
 
     private var activeThreadId: Long = threadId
@@ -65,6 +67,16 @@ class ChatViewModel(
 
     private val _sendError = MutableStateFlow<String?>(null)
     val sendError: StateFlow<String?> = _sendError
+
+    /**
+     * Remote typing indicator (Garrett 2026-10-19): the paired web
+     * protocol delivers typingEvent on the long-poll. True while the
+     * remote party is typing; auto-clears on typing=false or after the
+     * timeout (the server doesn't always send the false).
+     */
+    private val _isTyping = MutableStateFlow(false)
+    val isTyping: StateFlow<Boolean> = _isTyping
+    private var lastTypingTrueMs = 0L
 
     /**
      * Long-press bubble selection (M3E shape-as-state: selected bubbles
@@ -177,6 +189,13 @@ class ChatViewModel(
         // from under a restored scroll position.
         _messages.value = repository.cachedMessages(conversationId) ?: emptyList()
         viewModelScope.launch {
+            // Disk LRU (Garrett 2026-10-19): on cold start the memory cache
+            // missed — paint instantly from the persistent 50-chat history
+            // while the network load runs behind it.
+            if (_messages.value.isEmpty()) {
+                val disk = repository.cachedHistoryFromDisk(conversationId)
+                if (disk != null && _messages.value.isEmpty()) _messages.value = disk
+            }
             val floor = maxOf(rcsHistoryCount, _messages.value.size.toLong())
             // Keep the count consistent for later live reloads — a later
             // 50-pull must not shrink a 300-deep list either.
@@ -228,6 +247,41 @@ class ChatViewModel(
         viewModelScope.launch {
             repository.observeRcsMessages().collect { msg ->
                 if (msg.conversationId == conversationId) onRcsIncoming(msg)
+            }
+        }
+        viewModelScope.launch {
+            // Inbox tick reload (Garrett 2026-10-19): the notification
+            // path forces repository.refresh() when it posts — the open
+            // chat re-pulls its thread so the message appears in-app, not
+            // just in the notification shade.
+            repository.inboxChanges().collect {
+                _messages.value = repository.rcsMessages(conversationId, rcsHistoryCount)
+            }
+        }
+        // Remote typing: conversation-scoped; the wire event carries no
+        // sender id, so groups show a generic indicator.
+        viewModelScope.launch {
+            repository.rcsTransport.typingEvents.collect { te ->
+                if (te.conversationId != conversationId) return@collect
+                if (te.typing) {
+                    lastTypingTrueMs = te.atMs
+                    _isTyping.value = true
+                } else {
+                    _isTyping.value = false
+                }
+            }
+        }
+        // Typing timeout watchdog: the server doesn't reliably send
+        // typing=false (app backgrounded, connection drop), so a stale
+        // true clears itself.
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(2_000)
+                if (_isTyping.value &&
+                    System.currentTimeMillis() - lastTypingTrueMs > TYPING_TIMEOUT_MS
+                ) {
+                    _isTyping.value = false
+                }
             }
         }
         if (address.isNotBlank()) loadContactTheme(address)
@@ -355,11 +409,18 @@ class ChatViewModel(
     fun reload() {
         // Instant open (Telephony path): cached messages first, then the
         // provider refresh rewrites the cache in the background.
-        _messages.value = repository.cachedMessages(
-            CategoryStore.conversationKey(
-                null, threadIds.firstOrNull() ?: threadId,
-            ),
-        ) ?: emptyList()
+        val smsKey = CategoryStore.conversationKey(
+            null, threadIds.firstOrNull() ?: threadId,
+        )
+        _messages.value = repository.cachedMessages(smsKey) ?: emptyList()
+        if (_messages.value.isEmpty()) {
+            // Disk LRU: cold-start instant paint from the persistent
+            // 50-chat history while the provider load runs.
+            viewModelScope.launch {
+                val disk = repository.cachedHistoryFromDisk(smsKey)
+                if (disk != null && _messages.value.isEmpty()) _messages.value = disk
+            }
+        }
         viewModelScope.launch {
             // Merged conversations load the full history across thread_ids.
             val loaded = repository.loadMessages(threadIds)

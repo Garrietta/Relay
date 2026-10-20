@@ -114,21 +114,18 @@ data class Participant(
  * remnant's name wrapped in varying quote/invisible characters — straight,
  * curly, backtick, sometimes several layers, possibly with other junk —
  * which is why it renders quoted in the header ("Alec, Trenton,
- * 'UNKNOWN_SENDER!'"). Exact-match kept missing it (#118, #119). Now: strip
- * every quote flavor and invisible char from the WHOLE string, then match
- * on the substring — the constant UNKNOWN_SENDER is specific enough to
- * never collide with a real contact name. Display-layer only; the
+ * 'UNKNOWN_SENDER!'"). Three rounds of matching kept missing it (#118,
+ * #119, #122) because the wrapping characters vary. Bulletproof
+ * normalization: strip EVERYTHING that isn't alphanumeric, uppercase, and
+ * match on the bare constant. Catches "'UNKNOWN_SENDER!'",
+ * "Unknown Sender", "unknown_sender", etc. Display-layer only; the
  * underlying data is never touched.
  */
 fun String.isUnknownSenderGhostName(): Boolean {
-    val strip = setOf(
-        '"', '\'', '\u201C', '\u201D', '\u2018', '\u2019', '\u201A', '\u201E',
-        '\u2039', '\u203A', '\u00AB', '\u00BB', '`', '\u00B4', '\u02BC',
-        ' ', '\t', '\n', '\r', '\u00A0', '\u200B', '\u200C', '\u200D', '\uFEFF',
-    )
-    val normalized = this.filterNot { it in strip }
-    return normalized.contains("UNKNOWN_SENDER")
+    val normalized = this.filter { it.isLetterOrDigit() }.uppercase()
+    return "UNKNOWNSENDER" in normalized
 }
+
 
 /**
  * Display-layer ghost predicate (Garrett 2026-10-19): a participant whose

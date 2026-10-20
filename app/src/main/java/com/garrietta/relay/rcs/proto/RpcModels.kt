@@ -1,5 +1,7 @@
 package com.garrietta.relay.rcs.proto
 
+import com.garrietta.relay.data.model.isUnknownSenderGhostName
+
 import com.garrietta.relay.rcs.pblite.PValue
 import com.garrietta.relay.rcs.pblite.Pblite
 import com.garrietta.relay.rcs.pblite.asList
@@ -137,8 +139,23 @@ private fun RcsParticipant.isSelfNumber(selfNumbers: Set<String>): Boolean {
  * or placeholder ("Unknown", any case) name falls back to the number, so a
  * ghost entry renders as digits, never the word "Unknown".
  */
+/**
+ * RCS-level ghost predicate (Garrett 2026-10-19): the UNKNOWN_SENDER!
+ * remnant — checked against the RAW server name, before any display
+ * resolution.
+ */
+fun RcsParticipant.isUnknownSenderGhost(): Boolean =
+    fullName.isUnknownSenderGhostName() || firstName.isUnknownSenderGhostName()
+
+/**
+ * GHOST CHOKE POINT (Garrett 2026-10-19): the remnant name can NEVER
+ * resolve to itself — every caller gets the number instead, so no display
+ * path can render the literal ghost string even if it forgets to filter.
+ * Display-layer only; the underlying data is untouched.
+ */
 fun RcsParticipant.displayNameOrNumber(): String {
     val n = fullName.ifBlank { firstName }.trim()
+    if (n.isUnknownSenderGhostName()) return number
     return if (n.isBlank() || n.equals("Unknown", ignoreCase = true)) number else n
 }
 

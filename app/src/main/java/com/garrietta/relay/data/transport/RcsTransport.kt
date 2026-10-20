@@ -15,6 +15,7 @@ import com.garrietta.relay.rcs.proto.RcsMessage
 import com.garrietta.relay.rcs.proto.AuthMessage
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.rcs.proto.RcsParticipant
+import com.garrietta.relay.data.model.isUnknownSenderGhostName
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.encodeDevice
 import com.garrietta.relay.rcs.proto.encodeDownloadAttachmentRequest
@@ -97,6 +98,18 @@ class RcsTransport(context: Context) : Transport {
     private val noDownloadIdImages = java.util.concurrent.atomic.AtomicInteger(0)
     fun noDownloadIdImageCount(): Int = noDownloadIdImages.get()
 
+    /**
+     * Remote typing state (Garrett 2026-10-19): the paired web protocol
+     * delivers `UpdateEvents.typingEvent` on the long-poll — the wire
+     * carries it, but nothing consumed it until now. Emitted as
+     * (conversationId, typing, wall-clock ms) for the chat UI's typing
+     * indicator. The event carries no sender id, so groups show a generic
+     * indicator.
+     */
+    data class TypingState(val conversationId: String, val typing: Boolean, val atMs: Long)
+    private val _typingEvents = MutableSharedFlow<TypingState>(extraBufferCapacity = 32)
+    val typingEvents: SharedFlow<TypingState> = _typingEvents.asSharedFlow()
+
     /** Last-good server conversation list — the paired inbox's source. */
     fun currentRcsConversations(): List<RcsConversation> = _rcsConversations.value
 
@@ -109,7 +122,29 @@ class RcsTransport(context: Context) : Transport {
     fun transportDiagnostics(): String {
         val pairing = _pairingState.value
         return "pairing=$pairing, ${session.diagnostics()}, " +
-            "noDownloadIdImages=${noDownloadIdImages.get()}"
+            "noDownloadIdImages=${noDownloadIdImages.get()}, ${ghostScanDiagnostics()}"
+    }
+
+    /**
+     * Ghost backstop (Garrett 2026-10-19): scans every known RCS
+     * conversation's RAW participant names for anything containing
+     * "unknown" (any case) that the ghost predicate does NOT catch. If the
+     * choke point ever misses a new wrapping, this names the exact miss
+     * with raw codepoints so the predicate can be fixed — no logcat needed.
+     */
+    private fun ghostScanDiagnostics(): String {
+        val misses = _rcsConversations.value.flatMap { it.participants }
+            .mapNotNull { p ->
+                val raw = p.fullName.ifBlank { p.firstName }
+                if (raw.contains("unknown", ignoreCase = true) &&
+                    !raw.isUnknownSenderGhostName()
+                ) {
+                    val cps = raw.map { "U+%04X".format(it.code) }.joinToString(" ")
+                    "${p.number.ifBlank { "nonum" }}: $cps"
+                } else null
+            }.distinct().take(3)
+        return if (misses.isEmpty()) "ghostScan=clean"
+        else "ghostMiss=" + misses.joinToString("; ")
     }
 
     /** Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim. */
@@ -210,6 +245,11 @@ class RcsTransport(context: Context) : Transport {
         scope.launch {
             session.events.collect { event ->
                 when (event) {
+                    is SessionEvent.Typing -> {
+                        _typingEvents.tryEmit(
+                            TypingState(event.conversationId, event.typing, System.currentTimeMillis())
+                        )
+                    }
                     is SessionEvent.AuthExpired, SessionEvent.Unpaired -> {
                         // One recovery attempt before declaring the pairing
                         // dead: refresh the Tachyon token and restart the
@@ -760,6 +800,101 @@ class RcsTransport(context: Context) : Transport {
         } // closes downloadMedia's withContext
 
     /**
+     * Media HTTP client: large attachments need a generous read timeout —
+     * the shared client's 30s per-read budget was cutting slow 3MB+
+     * downloads off mid-stream (Garrett 2026-10-19: "truncated download"
+     * on ~3.1MB images). 120s keeps the stream alive through stalls.
+     */
+    private fun mediaHttpClient(): okhttp3.OkHttpClient =
+        RelayApi.client().newBuilder()
+            .readTimeout(120, TimeUnit.SECONDS)
+            .build()
+
+    /**
+     * A body that ended before its declared length. Carries the partial
+     * bytes so the caller can resume with Range instead of starting over.
+     * Extends IOException so the existing retry loop treats it as
+     * transient.
+     */
+    private class TruncatedBodyException(
+        val partial: ByteArray,
+        message: String,
+    ) : java.io.IOException(message)
+
+    /**
+     * Streaming body read with explicit short-read detection. OkHttp's
+     * `bytes()` can return a short array WITHOUT throwing when the server
+     * terminates the stream "cleanly" early (chunked terminator) — the
+     * declared-size check downstream caught it, but only after a full
+     * wasted round trip. This throws the moment the body is short, with
+     * the partial bytes attached for Range resume.
+     */
+    private fun readBodyFully(body: okhttp3.ResponseBody): ByteArray {
+        val declared = body.contentLength() // -1 when the server omits it
+        val sink = okio.Buffer()
+        try {
+            val source = body.source()
+            while (true) {
+                if (source.read(sink, 8192) == -1L) break
+            }
+        } catch (e: java.io.IOException) {
+            throw TruncatedBodyException(
+                sink.readByteArray(),
+                "media unavailable: connection broke mid-download (${e.message})",
+            )
+        }
+        val bytes = sink.readByteArray()
+        if (declared > 0 && bytes.size < declared) {
+            throw TruncatedBodyException(
+                bytes,
+                "media unavailable: short body (got ${bytes.size} of $declared bytes)",
+            )
+        }
+        return bytes
+    }
+
+    /**
+     * Range resume for a truncated download (Garrett 2026-10-19). Asks the
+     * server for bytes [partial.size]- onward and appends. 206 =
+     * resumed; 200 = server ignored Range (fresh full body must then be
+     * complete); 416 = resume rejected (fail retryable). Anything else
+     * follows the existing transient/deterministic split.
+     */
+    private fun resumeDownload(
+        baseReq: okhttp3.Request,
+        partial: ByteArray,
+    ): ByteArray {
+        if (partial.isEmpty()) {
+            throw RetryableMediaException("media unavailable: empty download")
+        }
+        val req = baseReq.newBuilder()
+            .header("Range", "bytes=${partial.size}-")
+            .build()
+        mediaHttpClient().newCall(req).execute().use { resp ->
+            when {
+                resp.code == 206 -> {
+                    val rest = readBodyFully(resp.body!!)
+                    return partial + rest
+                }
+                resp.isSuccessful -> {
+                    val fresh = readBodyFully(resp.body!!)
+                    if (fresh.size >= partial.size) return fresh
+                    throw RetryableMediaException(
+                        "media unavailable: server serves short body (got ${fresh.size} bytes)",
+                    )
+                }
+                resp.code == 429 || resp.code >= 500 ->
+                    throw RetryableMediaException("media unavailable: resume HTTP ${resp.code}")
+                resp.code == 416 ->
+                    throw RetryableMediaException(
+                        "media unavailable: server rejected resume at ${partial.size} bytes",
+                    )
+                else -> throw IllegalStateException("media unavailable: resume HTTP ${resp.code}")
+            }
+        }
+    }
+
+    /**
      * Validated download core shared by the full-size and thumbnail paths.
      * declaredWireSize = 0 skips the declared-size pre-check (used for the
      * thumbnail rendition, whose declared size describes the full media).
@@ -812,16 +947,22 @@ class RcsTransport(context: Context) : Transport {
                     .header("sec-fetch-mode", "cors")
                     .header("sec-fetch-dest", "empty")
                     .build()
-                val encrypted = RelayApi.client().newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        val code = resp.code
-                        // 429/5xx are transient — retry; 4xx is deterministic.
-                        if (code == 429 || code >= 500) {
-                            throw RetryableMediaException("media unavailable: download HTTP $code")
+                val encrypted = try {
+                    mediaHttpClient().newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            val code = resp.code
+                            // 429/5xx are transient — retry; 4xx is deterministic.
+                            if (code == 429 || code >= 500) {
+                                throw RetryableMediaException("media unavailable: download HTTP $code")
+                            }
+                            throw IllegalStateException("media unavailable: download HTTP $code")
                         }
-                        throw IllegalStateException("media unavailable: download HTTP $code")
+                        readBodyFully(resp.body!!)
                     }
-                    resp.body!!.bytes()
+                } catch (e: TruncatedBodyException) {
+                    // The stream died mid-body: resume from the partial
+                    // bytes instead of re-downloading from zero.
+                    resumeDownload(req, e.partial)
                 }
                 // Wire-integrity accounting (deep-dive 2026-10-19): parse the
                 // chunk geometry from the stream header BEFORE decrypting.

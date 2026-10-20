@@ -1226,6 +1226,10 @@ private fun MessageBubble(
                         body = message.body,
                         maxBubbleWidth = maxBubbleWidth,
                     )
+                    // Link unfurl shares the sender column so its leading
+                    // edge lines up exactly with the bubble (Garrett
+                    // 2026-10-19: previews must left-align with messages).
+                    LinkUnfurl(message = message, maxBubbleWidth = maxBubbleWidth)
                 }
             }
         } else {
@@ -1250,19 +1254,11 @@ private fun MessageBubble(
         // Link unfurl (Garrett 2026-10-19): a URL in the body gets a preview
         // card under the bubble. Skipped on media messages (the attachment
         // is the content there). Failures degrade to a plain link row —
-        // never a gray block.
-        if (message.media == null) {
-            val linkUrl = remember(message.body) {
-                LinkPreviewFetcher.extractFirstUrl(message.body)
-            }
-            if (linkUrl != null) {
-                Spacer(Modifier.height(6.dp))
-                LinkPreviewCard(
-                    url = linkUrl,
-                    isOutgoing = message.isOutgoing,
-                    maxBubbleWidth = maxBubbleWidth,
-                )
-            }
+        // never a gray block. Group-incoming previews render inside the
+        // sender column above (same leading edge as the bubble); every
+        // other case unfurls here.
+        if (message.media == null && !groupIncoming) {
+            LinkUnfurl(message = message, maxBubbleWidth = maxBubbleWidth)
         }
         // Read/delivery receipts (Garrett 2026-10-19): Google Messages-style
         // ticks under outgoing bubbles — sent ✓, delivered ✓✓, read ✓✓ blue.
@@ -1272,6 +1268,27 @@ private fun MessageBubble(
                 modifier = Modifier.padding(top = 2.dp, end = 4.dp),
             )
         }
+    }
+}
+
+/** Link unfurl shared by all message layouts: the preview card for the
+ * first URL in the body, or nothing. The caller places it so its leading
+ * edge matches the bubble's (group-incoming: inside the sender column). */
+@Composable
+private fun LinkUnfurl(
+    message: Message,
+    maxBubbleWidth: Dp,
+) {
+    val linkUrl = remember(message.body) {
+        LinkPreviewFetcher.extractFirstUrl(message.body)
+    }
+    if (linkUrl != null) {
+        Spacer(Modifier.height(6.dp))
+        LinkPreviewCard(
+            url = linkUrl,
+            isOutgoing = message.isOutgoing,
+            maxBubbleWidth = maxBubbleWidth,
+        )
     }
 }
 

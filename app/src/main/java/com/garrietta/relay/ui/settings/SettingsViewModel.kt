@@ -216,7 +216,9 @@ class SettingsViewModel(
 
     /**
      * On-disk cache sizes for Diagnostics: the RCS media cache
-     * (cacheDir/rcs_media/v4) and the chat-history LRU
+     * (cacheDir/rcs_media/v5 — v4 was retired when pixel verification
+     * landed, so entries admitted under structural-only gates re-fetch
+     * and verify once) and the chat-history LRU
      * (filesDir/chat_history_v3 — v1 was retired with the
      * cross-conversation merge and v2 with the person-level
      * direction guard; neither generation's histories may be served
@@ -235,7 +237,7 @@ class SettingsViewModel(
             }
             return files to bytes
         }
-        val media = walk(java.io.File(context.cacheDir, "rcs_media/v4"))
+        val media = walk(java.io.File(context.cacheDir, "rcs_media/v5"))
         val history = walk(java.io.File(context.filesDir, "chat_history_v3"))
         return StorageStats(media.first, media.second, history.first, history.second)
     }

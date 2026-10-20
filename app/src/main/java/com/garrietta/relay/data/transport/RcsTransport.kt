@@ -130,6 +130,20 @@ class RcsTransport(context: Context) : Transport {
     private val splicesRejected = java.util.concurrent.atomic.AtomicInteger(0)
 
     /**
+     * Pixel-truth verification (Garrett 2026-10-20): image downloads and
+     * cache hits whose decoded pixels were checked against the server
+     * thumbnail's fingerprint (see MediaPixelVerification). mediaVerified
+     * = checks passed; mediaHealed = a download whose first attempt's
+     * pixels were REJECTED but a later fresh attempt verified (the user
+     * saw a loading state, then the correct image — never the corrupt
+     * one); mediaUnhealable = the attempt budget exhausted on pixel
+     * mismatches, so the verbatim error surfaced instead of the image.
+     */
+    private val mediaVerified = java.util.concurrent.atomic.AtomicInteger(0)
+    private val mediaHealed = java.util.concurrent.atomic.AtomicInteger(0)
+    private val mediaUnhealable = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
      * Remote typing state (Garrett 2026-10-19): the paired web protocol
      * delivers `UpdateEvents.typingEvent` on the long-poll — the wire
      * carries it, but nothing consumed it until now. Emitted as
@@ -155,7 +169,10 @@ class RcsTransport(context: Context) : Transport {
         return "pairing=$pairing, ${session.diagnostics()}, " +
             "noDownloadIdImages=${noDownloadIdImages.get()}, " +
             "renditionSizeMismatch=${renditionSizeMismatch.get()}, " +
-            "splicesRejected=${splicesRejected.get()}, ${ghostScanDiagnostics()}"
+            "splicesRejected=${splicesRejected.get()}, " +
+            "mediaVerified=${mediaVerified.get()}, " +
+            "mediaHealed=${mediaHealed.get()}, " +
+            "mediaUnhealable=${mediaUnhealable.get()}, ${ghostScanDiagnostics()}""
     }
 
     /** Tachyon token expiry (epoch ms) for Diagnostics; null when not paired. */
@@ -866,6 +883,9 @@ class RcsTransport(context: Context) : Transport {
                     key = att.decryptionKey,
                     declaredWireSize = att.size,
                     isImage = att.isImage,
+                    groundTruth = att.inlineData?.takeIf { it.isNotEmpty() },
+                    thumbId = att.thumbnailMediaId,
+                    thumbKey = att.thumbnailKey,
                 )
             }
             // No full-size ID, but the server gave a thumbnailMediaID (field
@@ -883,6 +903,10 @@ class RcsTransport(context: Context) : Transport {
                         key = att.thumbnailKey,
                         declaredWireSize = 0,
                         isImage = att.isImage,
+                        // Pixel ground truth for the thumbnail rendition:
+                        // the inline field-7 bytes are an independent
+                        // rendition of the same image.
+                        groundTruth = att.inlineData?.takeIf { it.isNotEmpty() },
                     )
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -1017,11 +1041,15 @@ class RcsTransport(context: Context) : Transport {
             ?: throw IllegalStateException(
                 "media unavailable: upload returned no media ID (${respText.take(200)})",
             )
-        // Seed the v4 download cache with the plaintext: the server echo
+        // Seed the v5 download cache with the plaintext: the server echo
         // of this message carries the same mediaId, and MediaBubble renders
         // it from cache instantly instead of re-downloading our own upload.
-        val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v4")
-        writeCacheAtomically(java.io.File(cacheDir, mediaId.sanitizeFileName()), bytes)
+        // The fingerprint sidecar lets the echo's cache hit pixel-verify
+        // our own bytes against the server thumbnail like any download.
+        val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v5")
+        val seedFile = java.io.File(cacheDir, mediaId.sanitizeFileName())
+        writeCacheAtomically(seedFile, bytes)
+        imageFingerprintOfBytes(bytes)?.let { writeFingerprintSidecar(seedFile, it) }
         UploadedMediaRef(
             mediaId = mediaId,
             decryptionKey = key,
@@ -1203,16 +1231,58 @@ class RcsTransport(context: Context) : Transport {
      * declaredWireSize = 0 skips the declared-size pre-check (used for the
      * thumbnail rendition, whose declared size describes the full media).
      * Every gate from the deep-dive round applies identically here.
+     *
+     * PIXEL TRUTH (Garrett 2026-10-20): the structural gates prove the
+     * bytes are A complete image, never that they are THE image — his
+     * Papaw ultrasound was a structurally perfect JPEG whose pixels were
+     * gray blocks. When ground truth is available — [groundTruth] inline
+     * thumbnail bytes the caller already holds, or the field-9 thumbnail
+     * rendition fetched on demand via [thumbId]/[thumbKey] — the decoded
+     * pixels are fingerprinted and compared (see MediaPixelVerification):
+     * on cache hits against the stored fingerprint sidecar, on downloads
+     * before the bytes may enter the cache. A mismatch is never rendered
+     * and never cached; the retry loop heals with fresh whole-body
+     * fetches (Range resume is refused after a pixel failure — resume is
+     * the one assembly path that can join two renditions). The cache
+     * lives in rcs_media/v5: v4 entries were admitted under
+     * structural-only rules, so the bump gives every image in his library
+     * exactly one verified re-fetch.
      */
     private suspend fun downloadValidatedById(
         id: String,
         key: ByteArray,
         declaredWireSize: Long,
         isImage: Boolean,
+        groundTruth: ByteArray? = null,
+        thumbId: String = "",
+        thumbKey: ByteArray = byteArrayOf(),
     ): ByteArray {
         return withContext(Dispatchers.IO) {
-            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v4")
+            val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v5")
             val cacheFile = java.io.File(cacheDir, id.sanitizeFileName())
+            // Ground-truth thumbnail fingerprint for pixel verification.
+            // Seeded from the inline bytes when the caller has them; the
+            // field-9 thumbnail rendition is fetched (through this same
+            // choke point — structurally gated, itself unverified) only
+            // when a check actually needs it.
+            var thumbFp: FloatArray? =
+                if (isImage) groundTruth?.let { imageFingerprintOfBytes(it) } else null
+            suspend fun ensureThumbFp() {
+                if (thumbFp != null || !isImage) return
+                if (thumbId.isEmpty() || thumbKey.size != 32) return
+                thumbFp = try {
+                    val thumbBytes = downloadValidatedById(
+                        id = thumbId,
+                        key = thumbKey,
+                        declaredWireSize = 0,
+                        isImage = true,
+                    )
+                    imageFingerprintOfBytes(thumbBytes)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    null // no ground truth — structural gates only
+                }
+            }
             if (cacheFile.exists()) {
                 val cached = cacheFile.readBytes()
                 // Cheap revalidation on every cache hit: magic + trailer +
@@ -1220,10 +1290,55 @@ class RcsTransport(context: Context) : Transport {
                 // Poisoned bytes are deleted and re-fetched below.
                 if (isImage && !isCacheableImageBytes(cached)) {
                     cacheFile.delete()
+                    fingerprintFile(cacheFile).delete()
+                } else if (isImage) {
+                    // Pixel re-verification on serve: the stored sidecar
+                    // fingerprint (written only for verified bytes) is
+                    // compared against the thumbnail fingerprint — no
+                    // full-image decode on the hit path.
+                    ensureThumbFp()
+                    val tfp = thumbFp
+                    val sidecarFp = if (tfp == null) null else readFingerprintSidecar(cacheFile)
+                    val cachedFp = sidecarFp
+                        ?: if (tfp == null) null else imageFingerprintOfBytes(cached)
+                    when {
+                        // No ground truth available: write-time trust.
+                        tfp == null -> return@withContext cached
+                        // Bytes won't fingerprint (cannot happen past the
+                        // gates above): structural verdict stands.
+                        cachedFp == null -> return@withContext cached
+                        fingerprintsAgree(cachedFp, tfp) -> {
+                            if (sidecarFp == null) {
+                                writeFingerprintSidecar(cacheFile, cachedFp)
+                            }
+                            mediaVerified.incrementAndGet()
+                            return@withContext cached
+                        }
+                        else -> {
+                            // The cached pixels are NOT the image the
+                            // server thumbnail shows — a poisoned entry.
+                            // Evict and fall through to the healing
+                            // download below; the corrupt bytes never
+                            // render.
+                            cacheFile.delete()
+                            fingerprintFile(cacheFile).delete()
+                        }
+                    }
                 } else {
                     return@withContext cached
                 }
             }
+            ensureThumbFp()
+            // Pixel-verification state shared across attempts: how many
+            // attempts produced pixels the ground truth rejects, and the
+            // rejected fingerprints + byte hashes for the corroboration
+            // rule (a byte-DIFFERENT refetch whose pixels agree with a
+            // rejected attempt is an independent rendition voting for the
+            // full image over the thumbnail; a byte-identical refetch is
+            // the same rendition re-served and carries no new evidence).
+            var pixelFailures = 0
+            val rejectedFps = mutableListOf<Pair<FloatArray, Int>>()
+            var acceptedFp: FloatArray? = null
             // Single attempt: fetch + decrypt + validate. Kept as a local so
             // the retry loop below can re-run a FRESH download.
             suspend fun attemptDownload(): ByteArray {
@@ -1265,6 +1380,16 @@ class RcsTransport(context: Context) : Transport {
                         readBodyFully(resp.body!!)
                     }
                 } catch (e: TruncatedBodyException) {
+                    if (pixelFailures > 0) {
+                        // HEAL FETCH (Garrett 2026-10-20): after a pixel
+                        // failure the refetch must be ONE whole body — a
+                        // Range resume is the assembly path that can join
+                        // two renditions, so it is refused and the retry
+                        // loop starts fresh instead.
+                        throw RetryableMediaException(
+                            e.message ?: "media unavailable: truncated download",
+                        )
+                    }
                     // The stream died mid-body: resume from the partial
                     // bytes instead of re-downloading from zero.
                     usedResume = true
@@ -1350,6 +1475,36 @@ class RcsTransport(context: Context) : Transport {
                         throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
                     }
                 }
+                // PIXEL TRUTH (Garrett 2026-10-20): every gate above can
+                // pass on authentically garbled pixels — perfect headers,
+                // trailer and GCM tags over gray-block scan data (the
+                // Papaw ultrasound). When a ground-truth thumbnail
+                // fingerprint exists, the decoded pixels must match it
+                // before the bytes may be cached or rendered; a mismatch
+                // is retryable and the heal loop refetches whole-body.
+                // Corroboration: a byte-DIFFERENT refetch whose pixels
+                // agree with a rejected attempt is an independent
+                // rendition voting for the full image over the thumbnail.
+                val tfp = thumbFp
+                if (isImage && tfp != null) {
+                    val fp = imageFingerprintOfBytes(plain)
+                    if (fp != null) {
+                        val corroborated = rejectedFps.any { (rfp, rhash) ->
+                            rhash != plain.contentHashCode() &&
+                                fingerprintsAgree(fp, rfp)
+                        }
+                        if (fingerprintsAgree(fp, tfp) || corroborated) {
+                            acceptedFp = fp
+                        } else {
+                            pixelFailures++
+                            rejectedFps.add(fp to plain.contentHashCode())
+                            throw PixelMismatchException(
+                                "media unavailable: downloaded image does " +
+                                    "not match its server thumbnail",
+                            )
+                        }
+                    }
+                }
                 // Every gate passed: the bytes are a complete, valid image
                 // even if smaller than the declared size — accept the
                 // rendition and note it for Diagnostics.
@@ -1372,12 +1527,30 @@ class RcsTransport(context: Context) : Transport {
                     attempt++
                     val retryable = e is java.io.IOException ||
                         e is java.security.GeneralSecurityException ||
-                        e is RetryableMediaException
-                    if (!retryable || attempt >= 3) throw e
+                        e is RetryableMediaException ||
+                        e is PixelMismatchException
+                    if (!retryable || attempt >= 3) {
+                        // A pixel mismatch that outlives the whole budget
+                        // (initial fetch + 2 heal refetches) is unhealable
+                        // for now: the verbatim error surfaces, counted —
+                        // the corrupt image is never shown.
+                        if (e is PixelMismatchException) {
+                            mediaUnhealable.incrementAndGet()
+                        }
+                        throw e
+                    }
                     delay(1000L * attempt)
                 }
             }
+            // Only bytes that passed every gate — pixel verification
+            // included, when ground truth exists — ever enter the cache.
             writeCacheAtomically(cacheFile, plain)
+            val afp = acceptedFp
+            if (afp != null) {
+                writeFingerprintSidecar(cacheFile, afp)
+                mediaVerified.incrementAndGet()
+                if (pixelFailures > 0) mediaHealed.incrementAndGet()
+            }
             plain
         }
     }
@@ -1411,6 +1584,38 @@ class RcsTransport(context: Context) : Transport {
         } catch (e: Exception) {
             tmp.delete()
             throw e
+        }
+    }
+
+    /** Sidecar file holding a cache entry's verified pixel fingerprint. */
+    private fun fingerprintFile(cacheFile: java.io.File): java.io.File =
+        java.io.File(cacheFile.parentFile, cacheFile.name + ".fp")
+
+    /**
+     * Persists the pixel fingerprint of VERIFIED cache bytes (see
+     * downloadValidatedById): cache hits then re-verify against the
+     * server thumbnail by comparing fingerprints — no full-image decode
+     * on the serve path. Best-effort: a failed write only costs a
+     * fingerprint recompute on a later hit.
+     */
+    private fun writeFingerprintSidecar(cacheFile: java.io.File, fp: FloatArray) {
+        try {
+            fingerprintFile(cacheFile).writeText(fp.joinToString(","))
+        } catch (_: Exception) {
+            // The entry itself was still verified at write time.
+        }
+    }
+
+    /** Reads a fingerprint sidecar; null when absent or malformed. */
+    private fun readFingerprintSidecar(cacheFile: java.io.File): FloatArray? {
+        val f = fingerprintFile(cacheFile)
+        if (!f.exists()) return null
+        return try {
+            val parts = f.readText().split(",")
+            if (parts.size != MEDIA_FP_GRID * MEDIA_FP_GRID * 3) return null
+            FloatArray(parts.size) { parts[it].toFloat() }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -1833,6 +2038,15 @@ private fun indexOfGifSignature(bytes: ByteArray): Int {
 
 /** Marker for media failures worth retrying (transient, not deterministic). */
 private class RetryableMediaException(message: String) : IllegalStateException(message)
+
+/**
+ * A downloaded image whose decoded pixels disagree with the server
+ * thumbnail's fingerprint — authentically garbled bytes that every
+ * structural gate passes (Garrett 2026-10-20). Retryable: the heal loop
+ * refetches whole-body, hoping the server serves an intact rendition.
+ * Counted as mediaUnhealable in Diagnostics when the budget exhausts.
+ */
+private class PixelMismatchException(message: String) : IllegalStateException(message)
 
 /**
  * True when [bytes] decode end-to-end as an image. Stronger than

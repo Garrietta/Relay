@@ -95,6 +95,51 @@ object ChatScrollLogic {
     enum class TailAction { NONE, TO_BOTTOM }
 
     /**
+     * Notification-open landing (Garrett 2026-10-20): a chat opened
+     * FROM A NOTIFICATION ignores the saved scroll position entirely
+     * and lands on the message the notification was for — an explicit,
+     * named exception to the restore rules above, modeled as an open
+     * request the chat consumes, never as a change to them.
+     */
+    enum class TargetLanding {
+        /** The target message is loaded: scroll it into view. */
+        TARGET,
+
+        /** Land on the newest message (index 0) instead. */
+        BOTTOM,
+
+        /** The target may still load (cache → network → deep fill): wait. */
+        WAIT,
+    }
+
+    /**
+     * Emissions to wait for the target message before giving up on it
+     * — the same budget the saved-anchor restore uses, because the
+     * load sequence that can still deliver it is the same one.
+     */
+    const val MAX_TARGET_ATTEMPTS = 4
+
+    /**
+     * Decides the notification-open landing for one loaded emission:
+     * - no specific message was named ([targetId] null): the newest
+     *   message IS the landing — [TargetLanding.BOTTOM] immediately.
+     * - the target is in the loaded list ([targetIndex] >= 0):
+     *   [TargetLanding.TARGET], however deep it sits — the saved
+     *   position never gets a say on this open.
+     * - not loaded yet: [TargetLanding.WAIT] while deeper loads can
+     *   still bring it; once [attempts] is exhausted the message is
+     *   gone (deleted / outside the loaded window) and the open falls
+     *   back to [TargetLanding.BOTTOM].
+     */
+    fun targetLanding(targetId: Long?, targetIndex: Int, attempts: Int): TargetLanding =
+        when {
+            targetId == null -> TargetLanding.BOTTOM
+            targetIndex >= 0 -> TargetLanding.TARGET
+            attempts >= MAX_TARGET_ATTEMPTS -> TargetLanding.BOTTOM
+            else -> TargetLanding.WAIT
+        }
+
+    /**
      * Live-tail decision (Garrett 2026-10-20):
      * - HIS OWN send always scrolls to the bottom, wherever he was
      *   reading — his send wins unconditionally.

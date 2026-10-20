@@ -166,6 +166,61 @@ class ChatScrollLogicTest {
         )
     }
 
+    // ---------- notification-open landing: targetLanding ----------
+
+    @Test
+    fun `notification open with target loaded scrolls to the target`() {
+        // The target wins over ANY saved position — this function is
+        // only consulted on a notification open, and it never looks at
+        // the saved anchor.
+        assertEquals(
+            ChatScrollLogic.TargetLanding.TARGET,
+            ChatScrollLogic.targetLanding(targetId = 777L, targetIndex = 0, attempts = 0),
+        )
+        assertEquals(
+            ChatScrollLogic.TargetLanding.TARGET,
+            ChatScrollLogic.targetLanding(targetId = 777L, targetIndex = 42, attempts = 3),
+        )
+    }
+
+    @Test
+    fun `notification open without a message lands on the newest`() {
+        assertEquals(
+            ChatScrollLogic.TargetLanding.BOTTOM,
+            ChatScrollLogic.targetLanding(targetId = null, targetIndex = -1, attempts = 0),
+        )
+    }
+
+    @Test
+    fun `missing target waits while deeper loads can still bring it`() {
+        assertEquals(
+            ChatScrollLogic.TargetLanding.WAIT,
+            ChatScrollLogic.targetLanding(targetId = 777L, targetIndex = -1, attempts = 0),
+        )
+        assertEquals(
+            ChatScrollLogic.TargetLanding.WAIT,
+            ChatScrollLogic.targetLanding(
+                targetId = 777L, targetIndex = -1,
+                attempts = ChatScrollLogic.MAX_TARGET_ATTEMPTS - 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `missing target falls back to the newest once attempts are spent`() {
+        assertEquals(
+            ChatScrollLogic.TargetLanding.BOTTOM,
+            ChatScrollLogic.targetLanding(
+                targetId = 777L, targetIndex = -1,
+                attempts = ChatScrollLogic.MAX_TARGET_ATTEMPTS,
+            ),
+        )
+        assertEquals(
+            ChatScrollLogic.TargetLanding.BOTTOM,
+            ChatScrollLogic.targetLanding(targetId = 777L, targetIndex = -1, attempts = 99),
+        )
+    }
+
     // ---------- travel style ----------
 
     @Test

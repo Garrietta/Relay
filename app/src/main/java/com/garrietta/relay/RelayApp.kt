@@ -62,6 +62,16 @@ class RelayApp : Application() {
     }
 
     /**
+     * Pending notification-open requests (Garrett 2026-10-20): a tapped
+     * message notification lands here from MainActivity's intent
+     * handling; the navigation hosts route it into the chat and the
+     * ChatScreen performs the scroll-to-message landing. App-scoped so
+     * a cold-start tap survives until the UI is composed to read it.
+     */
+    val notificationOpenRouter =
+        com.garrietta.relay.notifications.NotificationOpenRouter()
+
+    /**
      * Application-scoped coroutine scope: survives Activity destruction.
      * The incoming-message notification collector MUST live here, not in
      * MainActivity.lifecycleScope — the old collector died with the

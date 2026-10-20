@@ -2,6 +2,7 @@ package com.garrietta.relay
 
 import android.Manifest
 import android.animation.Animator
+import android.content.Intent
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.pm.PackageManager
@@ -56,6 +57,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -77,6 +79,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.ThemeMode
+import com.garrietta.relay.notifications.MessageNotifications
+import com.garrietta.relay.notifications.NotificationOpenLogic
+import com.garrietta.relay.notifications.NotificationOpenRequest
 import com.garrietta.relay.ui.NewConversationDialog
 import com.garrietta.relay.ui.Screen
 import com.garrietta.relay.ui.chat.ChatDetailsScreen
@@ -95,7 +100,9 @@ import com.garrietta.relay.ui.settings.SettingsViewModel
 import com.garrietta.relay.ui.theme.RelayTheme
 import com.garrietta.relay.rcs.ui.RcsPairingScreen
 import com.garrietta.relay.ui.theme.WavyBlobShapeCalm
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity() {
 
@@ -133,6 +140,12 @@ class MainActivity : ComponentActivity() {
         // SYSTEM theme, not the app's override — our explicit flags win.
         applySystemBarAppearance()
         requestMessagingPermissions()
+        // Notification deep link (Garrett 2026-10-20): a cold start
+        // from a notification tap carries the conversation to open in
+        // the launch intent. Only a FRESH create reads it — on a
+        // configuration-change recreation the original intent would
+        // otherwise re-fire an open the user already landed from.
+        if (savedInstanceState == null) handleNotificationOpenIntent(intent)
 
         setContent {
             val themeMode by settingsVm.themeMode.collectAsState()
@@ -178,6 +191,48 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Warm-start notification taps (Garrett 2026-10-20): the activity
+     * is singleTask, so a tap while Relay is already running arrives
+     * here instead of onCreate.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationOpenIntent(intent)
+    }
+
+    /**
+     * Turns a notification content intent into an open request on the
+     * app-scoped router. Malformed/absent extras are ignored by the
+     * router's validation — the app simply comes forward with no
+     * navigation, never a crash.
+     */
+    private fun handleNotificationOpenIntent(intent: Intent?) {
+        if (intent == null) return
+        app.notificationOpenRouter.request(
+            intent.getStringExtra(MessageNotifications.EXTRA_OPEN_CONVERSATION_ID),
+            intent.getStringExtra(MessageNotifications.EXTRA_OPEN_MESSAGE_ID),
+        )
+    }
+
+    /**
+     * Resolves a notification-open request to its inbox row, waiting
+     * briefly for the conversation list to load (cold start). The row
+     * is matched by SERVER conversation id — never by threadId (the
+     * 32-bit hash of that id). Returns null when the conversation
+     * never appears (deleted, unpaired, malformed): the caller drops
+     * the request and the app stays on the inbox.
+     */
+    private suspend fun resolveNotificationRow(
+        request: NotificationOpenRequest,
+    ): Conversation? = withTimeoutOrNull(NOTIFICATION_RESOLVE_TIMEOUT_MS) {
+        val rows = app.repository.conversations.first { list ->
+            NotificationOpenLogic.resolveConversation(list, request.conversationId) != null
+        }
+        NotificationOpenLogic.resolveConversation(rows, request.conversationId)
+    }
+
+    /**
      * Single-pane navigation (folded phone): manual backstack with
      * direction-aware transitions — forward pushes slide in on the shared
      * axis, back pops mirror it.
@@ -217,6 +272,48 @@ class MainActivity : ComponentActivity() {
         // is choosing the FORWARD/BACKWARD pane transform, which
         // push()/pop() set synchronously with the navigation itself.)
         BackHandler(enabled = backStack.size > 1) { pop() }
+
+        // Notification-open routing (Garrett 2026-10-20): a tapped
+        // message notification routes straight INTO its conversation.
+        // The row is resolved by server id and the open carries the
+        // same optimistic read as a manual tap; the ChatScreen then
+        // performs the scroll-to-message landing from the still-live
+        // request. When the target chat is already the top screen no
+        // navigation happens at all — ChatScreen watches the same
+        // request and just scrolls.
+        val openRequest by app.notificationOpenRouter.requests.collectAsState()
+        LaunchedEffect(openRequest) {
+            val request = openRequest ?: return@LaunchedEffect
+            val row = resolveNotificationRow(request)
+            if (row == null) {
+                // Conversation gone (deleted / unpaired / malformed):
+                // drop the request; the app stays where it is.
+                app.notificationOpenRouter.discard(request)
+                return@LaunchedEffect
+            }
+            app.repository.markConversationOpened(row)
+            MessageNotifications.cancelForConversation(
+                this@MainActivity, request.conversationId,
+            )
+            val top = backStack.lastOrNull()
+            val alreadyThere = top is Screen.Chat &&
+                top.rcsConversationId != null &&
+                top.rcsConversationId == row.rcsConversationId
+            if (!alreadyThere) {
+                // Land directly in the chat: the inbox remains as the
+                // back target; whatever was above it is replaced.
+                navForward = true
+                backStack.clear()
+                backStack.add(Screen.Inbox)
+                backStack.add(
+                    Screen.Chat(
+                        row.threadId, row.address, row.displayName,
+                        row.threadIds, row.transportLabel,
+                        row.rcsConversationId, row.isGroup,
+                    )
+                )
+            }
+        }
 
         // Container-transform navigation: conversation avatar morphs
         // into the chat header via shared bounds (see ui.motion).
@@ -386,6 +483,33 @@ class MainActivity : ComponentActivity() {
         BackHandler(enabled = !showSettings && showRcsPairing) { showRcsPairing = false }
         BackHandler(enabled = !showSettings && detailsRequest != null) { detailsRequest = null }
         BackHandler(enabled = !showSettings && detailsRequest == null && selected != null) { selected = null }
+
+        // Notification-open routing (Garrett 2026-10-20): the same
+        // contract as single-pane — resolve by server id, optimistic
+        // read, land in the detail pane; when that chat is already
+        // selected nothing moves and ChatScreen scrolls from the
+        // still-live request. Any full-screen overlay is dismissed so
+        // the chat is actually what he lands on.
+        val openRequest by app.notificationOpenRouter.requests.collectAsState()
+        LaunchedEffect(openRequest) {
+            val request = openRequest ?: return@LaunchedEffect
+            val row = resolveNotificationRow(request)
+            if (row == null) {
+                app.notificationOpenRouter.discard(request)
+                return@LaunchedEffect
+            }
+            app.repository.markConversationOpened(row)
+            MessageNotifications.cancelForConversation(
+                this@MainActivity, request.conversationId,
+            )
+            if (selected?.rcsConversationId != row.rcsConversationId) {
+                selected = row
+                detailsRequest = null
+            }
+            showSettings = false
+            showRcsPairing = false
+            showNewConversation = false
+        }
 
         SharedTransitionLayout {
             val motionTransforms = rememberMotionTransforms()
@@ -711,6 +835,14 @@ class MainActivity : ComponentActivity() {
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
 }
+
+/**
+ * How long a notification-open request waits for its conversation to
+ * appear in the repository list before the open is dropped (cold
+ * start: the list first has to load). Generous — the inbox itself is
+ * live and usable while the wait runs out in the background.
+ */
+private const val NOTIFICATION_RESOLVE_TIMEOUT_MS = 10_000L
 
 private class InboxViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,

@@ -26,6 +26,32 @@ import com.garrietta.relay.R
 object MessageNotifications {
     private const val CHANNEL_ID = "relay_messages"
 
+    /**
+     * Deep-link extras on the content intent (Garrett 2026-10-20): the
+     * tapped notification names its conversation — by SERVER id, the
+     * one identity every surface agrees on — and the message it was
+     * posted for. MainActivity turns these into a
+     * [NotificationOpenRequest]; without them the tap could only bring
+     * the app forward, which is the bug he reported.
+     */
+    const val EXTRA_OPEN_CONVERSATION_ID = "com.garrietta.relay.extra.OPEN_CONVERSATION_ID"
+    const val EXTRA_OPEN_MESSAGE_ID = "com.garrietta.relay.extra.OPEN_MESSAGE_ID"
+
+    /** The notification id Relay posts under for [conversationId]. */
+    fun notificationIdFor(conversationId: String): Int = conversationId.hashCode()
+
+    /**
+     * Clears this conversation's posted notification (Garrett
+     * 2026-10-20): opening the chat — by ANY path, row tap or
+     * notification tap — retires its shade entry. (A tapped
+     * notification also auto-cancels itself; this covers the manual
+     * opens that used to leave it sitting in the shade as unread.)
+     */
+    fun cancelForConversation(context: Context, conversationId: String) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        manager.cancel(notificationIdFor(conversationId))
+    }
+
     // Pipeline diagnostics (Garrett 2026-10-19 evening: "still not getting
     // notifications" — surfaced in Settings → Diagnostics so the failure
     // point is visible without logcat).
@@ -125,8 +151,18 @@ object MessageNotifications {
             return
         }
         ensureChannel(context)
+        // The tap must land IN this conversation, on this message
+        // (Garrett 2026-10-20): the intent carries the server
+        // conversation id + the message's server id as extras, and the
+        // PendingIntent identity is per-conversation — the request
+        // code is the conversation id's hash, so different chats'
+        // taps can never cross (FLAG_UPDATE_CURRENT refreshes the
+        // extras in place, so the SAME chat's pending intent always
+        // names its LATEST notified message).
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_CONVERSATION_ID, conversationId)
+            putExtra(EXTRA_OPEN_MESSAGE_ID, messageId)
         }
         val pending = PendingIntent.getActivity(
             context,

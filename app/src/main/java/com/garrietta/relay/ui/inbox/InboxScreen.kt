@@ -77,6 +77,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontStyle
@@ -90,6 +91,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
+import com.garrietta.relay.notifications.MessageNotifications
 import com.garrietta.relay.ui.TopSearchPopup
 import com.garrietta.relay.ui.motion.ChromeBandClipMath
 import com.garrietta.relay.ui.motion.InboxChromeBand
@@ -189,6 +191,7 @@ fun InboxScreen(
     // chat read in the local list, so the homepage shows it read on
     // the first frame back — the server mark-read still runs from the
     // chat screen exactly as before, this only removes the wait.
+    val context = LocalContext.current
     val openChat: (Conversation) -> Unit = { conversation ->
         viewModel.saveChatExitScroll(
             selectedCategoryId,
@@ -196,6 +199,14 @@ fun InboxScreen(
             listState.firstVisibleItemScrollOffset,
         )
         viewModel.markOpened(conversation)
+        // Opening the chat retires its shade notification too
+        // (Garrett 2026-10-20): a manual open used to leave the
+        // posted notification sitting in the shade as if unread.
+        // (Notification taps get the same treatment in MainActivity's
+        // open routing; this funnel serves both pane hosts.)
+        conversation.rcsConversationId?.let {
+            MessageNotifications.cancelForConversation(context, it)
+        }
         onOpenChat(conversation)
     }
     // Search lives behind the bottom-right expressive button; tapping it

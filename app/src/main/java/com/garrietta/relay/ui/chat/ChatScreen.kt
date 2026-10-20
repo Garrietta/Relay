@@ -150,6 +150,7 @@ import com.garrietta.relay.data.repo.ChatScrollLogic
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isTransportSystemNotice
+import com.garrietta.relay.notifications.NotificationOpenLogic
 import com.garrietta.relay.rcs.proto.RcsLocation
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.TopSearchPopup
@@ -185,6 +186,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -360,6 +362,21 @@ fun ChatScreen(
     var tailRecheck by remember(viewModel) {
         mutableStateOf<ChatScrollLogic.TailRecheck?>(null)
     }
+    // Notification-open landing (Garrett 2026-10-20): the hosts route
+    // a tapped notification's open request here via the app-scoped
+    // router. A request naming THIS conversation (by server id) that
+    // this screen hasn't handled owns the landing — the saved scroll
+    // position stands down for that open (see the two effects below).
+    // handledOpenNonce starts at 0; the router's nonces start at 1.
+    val notificationRouter = remember {
+        (chatContext.applicationContext as RelayApp).notificationOpenRouter
+    }
+    val openRequest by notificationRouter.requests.collectAsState()
+    var handledOpenNonce by remember(viewModel) { mutableStateOf(0L) }
+    var targetAttempts by remember(viewModel) { mutableStateOf(0) }
+    val pendingOpen = openRequest?.takeIf {
+        it.conversationId == rcsConversationId && it.nonce != handledOpenNonce
+    }
     // Scroll-to-bottom with the standard feel: animate short hops,
     // teleport long ones (ChatScrollLogic.useAnimatedScroll).
     val scrollChatToBottom: suspend () -> Unit = {
@@ -490,8 +507,65 @@ fun ChatScreen(
     // (scrollRestored / restoreAttempts are declared above the header
     // state — the header's initial collapse derives from the position
     // this effect restores.)
+    // Notification-open landing (Garrett 2026-10-20): "when it does
+    // open to that message, it opens regardless of the previous
+    // position I was in the chat, so it should scroll to the new
+    // message that I clicked on." While a request for this chat is
+    // pending, THIS effect owns the scroll: the saved-position
+    // restore below stands down, and the view lands on the tapped
+    // message — or, if it never loads (deleted / outside the loaded
+    // window), on the newest message, per ChatScrollLogic.targetLanding.
+    // The same effect serves a request that arrives while this chat
+    // is ALREADY on screen (its nonce key re-fires it): no navigation
+    // happens anywhere, the view just scrolls. Landing consumes the
+    // request, after which the ordinary tail rules own the scroll.
+    LaunchedEffect(messages, pendingOpen) {
+        val request = pendingOpen ?: return@LaunchedEffect
+        if (messages.isEmpty()) return@LaunchedEffect
+        val targetId = NotificationOpenLogic.targetUiMessageId(request)
+        val index = if (targetId != null) {
+            messages.indexOfFirst { it.id == targetId }
+        } else {
+            -1
+        }
+        when (ChatScrollLogic.targetLanding(targetId, index, targetAttempts)) {
+            ChatScrollLogic.TargetLanding.TARGET -> {
+                listState.scrollToItem(index)
+                scrollRestored = true
+                handledOpenNonce = request.nonce
+                targetAttempts = 0
+                notificationRouter.consume(request)
+            }
+            ChatScrollLogic.TargetLanding.BOTTOM -> {
+                listState.scrollToItem(0)
+                scrollRestored = true
+                handledOpenNonce = request.nonce
+                targetAttempts = 0
+                notificationRouter.consume(request)
+            }
+            ChatScrollLogic.TargetLanding.WAIT -> {
+                targetAttempts++
+                // Emissions drive the attempts above, but a load
+                // sequence can also simply END (the target sits
+                // beyond the history window): if no fresher emission
+                // cancels this wait within a few seconds, land on
+                // the newest message rather than never landing.
+                delay(3_000)
+                listState.scrollToItem(0)
+                scrollRestored = true
+                handledOpenNonce = request.nonce
+                targetAttempts = 0
+                notificationRouter.consume(request)
+            }
+        }
+    }
+
     LaunchedEffect(messages) {
         if (messages.isEmpty() || scrollRestored) return@LaunchedEffect
+        // A pending notification open owns the landing instead (see
+        // the effect above): the saved position is ignored for that
+        // open by design.
+        if (pendingOpen != null) return@LaunchedEffect
         val saved = viewModel.savedScrollPosition()
         if (saved == null) {
             listState.scrollToItem(0)

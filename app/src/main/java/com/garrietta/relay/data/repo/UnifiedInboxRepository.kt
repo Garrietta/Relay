@@ -21,6 +21,7 @@ import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
 import com.garrietta.relay.rcs.proto.cleanRcsParticipantList
 import com.garrietta.relay.rcs.proto.displayNameOrNumber
+import com.garrietta.relay.ui.chat.parseReaction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -389,11 +390,16 @@ class UnifiedInboxRepository(
         val address = others.firstOrNull()?.number?.ifBlank { null }
             ?: selfNorm?.ifBlank { null }
             ?: name
+        // Reaction traffic is not message traffic (Garrett 2026-10-19): a
+        // reaction that arrives as formatted text must not render as the
+        // inbox snippet — it renders as an inline badge in the thread.
+        val snippet = parseReaction(c.snippet)?.let { (emoji, _) -> "$emoji reaction" }
+            ?: c.snippet
         return Conversation(
             threadId = ("rcs:" + c.id).hashCode().toLong(),
             address = address,
             displayName = name,
-            snippet = c.snippet,
+            snippet = snippet,
             date = c.timestampMs,
             unread = c.unread,
             messageCount = 0,
@@ -445,6 +451,23 @@ class UnifiedInboxRepository(
                 tmpId = m.tmpId.ifBlank { null },
                 media = m.media,
                 deliveryStatus = rcsStatusToDelivery(m.status, m.fromMe),
+                serverId = m.id.ifBlank { null },
+                reactions = m.wireReactions.flatMap { wr ->
+                    wr.participantIds.ifEmpty { listOf("") }.map { pid ->
+                        val reactor = participants.firstOrNull { it.participantId == pid }
+                        com.garrietta.relay.data.model.MessageReaction(
+                            emoji = wr.emoji,
+                            reactorName = when {
+                                reactor?.isMe == true -> "You"
+                                reactor != null -> reactor.displayNameOrNumber()
+                                pid == m.participantId && m.fromMe -> "You"
+                                else -> "Someone"
+                            },
+                            fromMe = reactor?.isMe == true,
+                            timestampMs = m.timestampMs,
+                        )
+                    }
+                },
             )
         }.sortedByDescending { it.date }
             // Write-through to the instant-open cache.
@@ -551,6 +574,19 @@ class UnifiedInboxRepository(
             RcsSendOutcome.Sent(tmpId)
         } catch (e: Exception) {
             RcsSendOutcome.Failed(e.message ?: "RCS send failed")
+        }
+    }
+
+    /**
+     * Sends a REAL reaction event (Garrett 2026-10-19: SEND_REACTION action).
+     * Returns the verbatim reason on failure so the UI surfaces it exactly.
+     */
+    suspend fun sendRcsReaction(messageId: String, emoji: String): RcsSendOutcome {
+        return try {
+            rcsTransport.sendRcsReaction(messageId, emoji)
+            RcsSendOutcome.Sent(messageId)
+        } catch (e: Exception) {
+            RcsSendOutcome.Failed(e.message ?: "Reaction failed")
         }
     }
 

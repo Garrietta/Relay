@@ -28,6 +28,8 @@ import com.garrietta.relay.rcs.proto.decodeMessagesResponse
 import com.garrietta.relay.rcs.proto.decodeRpcMessageData
 import com.garrietta.relay.rcs.proto.decodeRpcPairData
 import com.garrietta.relay.rcs.proto.decodeSendMessageStatus
+import com.garrietta.relay.rcs.proto.decodeSendReactionResponse
+import com.garrietta.relay.rcs.proto.encodeSendReactionRequest
 import com.garrietta.relay.rcs.proto.decodeUpdateEvents
 import com.garrietta.relay.rcs.proto.encodeAckMessagesRequest
 import com.garrietta.relay.rcs.proto.encodeListConversationsRequest
@@ -278,6 +280,21 @@ class RcsSession(context: Context) {
 
     suspend fun markRead(conversationId: String, messageId: String) {
         rpc(Rpc.ACTION_MESSAGE_READ, encodeMessageReadRequest(conversationId, messageId))
+    }
+
+    /**
+     * Sends a REAL reaction event (Garrett 2026-10-19: the #131 text-format
+     * send was a fake — recipients saw literal "❤️ to "Test"" text). The
+     * wire mechanism is client.SendReactionRequest via ACTION_SEND_REACTION,
+     * exactly how Google Messages sends them. Returns true when the server
+     * confirmed success; throws on transport failure.
+     */
+    suspend fun sendReaction(messageId: String, emoji: String): Boolean {
+        val inner = rpc(
+            Rpc.ACTION_SEND_REACTION,
+            encodeSendReactionRequest(messageId, emoji),
+        )
+        return decodeSendReactionResponse(inner)
     }
 
     // ---------- RPC plumbing ----------

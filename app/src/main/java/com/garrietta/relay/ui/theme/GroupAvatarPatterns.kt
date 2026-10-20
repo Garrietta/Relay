@@ -23,18 +23,22 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Per-group avatar cluster pattern. Each group chat gets ONE pattern,
- * assigned deterministically from its conversation id, so every group is
- * visually distinct and stable within a session: one group's collage is a
- * spiral, another's a grid, another's a zigzag.
+ * Group avatar cluster layout V3 (Garrett 2026-10-19, 22:23): group chats
+ * get overlapping icons of each contact photo — the SAME treatment as the
+ * 2-person overlap — arranged on a hexagonal packing that tightens as the
+ * chat grows: one center avatar, then hexagonal rings around it (3 =
+ * triangle-ish, 4–7 = a hex cluster, then outer rings).
+ *
+ * - Base scale = f(member count): min(0.75, 0.9/√N) — the scale that fits
+ *   N overlapping icons inside the 1:1 box a single 1:1 avatar occupies
+ *   (his calibration: 6 people ≈ 35%).
+ * - Per-contact jitter: ±3% of the base scale, deterministic per
+ *   (conversation, contact), for uniqueness.
+ * - Random positions AND rotations, deterministic per (conversation,
+ *   contact) — same layout every render, on every surface.
+ * - Bounding box always = one 1:1 avatar box; avatars clamp inside it.
+ * - Max [maxShown] photos; beyond that a "+N" badge.
  */
-enum class GroupPattern { SPIRAL, GRID, ZIGZAG }
-
-/** Deterministic pattern pick — same conversation, same pattern, every time. */
-fun groupPatternFor(conversationKey: String): GroupPattern {
-    val values = GroupPattern.entries
-    return values[(conversationKey.hashCode() and Int.MAX_VALUE) % values.size]
-}
 
 /** One member of a group avatar cluster. */
 data class ClusterMember(
@@ -44,84 +48,84 @@ data class ClusterMember(
 )
 
 /** Placement of one avatar: center as box fractions, size as box fraction. */
-private data class Placement(val xFrac: Float, val yFrac: Float, val sizeFrac: Float)
-
-/** Golden-angle spiral: first member large at center, rest orbit outward. */
-private fun spiralPlacements(n: Int): List<Placement> {
-    val golden = (137.5f * PI / 180f).toFloat()
-    return List(n) { i ->
-        if (i == 0) {
-            Placement(0.5f, 0.5f, 0.54f)
-        } else {
-            val r = 0.24f * sqrt(i.toFloat())
-            val a = i * golden
-            val x = (0.5f + r * cos(a)).coerceIn(0.17f, 0.83f)
-            val y = (0.5f + r * sin(a) * 0.92f).coerceIn(0.17f, 0.83f)
-            Placement(x, y, (0.54f - i * 0.06f).coerceAtLeast(0.26f))
-        }
-    }
-}
-
-/** Compact 2-column grid with a slight per-cell size rhythm; 5th overlaps center. */
-private fun gridPlacements(n: Int): List<Placement> {
-    val cells = listOf(
-        Pair(0.27f, 0.27f),
-        Pair(0.73f, 0.27f),
-        Pair(0.27f, 0.73f),
-        Pair(0.73f, 0.73f),
-        Pair(0.5f, 0.5f),
-    )
-    return List(n) { i ->
-        val (x, y) = cells[i]
-        // Alternate the cell sizes slightly for the scattered feel.
-        val s = if (i % 2 == 0) 0.44f else 0.38f
-        Placement(x, y, if (i == 4) 0.42f else s)
-    }
-}
-
-/** Zigzag: alternating left/right offsets stepping down, overlapping. */
-private fun zigzagPlacements(n: Int): List<Placement> =
-    List(n) { i ->
-        val x = if (i % 2 == 0) 0.33f else 0.67f
-        val y = if (n == 1) 0.5f else 0.19f + i * (0.62f / (n - 1))
-        Placement(x, y, 0.42f - i * 0.015f)
-    }
-
-/** Airiness factor (Garrett 2026-10-19, corrected 21:37): the overlap
- * amount VARIES by participant count — more participants = tighter overlap
- * (smaller avatars) so the cluster stays airy inside the 1:1 box; fewer
- * participants = looser overlap. Deterministic per conversation. */
-private fun countScale(n: Int): Float = when {
-    n <= 3 -> 1f
-    n == 4 -> 0.92f
-    else -> 0.84f
-}
+private data class Placement(val xFrac: Float, val yFrac: Float, val sizeFrac: Float, val zIndex: Float)
 
 /**
- * Spread factor (Garrett 2026-10-19, 21:37): small clusters loosen
- * outward, large clusters pull tighter toward center — applied to each
- * placement's offset from the box center BEFORE the 1:1 clamp. Combined
- * with [countScale] this makes 3-person clusters breathe and 5+ clusters
- * tuck together.
+ * Base scale for N overlapping avatars in the 1:1 box — derived from the
+ * member count, never a per-N guess table: min(0.75, 0.9/√N). N=3 → 0.52,
+ * N=4 → 0.45, N=5 → 0.40, N=6 → 0.37 (≈ his 35%), N=8 → 0.32.
  */
-private fun spreadScale(n: Int): Float = when {
-    n <= 3 -> 1.07f
-    n == 4 -> 1f
-    else -> 0.93f
-}
+private fun baseScale(n: Int): Float =
+    minOf(0.75f, 0.9f / sqrt(n.toFloat().coerceAtLeast(1f)))
+
+/** Deterministic pseudo-random in [0, 1) from a string seed. */
+private fun jitter01(seed: String): Float =
+    ((seed.hashCode() and Int.MAX_VALUE) % 10_000) / 10_000f
+
+/** Per-contact scale: base ±3%, deterministic per (conversation, contact). */
+private fun memberScale(conversationKey: String, address: String, base: Float): Float =
+    base * (1f + (jitter01("$conversationKey|$address|scale") - 0.5f) * 0.06f)
+
 /** Deterministic slight rotation per member (±11°) — the scattered feel. */
-private fun memberRotation(address: String): Float {
-    val h = address.hashCode() and 1023
-    return (h / 1023f - 0.5f) * 22f
+private fun memberRotation(conversationKey: String, address: String): Float =
+    (jitter01("$conversationKey|$address|rot") - 0.5f) * 22f
+
+/**
+ * Hexagonal-packing slot centers for the first [n] avatars: slot 0 is the
+ * center; ring k holds 6k slots at radius k × [spacing], each ring rotated
+ * a few degrees for the organic feel. Returned (x, y, ring).
+ */
+private fun hexSlots(n: Int, spacing: Float): List<Triple<Float, Float, Int>> {
+    val slots = mutableListOf(Triple(0.5f, 0.5f, 0))
+    var ring = 1
+    while (slots.size < n) {
+        val count = 6 * ring
+        val r = spacing * ring
+        val offsetDeg = ring * 15f
+        for (j in 0 until count) {
+            if (slots.size >= n) break
+            val a = ((offsetDeg + j * (360f / count)) * PI / 180f).toFloat()
+            slots += Triple(0.5f + r * cos(a), 0.5f + r * sin(a) * 0.94f, ring)
+        }
+        ring++
+    }
+    return slots
 }
 
 /**
- * A group's contact photos arranged in that group's unique pattern
- * (spiral / grid / zigzag): different sizes, different per-contact
- * expressive shapes, slight rotations, overlapping — fitted into a compact
- * [boxSize] square. Max [maxShown] photos; beyond that a "+N" circle tucked
- * at the cluster's bottom-right. Every avatar shape obeys the 1:1-square
- * rule, so sizing stays consistent.
+ * V3 placements for a cluster of [n] members: hex-ring slots with a
+ * loose ~38% overlap (center distance = 0.62 × base scale), per-member
+ * position jitter, per-member scale jitter, all clamped into the 1:1 box.
+ */
+private fun clusterPlacements(
+    members: List<ClusterMember>,
+    conversationKey: String,
+): List<Placement> {
+    val n = members.size
+    if (n == 0) return emptyList()
+    val base = baseScale(n)
+    val slots = hexSlots(n, base * 0.62f)
+    val maxRing = slots.maxOf { it.third }
+    return members.mapIndexed { i, member ->
+        val (sx, sy, ring) = slots[i]
+        val size = memberScale(conversationKey, member.address, base)
+        val jx = (jitter01("$conversationKey|${member.address}|x") - 0.5f) * 0.05f
+        val jy = (jitter01("$conversationKey|${member.address}|y") - 0.5f) * 0.05f
+        val half = size / 2f
+        Placement(
+            xFrac = (sx + jx).coerceIn(half, 1f - half),
+            yFrac = (sy + jy).coerceIn(half, 1f - half),
+            sizeFrac = size,
+            // Inner rings draw on top of outer rings (center highest).
+            zIndex = (maxRing - ring).toFloat(),
+        )
+    }
+}
+
+/**
+ * A group's contact photos in the V3 hex cluster: each keeps its
+ * per-contact expressive shape, photo and initial; the whole cluster
+ * fills exactly the [boxSize] square a single avatar occupies.
  */
 @Composable
 fun GroupAvatarCluster(
@@ -131,30 +135,8 @@ fun GroupAvatarCluster(
     maxShown: Int = 5,
     modifier: Modifier = Modifier,
 ) {
-    val pattern = remember(conversationKey) { groupPatternFor(conversationKey) }
     val shown = members.take(maxShown)
     val remaining = members.size - shown.size
-    val placements = remember(pattern, shown.size) {
-        val air = countScale(shown.size)
-        val spread = spreadScale(shown.size)
-        when (pattern) {
-            GroupPattern.SPIRAL -> spiralPlacements(shown.size)
-            GroupPattern.GRID -> gridPlacements(shown.size)
-            GroupPattern.ZIGZAG -> zigzagPlacements(shown.size)
-        }.map { p ->
-            // 1:1 BOUND RULE (Garrett 2026-10-19): the whole cluster must
-            // fill exactly the square a single avatar occupies — scale for
-            // airiness, spread per participant count, then clamp every
-            // placement so no avatar spills outside the box.
-            val sizeFrac = p.sizeFrac * air
-            val half = sizeFrac / 2f
-            p.copy(
-                sizeFrac = sizeFrac,
-                xFrac = (0.5f + (p.xFrac - 0.5f) * spread).coerceIn(half, 1f - half),
-                yFrac = (0.5f + (p.yFrac - 0.5f) * spread).coerceIn(half, 1f - half),
-            )
-        }
-    }
     // Two-person chats (Garrett 2026-10-19, corrected 21:10): two FULL
     // avatar icons at 75% size, overlapped with deterministic random
     // positions/orientations per conversation — NOT a split circle.
@@ -162,12 +144,17 @@ fun GroupAvatarCluster(
         TwoAvatarOverlap(members[0], members[1], conversationKey, boxSize, modifier)
         return
     }
+    val placements = remember(conversationKey, shown.size, shown.map { it.address }) {
+        clusterPlacements(shown, conversationKey)
+    }
     val smallText = boxSize < 80.dp
     Box(modifier = modifier.size(boxSize)) {
         shown.forEachIndexed { i, member ->
             val p = placements[i]
             val s = boxSize * p.sizeFrac
-            val rot = remember(member.address) { memberRotation(member.address) }
+            val rot = remember(conversationKey, member.address) {
+                memberRotation(conversationKey, member.address)
+            }
             ContactAvatar(
                 photoUri = member.photoUri,
                 name = member.name,
@@ -181,7 +168,7 @@ fun GroupAvatarCluster(
                         y = boxSize * p.yFrac - s / 2,
                     )
                     .graphicsLayer { rotationZ = rot }
-                    .zIndex(i.toFloat()),
+                    .zIndex(p.zIndex),
             )
         }
         if (remaining > 0) {
@@ -243,8 +230,8 @@ private fun TwoAvatarOverlap(
     val s = boxSize * 0.75f
     val smallText = boxSize < 80.dp
     Box(modifier = modifier.size(boxSize)) {
-        val rotA = remember(a.address) { memberRotation(a.address) }
-        val rotB = remember(b.address) { memberRotation(b.address) }
+        val rotA = remember(a.address) { memberRotationOld(a.address) }
+        val rotB = remember(b.address) { memberRotationOld(b.address) }
         ContactAvatar(
             photoUri = a.photoUri,
             name = a.name,
@@ -270,4 +257,10 @@ private fun TwoAvatarOverlap(
                 .zIndex(if (aOnTop) 1f else 2f),
         )
     }
+}
+
+/** Rotation for the 2-person layout: keyed on the contact only (unchanged). */
+private fun memberRotationOld(address: String): Float {
+    val h = address.hashCode() and 1023
+    return (h / 1023f - 0.5f) * 22f
 }

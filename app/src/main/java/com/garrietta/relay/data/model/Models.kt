@@ -75,13 +75,20 @@ data class Message(
      */
     val deliveryStatus: DeliveryStatus = DeliveryStatus.NONE,
     /**
-     * Emoji reactions attached to this message (Garrett 2026-10-19). The
-     * paired web protocol delivers reactions as formatted text messages
-     * (`{emoji} to "{snippet}"`, plus iPhone tapback verb forms); the
-     * ChatViewModel parses them out and attaches them here so they render as
+     * Emoji reactions attached to this message (Garrett 2026-10-19). REAL
+     * reaction events from the wire (conversations.Message field 19) land
+     * here via the RCS mapping; formatted text messages that genuinely
+     * arrive as text (`{emoji} to "{snippet}"`, plus iPhone tapback verb
+     * forms) are consumed into here by ChatViewModel so they also render as
      * inline badges, Google Messages style, instead of stray text bubbles.
      */
     val reactions: List<MessageReaction> = emptyList(),
+    /**
+     * Server-assigned RCS message id (conversations.Message field 1) when
+     * known — needed for protocol actions that target a message (e.g. the
+     * SEND_REACTION request). Null for Telephony messages.
+     */
+    val serverId: String? = null,
     /**
      * Upload progress (0..1) while THIS outgoing attachment is uploading
      * (Garrett 2026-10-19: the attachment-send path). Null once the upload

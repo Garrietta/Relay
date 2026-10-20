@@ -36,6 +36,12 @@ object Rpc {
     const val ACTION_MESSAGE_READ = 10
     const val ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT = 44
     const val ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED = 45
+    // rpc.ActionType.SEND_REACTION (Garrett 2026-10-19: REAL reactions —
+    // the wire format is client.SendReactionRequest{messageID, reactionData,
+    // action}, NOT a text message. Reference facts: rpc.proto ActionType
+    // enum, client.proto SendReactionRequest, conversations.proto
+    // ReactionData/ReactionEntry).
+    const val ACTION_SEND_REACTION = 38
 
     // client.ListConversationsRequest.Folder
     const val FOLDER_INBOX = 1
@@ -50,6 +56,7 @@ object Rpc {
         ACTION_SEND_MESSAGE -> "SEND_MESSAGE"
         ACTION_GET_OR_CREATE_CONVERSATION -> "GET_OR_CREATE_CONVERSATION"
         ACTION_MESSAGE_READ -> "MESSAGE_READ"
+        ACTION_SEND_REACTION -> "SEND_REACTION"
         ACTION_CREATE_GAIA_PAIRING_CLIENT_INIT -> "GAIA_CLIENT_INIT"
         ACTION_CREATE_GAIA_PAIRING_CLIENT_FINISHED -> "GAIA_CLIENT_FINISHED"
         else -> "ACTION_$action"
@@ -203,6 +210,24 @@ data class RcsMessage(
     val msgTransportType: Int = 0,
     /** Media attachment when the message carries one (MessageInfo field 3). */
     val media: RcsMediaAttachment? = null,
+    /**
+     * Wire reactions attached to THIS message (conversations.Message field
+     * 19, repeated ReactionEntry). The real reaction events from the
+     * protocol — distinct from text-pattern reactions.
+     */
+    val wireReactions: List<RcsWireReaction> = emptyList(),
+)
+
+/**
+ * One conversations.ReactionEntry from the wire: one emoji + the
+ * participant ids who applied it. [emoji] is the unicode string from
+ * ReactionData; [emojiType] is the conversations.EmojiType value
+ * (fallback glyph source when unicode is empty).
+ */
+data class RcsWireReaction(
+    val emoji: String,
+    val emojiType: Int = 0,
+    val participantIds: List<String> = emptyList(),
 )
 
 /**
@@ -590,6 +615,62 @@ fun encodeMessageReadRequest(conversationId: String, messageId: String): ByteArr
         ),
     )
 
+/**
+ * conversations.EmojiType for the 7 standard reaction emojis (conversations.proto).
+ * ❤️ is LOVE (the standard Google Messages heart reaction; RED_HEART=12 is a
+ * different custom set entry and is NOT used here).
+ */
+fun emojiTypeFor(emoji: String): Int = when (emoji.replace("\uFE0F", "")) {
+    "\uD83D\uDC4D" -> 1 // 👍 LIKE
+    "\u2764" -> 2       // ❤️ LOVE
+    "\uD83D\uDE02" -> 3 // 😂 LAUGH
+    "\uD83D\uDE2E" -> 4 // 😮 SURPRISED
+    "\uD83D\uDE22" -> 5 // 😢 SAD
+    "\uD83D\uDE21" -> 6 // 😡 ANGRY
+    "\uD83D\uDC4E" -> 7 // 👎 DISLIKE
+    else -> 2           // default: heart, the most common reaction
+}
+
+/** conversations.EmojiType → emoji glyph (inverse of [emojiTypeFor]). */
+fun emojiForType(type: Int): String = when (type) {
+    1 -> "\uD83D\uDC4D" // LIKE
+    2 -> "\u2764\uFE0F" // LOVE
+    3 -> "\uD83D\uDE02" // LAUGH
+    4 -> "\uD83D\uDE2E" // SURPRISED
+    5 -> "\uD83D\uDE22" // SAD
+    6 -> "\uD83D\uDE21" // ANGRY
+    7 -> "\uD83D\uDC4E" // DISLIKE
+    else -> "\u2764\uFE0F"
+}
+
+/**
+ * client.SendReactionRequest{1:messageID, 2:reactionData{1:unicode, 2:type},
+ * 3:action} as binary protobuf (Garrett 2026-10-19: REAL reactions —
+ * client.proto; action is the ADD enum value 1). SIMPayload (field 4) is
+ * omitted like Relay's other sends — dual-SIM selection isn't a Relay
+ * feature and the reference sends it empty-absent for reactions too.
+ */
+fun encodeSendReactionRequest(
+    messageId: String,
+    emoji: String,
+    action: Int = 1,
+): ByteArray = ProtoCodec.encode(
+    mapOf(
+        1 to FieldVal.Str(messageId),
+        2 to FieldVal.Msg(
+            mapOf(
+                1 to FieldVal.Str(emoji),
+                2 to FieldVal.Varint(emojiTypeFor(emoji).toLong()),
+            ),
+        ),
+        3 to FieldVal.Varint(action.toLong()),
+    ),
+)
+
+/** client.SendReactionResponse{1:success} — false or absent = server declined. */
+fun decodeSendReactionResponse(bytes: ByteArray): Boolean =
+    ProtoCodec.decode(bytes).firstBool(1) == true
+
 /** client.ReceiveMessagesRequest{1:auth, 4:unknown} as pblite (long-poll). */
 fun encodeReceiveMessagesRequest(requestId: String, tachyonToken: ByteArray): String {
     val cfg = ConfigVersion.CURRENT
@@ -768,6 +849,24 @@ private fun decodeMessageInfo(m: Map<Int, List<FieldVal>>): String? {
     return null
 }
 
+/**
+ * Decodes conversations.Message field 19 (repeated ReactionEntry).
+ * ReactionEntry{1:ReactionData{1:unicode, 2:type}, 2:participantIDs}.
+ */
+private fun decodeWireReactions(m: Map<Int, List<FieldVal>>): List<RcsWireReaction> =
+    m.repMsgs(19).mapNotNull { entry ->
+        val data = entry.firstMsg(1) ?: return@mapNotNull null
+        val unicode = data.firstStr(1).orEmpty()
+        val type = data.firstVarint(2)?.toInt() ?: 0
+        val emoji = unicode.ifBlank { if (type > 0) emojiForType(type) else "" }
+        if (emoji.isBlank()) return@mapNotNull null
+        RcsWireReaction(
+            emoji = emoji,
+            emojiType = type,
+            participantIds = entry.repStrs(2),
+        )
+    }
+
 fun decodeRcsMessage(
     m: Map<Int, List<FieldVal>>,
     participants: List<RcsParticipant> = emptyList(),
@@ -786,6 +885,7 @@ fun decodeRcsMessage(
         participantId = m.firstStr(9).orEmpty(),
         msgTransportType = m.firstVarint(11)?.toInt() ?: 0,
         media = media,
+        wireReactions = decodeWireReactions(m),
     )
 }
 

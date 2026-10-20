@@ -26,6 +26,7 @@ import com.garrietta.relay.rcs.media.aesGcmEncryptChunked
 import okhttp3.MediaType.Companion.toMediaType
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
+import com.garrietta.relay.rcs.session.RcsException
 import com.garrietta.relay.rcs.session.RcsSession
 import com.garrietta.relay.rcs.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
@@ -211,6 +212,17 @@ class RcsTransport(context: Context) : Transport {
 
     suspend fun markRcsRead(conversationId: String, messageId: String) {
         runCatching { session.markRead(conversationId, messageId) }
+    }
+
+    /**
+     * Sends a real reaction event (Garrett 2026-10-19). Returns true when
+     * the server confirmed it; throws RcsException with the verbatim
+     * failure reason otherwise.
+     */
+    suspend fun sendRcsReaction(messageId: String, emoji: String): Boolean {
+        val ok = session.sendReaction(messageId, emoji)
+        if (!ok) throw RcsException("SendReaction: server did not confirm success")
+        return true
     }
 
     /**

@@ -639,32 +639,58 @@ class ChatViewModel(
 
     /**
      * Sends an emoji reaction to [target] (Garrett 2026-10-19: reactions
-     * both ways). The paired web protocol's observed wire format for
-     * incoming reactions is the formatted text `{emoji} to "{snippet}"`
-     * (see [parseReaction]) — so a reaction is sent as exactly that text
-     * through the normal routed RCS send; the echo reconciles through
-     * [attachReactions] and renders as an inline badge. RCS chats only.
+     * both ways). REAL reaction event via the paired protocol
+     * (SEND_REACTION, client.SendReactionRequest) — NOT the old text-format
+     * fake, which landed as literal "❤️ to ..." spam on recipients' other
+     * clients. The badge applies optimistically and the server echo
+     * reconciles it; a declined send rolls the badge back with the
+     * verbatim reason. Needs the target's server message id (RCS chats
+     * only).
      */
     fun sendReaction(target: Message, emoji: String) {
         viewModelScope.launch {
-            val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
-                runCatching { repository.rcsConversationFor(address) }
-                    .getOrNull()?.also { rcsConversationId = it }
-            } else null
-            if (convId == null || repository.rcsConversationType(convId) == 1) {
-                _sendError.value = "Reactions need an RCS chat"
+            val serverId = target.serverId
+            if (serverId.isNullOrBlank()) {
+                _sendError.value = "Reactions need an RCS message"
                 return@launch
             }
-            val snippet = when {
-                target.body.isNotBlank() -> {
-                    val trimmed = target.body.trim()
-                    if (trimmed.length > 50) trimmed.take(50).trimEnd() + "…"
-                    else trimmed
-                }
-                target.media?.isImage == true -> "Photo"
-                else -> return@launch
+            val optimisticReaction = MessageReaction(
+                emoji = emoji,
+                reactorName = "You",
+                fromMe = true,
+                timestampMs = System.currentTimeMillis(),
+            )
+            val cur = _messages.value
+            val idx = cur.indexOfFirst { it.id == target.id }
+            if (idx >= 0 && cur[idx].reactions.none { it.fromMe && it.emoji == emoji }) {
+                setMessages(cur.toMutableList().also {
+                    it[idx] = cur[idx].copy(
+                        reactions = (cur[idx].reactions + optimisticReaction)
+                            .sortedBy { r -> r.timestampMs },
+                    )
+                })
             }
-            send(address, "$emoji to \"$snippet\"")
+            when (val outcome = repository.sendRcsReaction(serverId, emoji)) {
+                is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
+                    // The server echo (message re-push with reactions
+                    // populated) reconciles the optimistic badge.
+                }
+                is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
+                    val cur2 = _messages.value
+                    val idx2 = cur2.indexOfFirst { it.id == target.id }
+                    if (idx2 >= 0) {
+                        setMessages(cur2.toMutableList().also {
+                            it[idx2] = cur2[idx2].copy(
+                                reactions = cur2[idx2].reactions.filterNot {
+                                    it.fromMe && it.emoji == emoji &&
+                                        it.timestampMs == optimisticReaction.timestampMs
+                                },
+                            )
+                        })
+                    }
+                    _sendError.value = outcome.reason
+                }
+            }
         }
     }
 
@@ -810,7 +836,9 @@ fun attachReactions(
         .filterNot { it.id in consumed }
         .map { m ->
             byTarget[m.id]?.let { rs ->
-                m.copy(reactions = rs.sortedBy { it.timestampMs })
+                val merged = (m.reactions + rs)
+                    .distinctBy { r -> Triple(r.emoji, r.reactorName, r.fromMe) }
+                m.copy(reactions = merged.sortedBy { it.timestampMs })
             } ?: m
         }
 }

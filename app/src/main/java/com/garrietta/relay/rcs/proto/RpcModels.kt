@@ -327,6 +327,10 @@ data class RcsMediaAttachment(
 ) {
     /** True for image content types (renderable in a bubble). */
     val isImage: Boolean get() = mimeType.startsWith("image/")
+
+    /** True for audio content types — voice notes (Garrett 2026-10-20,
+     * feature queue 7/7: transcribable media). */
+    val isAudio: Boolean get() = mimeType.startsWith("audio/")
 }
 
 /**

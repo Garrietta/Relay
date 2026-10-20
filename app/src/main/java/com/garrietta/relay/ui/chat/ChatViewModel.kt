@@ -28,6 +28,10 @@ class ChatViewModel(
     private val repository: UnifiedInboxRepository,
     private val appSeedStore: AppSeedStore,
     private val scrollStore: ChatScrollStore,
+    private val aiSettingsStore: com.garrietta.relay.data.repo.AiSettingsStore,
+    private val transcriptStore: com.garrietta.relay.data.repo.TranscriptStore,
+    /** Application context: the on-device recognizer + scratch files. */
+    private val appContext: android.content.Context,
     private val threadId: Long,
     /** All provider threads merged into this conversation (see Screen.Chat). */
     private val threadIds: List<Long> = listOf(threadId),
@@ -1046,6 +1050,87 @@ class ChatViewModel(
     suspend fun mediaBytes(
         att: com.garrietta.relay.rcs.proto.RcsMediaAttachment,
     ): ByteArray = repository.mediaBytes(att)
+
+    // ---- Voice-note transcription (Garrett 2026-10-20, feature queue
+    // 7/7): provider choice from Settings → AI (On-device / Gemini /
+    // Off); transcripts persist in TranscriptStore keyed by message, so
+    // they survive reloads, cache evictions and history-cache version
+    // bumps. Receiving-side only: the composer has no voice recorder
+    // today (the mic button is a stub), so there is nothing of ours to
+    // transcribe at send time.
+
+    /** The active transcription provider (Settings → AI). */
+    val transcriptionProvider:
+        StateFlow<com.garrietta.relay.data.repo.TranscriptionProvider> =
+        aiSettingsStore.provider
+
+    /** Stored transcripts by message key (see transcriptKeyFor). */
+    val transcripts:
+        StateFlow<Map<String, com.garrietta.relay.data.repo.TranscriptEntry>> =
+        transcriptStore.transcripts
+
+    /** Message keys with a transcription currently in flight. */
+    private val _transcribingKeys = MutableStateFlow<Set<String>>(emptySet())
+    val transcribingKeys: StateFlow<Set<String>> = _transcribingKeys
+
+    /**
+     * One-shot transcription outcome for the snackbar (same pattern as
+     * [forwardResult]): the verbatim failure, or the plain no-key
+     * explanation. Success is silent — the transcript itself appears
+     * under the bubble.
+     */
+    private val _transcriptNotice = MutableStateFlow<String?>(null)
+    val transcriptNotice: StateFlow<String?> = _transcriptNotice
+
+    fun clearTranscriptNotice() {
+        _transcriptNotice.value = null
+    }
+
+    /**
+     * Transcribes one voice note with the provider picked in Settings.
+     * No-ops when transcription is Off (the UI hides the action then)
+     * or when this message is already in flight.
+     */
+    fun transcribe(message: Message) {
+        val att = message.media ?: return
+        if (!att.isAudio) return
+        val provider = aiSettingsStore.provider.value
+        if (provider == com.garrietta.relay.data.repo.TranscriptionProvider.OFF) return
+        val key = com.garrietta.relay.data.repo.transcriptKeyFor(message)
+        if (key in _transcribingKeys.value) return
+        viewModelScope.launch {
+            _transcribingKeys.value = _transcribingKeys.value + key
+            try {
+                val bytes = repository.mediaBytes(att)
+                val stagingDir = java.io.File(appContext.cacheDir, "transcribe")
+                val text = when (provider) {
+                    com.garrietta.relay.data.repo.TranscriptionProvider.GEMINI -> {
+                        val apiKey = aiSettingsStore.apiKey.value
+                            ?: throw IllegalStateException(
+                                "No Gemini API key is set. Add yours in " +
+                                    "Settings → AI — Relay never ships one, " +
+                                    "and the key stays on this phone.",
+                            )
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            com.garrietta.relay.data.transcription.GeminiTranscriber
+                                .transcribe(apiKey, bytes, att.mimeType, stagingDir)
+                        }
+                    }
+                    com.garrietta.relay.data.repo.TranscriptionProvider.ON_DEVICE ->
+                        com.garrietta.relay.data.transcription.OnDeviceTranscriber
+                            .transcribe(appContext, bytes, att.mimeType, stagingDir)
+                    com.garrietta.relay.data.repo.TranscriptionProvider.OFF ->
+                        return@launch
+                }
+                transcriptStore.putTranscript(key, text, provider)
+            } catch (e: Exception) {
+                _transcriptNotice.value =
+                    e.message ?: "Transcription failed: ${e.javaClass.simpleName}"
+            } finally {
+                _transcribingKeys.value = _transcribingKeys.value - key
+            }
+        }
+    }
 
     fun clearError() {
         _sendError.value = null

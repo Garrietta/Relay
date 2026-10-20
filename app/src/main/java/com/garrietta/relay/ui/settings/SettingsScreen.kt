@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -146,6 +147,8 @@ fun SettingsScreen(
                 )
             }
 
+            AiCard(viewModel = viewModel)
+
             CategoriesCard(viewModel = viewModel)
 
             SettingsCard(title = "RCS", icon = Icons.Filled.Notifications) {
@@ -215,6 +218,187 @@ fun SettingsScreen(
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
             Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/**
+ * AI card (Garrett 2026-10-20, feature queue 7/7): Garrett's own Gemini
+ * API key + the voice-note transcription provider choice. The key is
+ * entered HERE, in-app — Relay ships without one, never logs it, and
+ * shows only set/not-set. The provider is a three-way segmented choice:
+ * On-device (audio never leaves the phone), Gemini (his key, Google's
+ * audio understanding), or Off (no transcribe actions anywhere).
+ */
+@Composable
+private fun AiCard(viewModel: SettingsViewModel) {
+    val provider by viewModel.transcriptionProvider.collectAsState()
+    val keySet by viewModel.geminiKeySet.collectAsState()
+    var showKeyDialog by remember { mutableStateOf(false) }
+
+    if (showKeyDialog) {
+        var keyText by remember { mutableStateOf("") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showKeyDialog = false },
+            title = { Text("Gemini API key") },
+            text = {
+                Column {
+                    Text(
+                        if (keySet) {
+                            "A key is already saved. Paste a new one to replace it."
+                        } else {
+                            "Paste your own Google Gemini API key. It's stored " +
+                                "only on this phone and used only when you tap " +
+                                "Transcribe (or Test key below)."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    androidx.compose.material3.TextField(
+                        value = keyText,
+                        onValueChange = { keyText = it },
+                        singleLine = true,
+                        placeholder = { Text("AIza…") },
+                        visualTransformation =
+                            androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        viewModel.setGeminiApiKey(keyText)
+                        showKeyDialog = false
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showKeyDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    SettingsCard(title = "AI", icon = Icons.Filled.AutoAwesome) {
+        Text("Voice-note transcription", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Where transcripts of received voice notes are made.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        TranscriptionProviderRow(
+            selected = provider,
+            onSelect = viewModel::setTranscriptionProvider,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            when (provider) {
+                com.garrietta.relay.data.repo.TranscriptionProvider.ON_DEVICE ->
+                    "Transcribed on this phone — the audio never leaves the " +
+                        "device. Uses Android's on-device speech recognizer; " +
+                        "some phones' recognizers only accept live microphone " +
+                        "input, and Relay will say so plainly if yours is one."
+                com.garrietta.relay.data.repo.TranscriptionProvider.GEMINI ->
+                    "The voice note is sent to Google Gemini with your API " +
+                        "key below, and the transcript comes back as text."
+                com.garrietta.relay.data.repo.TranscriptionProvider.OFF ->
+                    "Off — no Transcribe actions appear in chats."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("Gemini API key", style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (keySet) {
+                "Key set — stored on this phone only."
+            } else {
+                "Not set. Relay ships without a key; paste your own to use " +
+                    "Gemini transcription."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row {
+            androidx.compose.material3.TextButton(onClick = { showKeyDialog = true }) {
+                Text(if (keySet) "Change key" else "Set key")
+            }
+            if (keySet) {
+                androidx.compose.material3.TextButton(onClick = viewModel::testGeminiKey) {
+                    Text("Test key")
+                }
+                androidx.compose.material3.TextButton(onClick = viewModel::clearGeminiApiKey) {
+                    Text("Remove")
+                }
+            }
+        }
+        if (provider == com.garrietta.relay.data.repo.TranscriptionProvider.GEMINI && !keySet) {
+            Text(
+                "Transcription is set to Gemini, but no API key is set — " +
+                    "tapping Transcribe on a voice note will explain this.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+/** The three-way provider segmented row (same shape as [ThemeModeRow]). */
+@Composable
+private fun TranscriptionProviderRow(
+    selected: com.garrietta.relay.data.repo.TranscriptionProvider,
+    onSelect: (com.garrietta.relay.data.repo.TranscriptionProvider) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        com.garrietta.relay.data.repo.TranscriptionProvider.entries.forEach { option ->
+            val isSelected = option == selected
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh
+                    )
+                    .clickable { onSelect(option) }
+                    .padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                if (isSelected) {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    when (option) {
+                        com.garrietta.relay.data.repo.TranscriptionProvider.ON_DEVICE ->
+                            "On-device"
+                        com.garrietta.relay.data.repo.TranscriptionProvider.GEMINI ->
+                            "Gemini"
+                        com.garrietta.relay.data.repo.TranscriptionProvider.OFF ->
+                            "Off"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

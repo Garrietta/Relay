@@ -51,6 +51,16 @@ class RelayApp : Application() {
     /** Recently used stickers, most recent first (see StickerRecentsStore). */
     val stickerRecentsStore: StickerRecentsStore by lazy { StickerRecentsStore(this) }
 
+    /** Garrett's Gemini API key + transcription provider (see AiSettingsStore). */
+    val aiSettingsStore: com.garrietta.relay.data.repo.AiSettingsStore by lazy {
+        com.garrietta.relay.data.repo.AiSettingsStore(this)
+    }
+
+    /** Voice-note transcripts, keyed by message (see TranscriptStore). */
+    val transcriptStore: com.garrietta.relay.data.repo.TranscriptStore by lazy {
+        com.garrietta.relay.data.repo.TranscriptStore(this)
+    }
+
     /**
      * Application-scoped coroutine scope: survives Activity destruction.
      * The incoming-message notification collector MUST live here, not in

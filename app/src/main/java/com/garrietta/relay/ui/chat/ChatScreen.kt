@@ -77,7 +77,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Forward
 import androidx.compose.material.icons.filled.DoneAll
@@ -225,6 +227,13 @@ fun ChatScreen(
     // one-shot snackbar message, same pattern as sendError.
     val forwarding by viewModel.forwarding.collectAsState()
     val forwardResult by viewModel.forwardResult.collectAsState()
+    // Voice-note transcription (Garrett 2026-10-20, feature queue 7/7):
+    // the provider choice gates every transcribe affordance; transcripts
+    // render under their audio bubbles from the persistent store.
+    val transcriptionProvider by viewModel.transcriptionProvider.collectAsState()
+    val transcripts by viewModel.transcripts.collectAsState()
+    val transcribingKeys by viewModel.transcribingKeys.collectAsState()
+    val transcriptNotice by viewModel.transcriptNotice.collectAsState()
     val forwardTargets by viewModel.conversations.collectAsState()
     var showForwardPicker by remember { mutableStateOf(false) }
     val participants by viewModel.participants.collectAsState()
@@ -407,6 +416,12 @@ fun ChatScreen(
             viewModel.clearForwardResult()
         }
     }
+    LaunchedEffect(transcriptNotice) {
+        transcriptNotice?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearTranscriptNotice()
+        }
+    }
     // Scroll restore (Garrett 2026-10-19: reopening a chat must NOT jump
     // back to the top — it restores the exact position where he left off).
     // The old LaunchedEffect(messages.size) slammed scrollToItem(0) on EVERY
@@ -585,10 +600,16 @@ fun ChatScreen(
                             }
                             val media = message.media
                             if (media != null) {
+                                val transcriptKey =
+                                    com.garrietta.relay.data.repo.transcriptKeyFor(message)
                                 MediaBubble(
                                     message = message,
                                     media = media,
                                     loadMedia = { att -> viewModel.mediaBytes(att) },
+                                    transcriptionProvider = transcriptionProvider,
+                                    transcriptEntry = transcripts[transcriptKey],
+                                    transcribing = transcriptKey in transcribingKeys,
+                                    onTranscribe = { viewModel.transcribe(message) },
                                     selected = message.id in selectedIds,
                                     selectionActive = selectedIds.isNotEmpty(),
                                     onToggleSelect = { viewModel.toggleSelect(message.id) },
@@ -1634,6 +1655,15 @@ private fun MediaBubble(
     selected: Boolean = false,
     selectionActive: Boolean = false,
     onToggleSelect: () -> Unit = {},
+    /** Voice-note transcription (Garrett 2026-10-20, feature queue
+     * 7/7): the Settings → AI provider (OFF hides every affordance),
+     * this message's stored transcript when one exists, the in-flight
+     * flag, and the transcribe action (audio bubbles only). */
+    transcriptionProvider: com.garrietta.relay.data.repo.TranscriptionProvider =
+        com.garrietta.relay.data.repo.TranscriptionProvider.OFF,
+    transcriptEntry: com.garrietta.relay.data.repo.TranscriptEntry? = null,
+    transcribing: Boolean = false,
+    onTranscribe: () -> Unit = {},
 ) {
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
@@ -1810,6 +1840,43 @@ private fun MediaBubble(
                         )
                     }
                 }
+                b != null && media.isAudio -> {
+                    // Voice note tile (Garrett 2026-10-20): tap opens it
+                    // in the system viewer, like any attachment; the
+                    // transcript (or the Transcribe action) renders
+                    // below, outside this box.
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Voice message",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            if (media.size > 0) {
+                                Text(
+                                    text = formatBytes(media.size),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                text = "Tap to open",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
                 b != null -> {
                     // Non-image file: labeled tile. Tap opens it in the
                     // system viewer (Garrett 2026-10-19).
@@ -1929,6 +1996,75 @@ private fun MediaBubble(
                 }
             }
         }
+        // Voice-note transcript (Garrett 2026-10-20, feature queue
+        // 7/7): under the audio tile — the stored transcript in a card
+        // labeled with the provider that made it, a "Transcribing…"
+        // state while one is in flight, or the Transcribe action.
+        // Nothing renders when the provider is Off.
+        if (media.isAudio &&
+            transcriptionProvider != com.garrietta.relay.data.repo.TranscriptionProvider.OFF
+        ) {
+            val entry = transcriptEntry
+            when {
+                transcribing -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    SevenShapeLoadingIndicator(
+                        diameter = 16.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Transcribing…",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                entry != null -> {
+                    Spacer(Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier
+                            .widthIn(max = maxBubbleWidth)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                            )
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                    ) {
+                        Text(
+                            text = "Transcript · " + when (entry.provider) {
+                                com.garrietta.relay.data.repo
+                                    .TranscriptionProvider.GEMINI -> "Gemini"
+                                com.garrietta.relay.data.repo
+                                    .TranscriptionProvider.ON_DEVICE -> "On-device"
+                                com.garrietta.relay.data.repo
+                                    .TranscriptionProvider.OFF -> ""
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        SelectionContainer {
+                            Text(
+                                entry.text,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+                bytes != null -> TextButton(onClick = onTranscribe) {
+                    Icon(
+                        Icons.Filled.ClosedCaption,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Transcribe")
+                }
+            }
+        }
     }
 
     Column(
@@ -1978,11 +2114,19 @@ private fun MediaBubble(
     // Long-press reaction menu (Garrett 2026-10-19: reactions both ways).
     // Select joins the menu (Garrett 2026-10-20): media messages enter
     // multi-select exactly like text bubbles, so they can be forwarded.
+    // Transcribe joins it for voice notes (Garrett 2026-10-20, feature
+    // queue 7/7) whenever the provider isn't Off.
     ReactionPickerMenu(
         expanded = showReactMenu,
         onDismiss = { showReactMenu = false },
         onReact = onReact,
         onSelect = onToggleSelect,
+        transcribeLabel = if (media.isAudio &&
+            transcriptionProvider != com.garrietta.relay.data.repo.TranscriptionProvider.OFF
+        ) {
+            if (transcriptEntry == null) "Transcribe" else "Transcribe again"
+        } else null,
+        onTranscribe = onTranscribe,
     )
 }
 
@@ -2130,6 +2274,10 @@ private fun ReactionPickerMenu(
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
     onSelect: (() -> Unit)? = null,
+    /** Voice notes only (Garrett 2026-10-20): the Transcribe item;
+     * null hides it (non-audio messages, or provider Off). */
+    transcribeLabel: String? = null,
+    onTranscribe: (() -> Unit)? = null,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
@@ -2156,6 +2304,15 @@ private fun ReactionPickerMenu(
                 text = { Text("Select") },
                 onClick = {
                     select()
+                    onDismiss()
+                },
+            )
+        }
+        if (transcribeLabel != null && onTranscribe != null) {
+            DropdownMenuItem(
+                text = { Text(transcribeLabel) },
+                onClick = {
+                    onTranscribe()
                     onDismiss()
                 },
             )

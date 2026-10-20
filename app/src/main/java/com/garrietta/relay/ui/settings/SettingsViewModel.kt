@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -30,6 +31,7 @@ class SettingsViewModel(
     private val context: Context,
     private val repository: UnifiedInboxRepository,
     private val categoryStore: CategoryStore,
+    private val aiSettings: com.garrietta.relay.data.repo.AiSettingsStore,
 ) : ViewModel() {
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -81,6 +83,68 @@ class SettingsViewModel(
     fun setNotificationsEnabled(enabled: Boolean) {
         app.setMessageNotificationsEnabled(enabled)
         _notificationsEnabled.value = enabled
+    }
+
+    // ---- AI: Gemini key + voice-note transcription (Garrett 2026-10-20,
+    // feature queue 7/7) ----
+
+    /** The transcription provider choice (On-device / Gemini / Off). */
+    val transcriptionProvider:
+        StateFlow<com.garrietta.relay.data.repo.TranscriptionProvider> =
+        aiSettings.provider
+
+    /** True when a Gemini key is stored. The key itself is NEVER exposed
+     * to the UI layer — only this boolean and [geminiApiKey] for the
+     * chat transcription path (ChatViewModel reads the store directly). */
+    val geminiKeySet: StateFlow<Boolean> = aiSettings.apiKey
+        .map { !it.isNullOrBlank() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, !aiSettings.apiKey.value.isNullOrBlank())
+
+    fun setTranscriptionProvider(
+        provider: com.garrietta.relay.data.repo.TranscriptionProvider,
+    ) = aiSettings.setProvider(provider)
+
+    /** Saves Garrett's pasted key (blank input keeps the stored key —
+     * the dialog's explicit Remove action is the way to clear it). */
+    fun setGeminiApiKey(raw: String) {
+        if (raw.isBlank()) {
+            notify("Paste your Gemini API key first — or use Remove to clear the stored key")
+            return
+        }
+        aiSettings.setApiKey(raw)
+        notify("Gemini API key saved")
+    }
+
+    fun clearGeminiApiKey() {
+        aiSettings.clearApiKey()
+        notify("Gemini API key removed")
+    }
+
+    /**
+     * The "Test key" action: one minimal Gemini API call (list models —
+     * validates the key, spends no generation quota). The outcome —
+     * success line or the API's verbatim failure — lands on the
+     * snackbar, exactly like every other Relay failure.
+     */
+    fun testGeminiKey() {
+        val key = aiSettings.apiKey.value
+        if (key.isNullOrBlank()) {
+            notify("Set your Gemini API key first, then test it")
+            return
+        }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.garrietta.relay.data.transcription.GeminiTranscriber.testKey(key)
+                }
+            }
+            outcome.fold(
+                onSuccess = { notify(it) },
+                onFailure = { e ->
+                    notify(e.message ?: "Gemini key test failed: ${e.javaClass.simpleName}")
+                },
+            )
+        }
     }
 
     // ---- Categories ----

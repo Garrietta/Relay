@@ -34,6 +34,17 @@
          microG's authenticator can mint the OAuthLogin token. -->
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />
 
+    <!-- On-device voice-note transcription (Garrett 2026-10-20, feature
+         queue 7/7): Android 11+ package visibility — the speech
+         recognition service must be visible for SpeechRecognizer's
+         availability checks to see it. No RECORD_AUDIO: Relay never
+         records; the recognizer reads already-received audio files. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".RelayApp"
         android:allowBackup="true"

@@ -151,9 +151,18 @@ fun InboxScreen(
     // list sits at the exact pre-chat scroll position on the first frame
     // (Garrett 2026-10-20) — which also puts the tapped row exactly
     // where the reverse avatar morph expects to land.
+    // The restore point is consumed ONCE and shared: the row-entrance
+    // stagger (firstLoad, below) also reads it — on a chat-exit return the
+    // rows must compose in their final form from the very first frame.
+    val chatExitRestore = remember(selectedCategoryId) {
+        viewModel.consumeChatExitScroll(selectedCategoryId)
+    }
     val listState = remember(selectedCategoryId) {
-        val restore = viewModel.consumeChatExitScroll(selectedCategoryId)
-        if (restore != null) LazyListState(restore.first, restore.second) else LazyListState()
+        if (chatExitRestore != null) {
+            LazyListState(chatExitRestore.first, chatExitRestore.second)
+        } else {
+            LazyListState()
+        }
     }
     // Every chat entry point funnels through here so the scroll position
     // is captured BEFORE the chat opens, whichever surface opened it
@@ -227,7 +236,26 @@ fun InboxScreen(
     // switches the rows must NOT replay their slide-in — Garrett 2026-10-19:
     // "i can see messages slide out in the back"; the switch is an overlay
     // pop (see below), never a slide.
-    var firstLoad by remember { mutableStateOf(true) }
+    // A return from a chat is NOT a first load, and the rows must not sit
+    // inside the stagger wrapper even for the first frame (Garrett
+    // 2026-10-20: text flashes on the home screen when exiting a chat
+    // whose header is expanded). The wrapper is a different composition
+    // branch than the bare row, so flipping firstLoad off in the effect
+    // below — one frame into the pop — discarded and recomposed every
+    // row subtree, including the avatar's shared-element entry, WHILE
+    // the reverse avatar morph was forming its match. The shared-
+    // transition state machine reads the visible entry being removed
+    // mid-transition as ActiveMatchRemovedDuringTransition: the orphaned
+    // entry renders again alongside its replacement, the morph's
+    // placeholder suppression tears, and the row flashes doubled over
+    // the inbox. Collapsed-header exits never showed it — with no
+    // chat-side avatar registration there is no match to tear. Starting
+    // firstLoad at false whenever a chat-exit restore point was consumed
+    // keeps the morph's target entry stable for the whole flight (the
+    // same "final state from the first frame" rule #141 applied to the
+    // chat header). Cold starts have no restore point, so the stagger
+    // still plays there.
+    var firstLoad by remember { mutableStateOf(chatExitRestore == null) }
     LaunchedEffect(conversations) {
         if (conversations.isNotEmpty()) firstLoad = false
     }

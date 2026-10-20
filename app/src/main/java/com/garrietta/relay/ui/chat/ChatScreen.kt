@@ -728,6 +728,10 @@ fun ChatScreen(
                             if (media != null) {
                                 val transcriptKey =
                                     com.garrietta.relay.data.repo.transcriptKeyFor(message)
+                                // Computed OUTSIDE the jiggle wrapper: inside
+                                // a plain Box, the BoxWithConstraints scope's
+                                // maxWidth no longer resolves implicitly.
+                                val mediaBubbleWidth = maxWidth * 0.66f
                                 Box(Modifier.scrollJiggle(jiggle, index)) {
                                     MediaBubble(
                                         message = message,
@@ -748,7 +752,7 @@ fun ChatScreen(
                                         // 0.92 overshoot). Every image bubble is
                                         // the same width; height follows aspect
                                         // ratio. Text bubbles keep the 0.8 cap.
-                                        maxBubbleWidth = maxWidth * 0.66f,
+                                        maxBubbleWidth = mediaBubbleWidth,
                                         onShowReactions = { reactionDetail = it },
                                         // Tapping an image opens the conversation
                                         // image pager (Garrett 2026-10-19 21:42),

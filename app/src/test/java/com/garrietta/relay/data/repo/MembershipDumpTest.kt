@@ -177,8 +177,8 @@ class MembershipDumpTest {
             totalConversations = 1,
         )
         assertFalse(bare.contains("census:"))
-        assertTrue(bare.contains("type=0"))
-        assertFalse(bare.contains("sent="))
+        assertTrue(bare.contains("id=p-dad num=+15550002222 name=Dad type=0"))
+        assertFalse(bare.contains("type=0 sent="))
     }
 
     @Test fun `format marks a missing field 21 as NO-F21 with absent list`() {

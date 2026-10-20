@@ -14,6 +14,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -24,7 +25,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -57,7 +57,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.garrietta.relay.ui.motion.RelaySprings
-import com.garrietta.relay.ui.theme.expressiveShape
 import kotlinx.coroutines.delay
 
 /**
@@ -235,14 +234,20 @@ fun TopSearchPopup(
                                 color = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f),
                             )
-                            // Tonal button in a cookie shape — dialog actions
-                            // are part of the shape family too, not default
-                            // pills. The SHAPE itself is enlarged to fit the
-                            // label (min size) — no content padding.
+                            // Tonal Cancel — a rounded-off rectangle with
+                            // the category bar's small chip radius (10dp,
+                            // the unselected middle chips), NOT a cookie and
+                            // not a pill (Garrett 2026-10-20). Content-
+                            // hugging: no forced min size — the button
+                            // wraps the label with even, comfortable
+                            // padding so it never looks cramped.
                             FilledTonalButton(
                                 onClick = { requestExit(onDismiss) },
-                                shape = expressiveShape("Cookie4"),
-                                modifier = Modifier.sizeIn(minWidth = 104.dp, minHeight = 48.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(
+                                    horizontal = 16.dp,
+                                    vertical = 10.dp,
+                                ),
                             ) { Text("Cancel") }
                         }
                         Spacer(Modifier.height(12.dp))

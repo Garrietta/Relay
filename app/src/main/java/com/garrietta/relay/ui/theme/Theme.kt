@@ -129,10 +129,15 @@ fun RelayTheme(
     // App-wide persistent contact color: the last-viewed contact's seed
     // tints the whole app (richer than the chat-scoped version — this is the
     // "more color" Garrett asked for). Falls back to wallpaper dynamic.
+    // Both paths run the adjacent-surface separation discipline (Garrett
+    // 2026-10-20): seeded schemes separate inside their derivation, the
+    // dynamic fallback separates here — near-identical tones budded
+    // against each other (composer bar on the chat ground, chips on the
+    // window) clear their floors either way.
     val colorScheme = if (seedColor != null) {
         seededAppColorScheme(seedColor, darkTheme, baseScheme)
     } else {
-        baseScheme
+        baseScheme.withAdjacentSeparation(darkTheme)
     }
     MaterialTheme(
         colorScheme = colorScheme,

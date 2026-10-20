@@ -14,10 +14,15 @@ import androidx.core.graphics.ColorUtils
  * vibrant color pulled out of the contact's profile photo (Palette API, same
  * pattern as Koda's artwork theming).
  *
- * Every tonal role is derived from the seed — not just primary — and every
- * text-bearing pair is verified against WCAG AA (4.5:1), nudging the
- * foreground toward black/white until it passes. The wallpaper dynamic
- * scheme remains the fallback (and the inbox scheme) when [seed] is null.
+ * Every tonal role is derived from the seed — not just primary — by the
+ * pure derivation in SeedSchemeTones.kt, which also runs the
+ * adjacent-surface separation pass (Garrett 2026-10-20: near-identical
+ * tones budded against each other — the composer bar on the chat ground
+ * with the field inside it — now clear their [AdjacentFloors] minimums).
+ * Every text-bearing pair is then verified against WCAG AA (4.5:1) with
+ * the hue-preserving guard ([ensureTextContrastArgb]). The wallpaper
+ * dynamic scheme remains the fallback (and the inbox scheme) when
+ * [seed] is null.
  */
 @Composable
 fun rememberContactChatScheme(seed: Color?): ColorScheme {
@@ -30,91 +35,8 @@ fun rememberContactChatScheme(seed: Color?): ColorScheme {
     }
 }
 
-fun seededChatColorScheme(seed: Color, darkTheme: Boolean, fallback: ColorScheme): ColorScheme {
-    val s = seed.toArgb()
-    val white = android.graphics.Color.WHITE
-    val black = android.graphics.Color.BLACK
-    val seedIsDark = seed.luminance() < 0.5f
-    fun blendTo(target: Int, ratio: Float): Int = ColorUtils.blendARGB(s, target, ratio)
-    fun c(argb: Int) = Color(argb)
-
-    // Tonal roles from the seed. Blend ratios are ordered so the surface
-    // ramp reads correctly: dim < surface < lowest < low < container <
-    // high < highest < bright (light), mirrored for dark.
-    val scheme = if (!darkTheme) {
-        fallback.copy(
-            primary = c(s),
-            onPrimary = c(if (seedIsDark) white else black),
-            primaryContainer = c(blendTo(white, 0.80f)),
-            onPrimaryContainer = c(blendTo(black, 0.62f)),
-            secondary = c(blendTo(white, 0.30f)),
-            onSecondary = c(if (seedIsDark) white else black),
-            secondaryContainer = c(blendTo(white, 0.84f)),
-            onSecondaryContainer = c(blendTo(black, 0.62f)),
-            tertiary = c(blendTo(black, 0.12f)),
-            onTertiary = c(if (seedIsDark) white else black),
-            tertiaryContainer = c(blendTo(white, 0.76f)),
-            onTertiaryContainer = c(blendTo(black, 0.62f)),
-            background = c(blendTo(white, 0.96f)),
-            onBackground = fallback.onBackground,
-            surface = c(blendTo(white, 0.95f)),
-            onSurface = fallback.onSurface,
-            surfaceVariant = c(blendTo(white, 0.88f)),
-            onSurfaceVariant = fallback.onSurfaceVariant,
-            surfaceTint = c(s),
-            surfaceDim = c(blendTo(white, 0.80f)),
-            surfaceBright = c(blendTo(white, 0.98f)),
-            surfaceContainerLowest = c(blendTo(white, 0.99f)),
-            surfaceContainerLow = c(blendTo(white, 0.94f)),
-            surfaceContainer = c(blendTo(white, 0.91f)),
-            surfaceContainerHigh = c(blendTo(white, 0.87f)),
-            surfaceContainerHighest = c(blendTo(white, 0.83f)),
-            inverseSurface = c(blendTo(black, 0.82f)),
-            inverseOnSurface = c(blendTo(white, 0.90f)),
-            inversePrimary = c(blendTo(white, 0.55f)),
-            outline = c(blendTo(black, 0.38f)),
-            outlineVariant = c(blendTo(black, 0.14f)),
-            // scrim and error roles intentionally stay on the fallback:
-            // errors must never be tinted by a contact color.
-        )
-    } else {
-        val primary = c(blendTo(white, if (seedIsDark) 0.28f else 0.12f))
-        fallback.copy(
-            primary = primary,
-            onPrimary = c(if (seedIsDark) black else blendTo(black, 0.75f)),
-            primaryContainer = c(blendTo(black, 0.70f)),
-            onPrimaryContainer = c(blendTo(white, 0.82f)),
-            secondary = c(blendTo(white, 0.18f)),
-            onSecondary = fallback.onSecondary,
-            secondaryContainer = c(blendTo(black, 0.66f)),
-            onSecondaryContainer = c(blendTo(white, 0.82f)),
-            tertiary = c(blendTo(white, 0.24f)),
-            onTertiary = c(blendTo(black, 0.80f)),
-            tertiaryContainer = c(blendTo(black, 0.62f)),
-            onTertiaryContainer = c(blendTo(white, 0.82f)),
-            background = c(blendTo(black, 0.95f)),
-            onBackground = fallback.onBackground,
-            surface = c(blendTo(black, 0.94f)),
-            onSurface = fallback.onSurface,
-            surfaceVariant = c(blendTo(black, 0.86f)),
-            onSurfaceVariant = fallback.onSurfaceVariant,
-            surfaceTint = primary,
-            surfaceDim = c(blendTo(black, 0.95f)),
-            surfaceBright = c(blendTo(black, 0.65f)),
-            surfaceContainerLowest = c(blendTo(black, 0.97f)),
-            surfaceContainerLow = c(blendTo(black, 0.90f)),
-            surfaceContainer = c(blendTo(black, 0.86f)),
-            surfaceContainerHigh = c(blendTo(black, 0.80f)),
-            surfaceContainerHighest = c(blendTo(black, 0.72f)),
-            inverseSurface = c(blendTo(white, 0.88f)),
-            inverseOnSurface = c(blendTo(black, 0.80f)),
-            inversePrimary = c(blendTo(black, 0.35f)),
-            outline = c(blendTo(white, 0.38f)),
-            outlineVariant = c(blendTo(white, 0.14f)),
-        )
-    }
-    return scheme.withVerifiedContrast()
-}
+fun seededChatColorScheme(seed: Color, darkTheme: Boolean, fallback: ColorScheme): ColorScheme =
+    seedScheme(seed, darkTheme, fallback, SeedSchemeVariant.CHAT)
 
 /**
  * App-wide persistent contact color — RICHER than the chat-scoped scheme.
@@ -124,94 +46,100 @@ fun seededChatColorScheme(seed: Color, darkTheme: Boolean, fallback: ColorScheme
  * text-bearing pair still goes through the WCAG AA verifier — contrast is
  * non-negotiable, color density is not.
  */
-fun seededAppColorScheme(seed: Color, darkTheme: Boolean, fallback: ColorScheme): ColorScheme {
-    val s = seed.toArgb()
-    val white = android.graphics.Color.WHITE
-    val black = android.graphics.Color.BLACK
-    val seedIsDark = seed.luminance() < 0.5f
-    fun blendTo(target: Int, ratio: Float): Int = ColorUtils.blendARGB(s, target, ratio)
-    fun c(argb: Int) = Color(argb)
+fun seededAppColorScheme(seed: Color, darkTheme: Boolean, fallback: ColorScheme): ColorScheme =
+    seedScheme(seed, darkTheme, fallback, SeedSchemeVariant.APP)
 
-    val scheme = if (!darkTheme) {
-        fallback.copy(
-            primary = c(s),
-            onPrimary = c(if (seedIsDark) white else black),
-            primaryContainer = c(blendTo(white, 0.62f)),
-            onPrimaryContainer = c(blendTo(black, 0.55f)),
-            secondary = c(blendTo(white, 0.22f)),
-            onSecondary = c(if (seedIsDark) white else black),
-            secondaryContainer = c(blendTo(white, 0.68f)),
-            onSecondaryContainer = c(blendTo(black, 0.55f)),
-            tertiary = c(blendTo(black, 0.10f)),
-            onTertiary = c(if (seedIsDark) white else black),
-            tertiaryContainer = c(blendTo(white, 0.58f)),
-            onTertiaryContainer = c(blendTo(black, 0.55f)),
-            background = c(blendTo(white, 0.88f)),
-            onBackground = fallback.onBackground,
-            surface = c(blendTo(white, 0.86f)),
-            onSurface = fallback.onSurface,
-            surfaceVariant = c(blendTo(white, 0.78f)),
-            onSurfaceVariant = fallback.onSurfaceVariant,
-            surfaceTint = c(s),
-            surfaceDim = c(blendTo(white, 0.70f)),
-            surfaceBright = c(blendTo(white, 0.94f)),
-            surfaceContainerLowest = c(blendTo(white, 0.96f)),
-            surfaceContainerLow = c(blendTo(white, 0.88f)),
-            surfaceContainer = c(blendTo(white, 0.82f)),
-            surfaceContainerHigh = c(blendTo(white, 0.74f)),
-            surfaceContainerHighest = c(blendTo(white, 0.66f)),
-            inverseSurface = c(blendTo(black, 0.82f)),
-            inverseOnSurface = c(blendTo(white, 0.90f)),
-            inversePrimary = c(blendTo(white, 0.45f)),
-            outline = c(blendTo(black, 0.32f)),
-            outlineVariant = c(blendTo(black, 0.12f)),
-        )
-    } else {
-        val primary = c(blendTo(white, if (seedIsDark) 0.22f else 0.10f))
-        fallback.copy(
-            primary = primary,
-            onPrimary = c(if (seedIsDark) black else blendTo(black, 0.72f)),
-            primaryContainer = c(blendTo(black, 0.52f)),
-            onPrimaryContainer = c(blendTo(white, 0.78f)),
-            secondary = c(blendTo(white, 0.14f)),
-            onSecondary = fallback.onSecondary,
-            secondaryContainer = c(blendTo(black, 0.50f)),
-            onSecondaryContainer = c(blendTo(white, 0.78f)),
-            tertiary = c(blendTo(white, 0.18f)),
-            onTertiary = c(blendTo(black, 0.78f)),
-            tertiaryContainer = c(blendTo(black, 0.46f)),
-            onTertiaryContainer = c(blendTo(white, 0.78f)),
-            background = c(blendTo(black, 0.86f)),
-            onBackground = fallback.onBackground,
-            surface = c(blendTo(black, 0.84f)),
-            onSurface = fallback.onSurface,
-            surfaceVariant = c(blendTo(black, 0.74f)),
-            onSurfaceVariant = fallback.onSurfaceVariant,
-            surfaceTint = primary,
-            surfaceDim = c(blendTo(black, 0.90f)),
-            surfaceBright = c(blendTo(black, 0.55f)),
-            surfaceContainerLowest = c(blendTo(black, 0.94f)),
-            surfaceContainerLow = c(blendTo(black, 0.84f)),
-            surfaceContainer = c(blendTo(black, 0.76f)),
-            surfaceContainerHigh = c(blendTo(black, 0.66f)),
-            surfaceContainerHighest = c(blendTo(black, 0.56f)),
-            inverseSurface = c(blendTo(white, 0.88f)),
-            inverseOnSurface = c(blendTo(black, 0.80f)),
-            inversePrimary = c(blendTo(black, 0.30f)),
-            outline = c(blendTo(white, 0.32f)),
-            outlineVariant = c(blendTo(white, 0.12f)),
-        )
-    }
-    return scheme.withVerifiedContrast()
+private fun seedScheme(
+    seed: Color,
+    darkTheme: Boolean,
+    fallback: ColorScheme,
+    variant: SeedSchemeVariant,
+): ColorScheme {
+    val t = seedSchemeTones(seed.toArgb(), darkTheme, variant)
+    fun c(argb: Int) = Color(argb)
+    return fallback.copy(
+        primary = c(t.primary),
+        onPrimary = c(t.onPrimary),
+        primaryContainer = c(t.primaryContainer),
+        onPrimaryContainer = c(t.onPrimaryContainer),
+        secondary = c(t.secondary),
+        onSecondary = t.onSecondary?.let { c(it) } ?: fallback.onSecondary,
+        secondaryContainer = c(t.secondaryContainer),
+        onSecondaryContainer = c(t.onSecondaryContainer),
+        tertiary = c(t.tertiary),
+        onTertiary = c(t.onTertiary),
+        tertiaryContainer = c(t.tertiaryContainer),
+        onTertiaryContainer = c(t.onTertiaryContainer),
+        background = c(t.background),
+        onBackground = fallback.onBackground,
+        surface = c(t.surface),
+        onSurface = fallback.onSurface,
+        surfaceVariant = c(t.surfaceVariant),
+        onSurfaceVariant = fallback.onSurfaceVariant,
+        surfaceTint = c(t.primary),
+        surfaceDim = c(t.surfaceDim),
+        surfaceBright = c(t.surfaceBright),
+        surfaceContainerLowest = c(t.surfaceContainerLowest),
+        surfaceContainerLow = c(t.surfaceContainerLow),
+        surfaceContainer = c(t.surfaceContainer),
+        surfaceContainerHigh = c(t.surfaceContainerHigh),
+        surfaceContainerHighest = c(t.surfaceContainerHighest),
+        inverseSurface = c(t.inverseSurface),
+        inverseOnSurface = c(t.inverseOnSurface),
+        inversePrimary = c(t.inversePrimary),
+        outline = c(t.outline),
+        outlineVariant = c(t.outlineVariant),
+        // scrim and error roles intentionally stay on the fallback:
+        // errors must never be tinted by a contact color.
+    ).withVerifiedContrast()
 }
 
 /**
- * Contrast guard: every text-bearing pair must meet WCAG AA (4.5:1). Pairs
- * that don't are nudged toward black/white until they pass. This is the
- * design work the dynamic-color system won't do for a custom seed.
+ * The adjacent-separation pass for a scheme that did NOT come from a
+ * seed — the wallpaper dynamic fallback. Runs the same SurfaceTones
+ * discipline (plus the text verifier) so the unseeded app separates
+ * its surfaces too. [background] itself never moves (MainActivity
+ * paints the window from the dynamic scheme's background directly;
+ * keeping the role identical keeps the two in lockstep).
+ */
+fun ColorScheme.withAdjacentSeparation(darkTheme: Boolean): ColorScheme {
+    val separated = SurfaceTones(
+        background = background.toArgb(),
+        surfaceContainerLow = surfaceContainerLow.toArgb(),
+        surfaceContainer = surfaceContainer.toArgb(),
+        surfaceContainerHigh = surfaceContainerHigh.toArgb(),
+        surfaceContainerHighest = surfaceContainerHighest.toArgb(),
+        primaryContainer = primaryContainer.toArgb(),
+        secondaryContainer = secondaryContainer.toArgb(),
+    ).withAdjacentSeparation(darkTheme)
+    return copy(
+        surfaceContainerLow = Color(separated.surfaceContainerLow),
+        surfaceContainer = Color(separated.surfaceContainer),
+        surfaceContainerHigh = Color(separated.surfaceContainerHigh),
+        surfaceContainerHighest = Color(separated.surfaceContainerHighest),
+        primaryContainer = Color(separated.primaryContainer),
+        secondaryContainer = Color(separated.secondaryContainer),
+    ).withVerifiedContrast()
+}
+
+/**
+ * Contrast guard: every text-bearing pair must meet WCAG AA (4.5:1),
+ * verified against the FINAL fills (i.e. after adjacent separation has
+ * moved the containers). The fix is hue-preserving
+ * ([ensureTextContrastArgb]): a failing foreground deepens or lightens
+ * within its own color family instead of being blended toward gray.
+ * Pairs are chained so a role that sits on several grounds (onSurface
+ * on surface AND on the list sheet; onSurfaceVariant on the sheet, the
+ * settings card, and the composer bar) clears every one of them — each
+ * fix moves the tone monotonically toward the same extreme, so a later
+ * fix can never un-pass an earlier pair.
  */
 private fun ColorScheme.withVerifiedContrast(): ColorScheme {
-    fun fix(fg: Color, bg: Color): Color = Color(ensureContrast(fg.toArgb(), bg.toArgb()))
+    fun fix(fg: Color, bg: Color): Color =
+        Color(ensureTextContrastArgb(fg.toArgb(), bg.toArgb()))
+    val onSurfaceFixed = fix(fix(onSurface, surface), surfaceContainerLow)
+    val onSurfaceVariantFixed =
+        fix(fix(fix(onSurfaceVariant, surfaceContainer), surfaceContainerLow), surfaceContainerHigh)
     return copy(
         onPrimary = fix(onPrimary, primary),
         onPrimaryContainer = fix(onPrimaryContainer, primaryContainer),
@@ -219,8 +147,8 @@ private fun ColorScheme.withVerifiedContrast(): ColorScheme {
         onSecondaryContainer = fix(onSecondaryContainer, secondaryContainer),
         onTertiary = fix(onTertiary, tertiary),
         onTertiaryContainer = fix(onTertiaryContainer, tertiaryContainer),
-        onSurface = fix(onSurface, surface),
-        onSurfaceVariant = fix(onSurfaceVariant, surfaceContainer),
+        onSurface = onSurfaceFixed,
+        onSurfaceVariant = onSurfaceVariantFixed,
         onBackground = fix(onBackground, background),
         inverseOnSurface = fix(inverseOnSurface, inverseSurface),
     )
@@ -246,10 +174,11 @@ internal fun ensureContrast(fg: Int, bg: Int, minRatio: Float = 4.5f): Int {
  * "more colors" directive, scoped to where variety belongs.
  *
  * Returns (bubbleContainer, onBubbleContainer, senderNameTone). Every
- * text-bearing pair is verified against WCAG AA (4.5:1) via the same
- * [ensureContrast] guard as the chat schemes — contrast is non-negotiable,
- * color density is not. Null seed (no photo / extraction failed) falls back
- * to the neutral 1:1 incoming treatment so nothing ever looks broken.
+ * text-bearing pair is verified against WCAG AA (4.5:1) hue-preserved,
+ * and the fill itself clears the adjacent-separation floor against the
+ * thread ground — a pale sender's bubble can no longer wash into a pale
+ * thread. Null seed (no photo / extraction failed) falls back to the
+ * neutral 1:1 incoming treatment so nothing ever looks broken.
  */
 fun senderBubbleColors(
     seed: Color?,
@@ -264,20 +193,45 @@ fun senderBubbleColors(
             fallback.onSurfaceVariant,
         )
     }
-    val s = seed.toArgb()
-    val white = android.graphics.Color.WHITE
-    val black = android.graphics.Color.BLACK
-    fun blendTo(target: Int, ratio: Float) = Color(ColorUtils.blendARGB(s, target, ratio))
-    // Pastel-but-present fill: the sender's color reads clearly without
-    // shouting over the message text.
-    val container = if (!darkTheme) blendTo(white, 0.74f) else blendTo(black, 0.60f)
-    val onContainer = Color(
-        ensureContrast(if (!darkTheme) black else white, container.toArgb())
+    val (container, onContainer, nameTone) =
+        senderBubbleArgb(seed.toArgb(), threadBackground.toArgb(), darkTheme)
+    return Triple(Color(container), Color(onContainer), Color(nameTone))
+}
+
+/**
+ * The pure derivation behind [senderBubbleColors] (ARGB in, ARGB out —
+ * unit-testable on the JVM):
+ * - container: the sender's pastel (light) / deep tint (dark), pushed
+ *   away from the thread ground until it clears
+ *   [AdjacentFloors.SENDER_BUBBLE_ON_GROUND] — hue preserved, so
+ *   adjacent senders stay distinguishable by color family even when
+ *   several of them had to deepen.
+ * - onContainer: black (light) / white (dark) verified to AA against
+ *   the final container.
+ * - nameTone: the SEED ITSELF walked along its own lightness until it
+ *   clears AA against the thread ground — the name is the sender's
+ *   color, deepened, never a gray.
+ */
+fun senderBubbleArgb(
+    seedArgb: Int,
+    threadBackgroundArgb: Int,
+    darkTheme: Boolean,
+): Triple<Int, Int, Int> {
+    val container = separateFromArgb(
+        foreground = blendArgb(seedArgb, if (darkTheme) BLACK_ARGB else WHITE_ARGB, if (darkTheme) 0.60f else 0.74f),
+        background = threadBackgroundArgb,
+        minRatio = AdjacentFloors.SENDER_BUBBLE_ON_GROUND,
+        darken = !darkTheme,
     )
-    // Sender name sits on the thread background, not the bubble.
-    val nameTone = Color(ensureContrast(s, threadBackground.toArgb()))
+    val onContainer = ensureTextContrastArgb(
+        if (darkTheme) WHITE_ARGB else BLACK_ARGB, container,
+    )
+    val nameTone = ensureTextContrastArgb(seedArgb, threadBackgroundArgb)
     return Triple(container, onContainer, nameTone)
 }
+
+private const val WHITE_ARGB = -0x1 // 0xFFFFFFFF
+private const val BLACK_ARGB = -0x1000000 // 0xFF000000
 
 /**
  * Resolved bubble colors for a user-picked per-chat COLORWAY (Garrett

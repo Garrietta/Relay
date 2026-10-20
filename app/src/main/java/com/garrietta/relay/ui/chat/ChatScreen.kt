@@ -690,6 +690,7 @@ private fun ChatHeader(
                 transportLabel = transportLabel,
                 scrolled = scrolled,
                 patternKey = patternKey,
+                threadId = threadId,
                 onBack = onBack,
                 // Tapping the group header opens details in conversation
                 // (member list) mode.

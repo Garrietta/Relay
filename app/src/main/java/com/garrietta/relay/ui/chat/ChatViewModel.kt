@@ -540,9 +540,22 @@ class ChatViewModel(
         viewModelScope.launch { repository.markRcsRead(rcsConversationId ?: return@launch) }
     }
 
-    /** Saves the current first-visible position so reopening restores it. */
-    fun saveScrollPosition(messageId: Long, scrollOffset: Int) {
-        scrollStore.save(cacheKey(), messageId, scrollOffset)
+    /**
+     * Saves the current first-visible position so reopening restores it.
+     * [newestMessageId]/[newestMessageDate] snapshot the list's tail at
+     * save time: on reopen, a tail newer than the snapshot means the
+     * chat opens at the new bottom instead of the stale anchor
+     * (Garrett 2026-10-20, [ChatScrollLogic.hasNewerThanSaved]).
+     */
+    fun saveScrollPosition(
+        messageId: Long,
+        scrollOffset: Int,
+        newestMessageId: Long,
+        newestMessageDate: Long,
+    ) {
+        scrollStore.save(
+            cacheKey(), messageId, scrollOffset, newestMessageId, newestMessageDate,
+        )
     }
 
     /** The saved scroll position for this conversation, if any. */
@@ -717,6 +730,12 @@ class ChatViewModel(
         pendingOptimistic[tmpId] = optimistic
         // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+        // Dispatched: the composer resets NOW, not when the wire call
+        // returns (Garrett 2026-10-20 — the sending state visibly
+        // outlasted delivery). The bubble carries the wire state from
+        // here (SENDING ticks → echo). send()'s trailing reset remains
+        // as the backstop for paths that fail before this point.
+        _sending.value = false
         when (val outcome = repository.sendRcs(conversationId, body, tmpId)) {
             is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
                 // The server echo (same tmpId) replaces the optimistic bubble.
@@ -802,6 +821,9 @@ class ChatViewModel(
         )
         pendingOptimistic[tmpId] = optimistic
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+        // Dispatched — composer sending state resets at the insert,
+        // not after the wire call (see sendRcs).
+        _sending.value = false
         when (val outcome = repository.sendRcsLocation(
             conversationId, latitude, longitude, name, link, tmpId,
         )) {
@@ -935,6 +957,10 @@ class ChatViewModel(
         )
         pendingOptimistic[tmpId] = optimistic
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+        // Dispatched — composer sending state resets at the insert;
+        // upload progress lives on the bubble, not the send button
+        // (see sendRcs).
+        _sending.value = false
         try {
             val uploaded = repository.uploadRcsMedia(bytes, mime, name) { p ->
                 val cur = _messages.value
@@ -1045,6 +1071,9 @@ class ChatViewModel(
                     deliveryStatus = DeliveryStatus.SENT,
                 )
                 setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+                // Dispatched — composer sending state resets at the
+                // insert, not at coroutine end (see sendRcs).
+                _sending.value = false
                 repository.refresh()
                 // A brand-new conversation has no thread yet; bind to the
                 // real one once the provider knows about it.

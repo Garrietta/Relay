@@ -3,7 +3,6 @@ package com.garrietta.relay.ui.chat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
@@ -150,6 +149,7 @@ import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.CategoryStore
+import com.garrietta.relay.data.repo.ChatScrollLogic
 import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isTransportSystemNotice
@@ -270,9 +270,15 @@ fun ChatScreen(
             val current = messages
             if (current.isNotEmpty()) {
                 val idx = listState.firstVisibleItemIndex.coerceIn(0, current.size - 1)
+                // The tail snapshot rides along (Garrett 2026-10-20):
+                // on reopen, a tail newer than this one means the chat
+                // opens at the new bottom, not on this anchor.
+                val newest = current.first()
                 viewModel.saveScrollPosition(
                     current[idx].id,
                     listState.firstVisibleItemScrollOffset,
+                    newest.id,
+                    newest.date,
                 )
             }
         }
@@ -340,6 +346,24 @@ fun ChatScreen(
     // See the restore effect further down for the full rationale.
     var scrollRestored by remember(viewModel) { mutableStateOf(false) }
     var restoreAttempts by remember(viewModel) { mutableStateOf(0) }
+    // Tail watching (Garrett 2026-10-20): the newest message id seen by
+    // the post-restore tail effect below, and the open-time recheck —
+    // armed when a chat left at the bottom restores onto its saved
+    // anchor from an early (cached) emission, so a fresher tail that
+    // loads a beat later still lands the open at the bottom.
+    var lastTailId by remember(viewModel) { mutableStateOf<Long?>(null) }
+    var tailRecheck by remember(viewModel) {
+        mutableStateOf<ChatScrollLogic.TailRecheck?>(null)
+    }
+    // Scroll-to-bottom with the standard feel: animate short hops,
+    // teleport long ones (ChatScrollLogic.useAnimatedScroll).
+    val scrollChatToBottom: suspend () -> Unit = {
+        if (ChatScrollLogic.useAnimatedScroll(listState.firstVisibleItemIndex)) {
+            listState.animateScrollToItem(0)
+        } else {
+            listState.scrollToItem(0)
+        }
+    }
     // Sticky collapse with hysteresis, gated on real scrollability. The old
     // "any offset > 0" flapped: a short thread's overscroll bounce would
     // start the minimize and snap it straight back to full size. Now the
@@ -365,9 +389,16 @@ fun ChatScreen(
     // bottom; anything else means it reopens scrolled.
     var headerCollapsed by remember(viewModel) {
         val saved = viewModel.savedScrollPosition()
-        val newestId = messages.firstOrNull()?.id
-        val opensAtNewest = saved != null && newestId != null &&
-            saved.messageId == newestId && saved.scrollOffset == 0
+        val newest = messages.firstOrNull()
+        // Opens at the newest message — and so starts expanded — when
+        // there is no saved position to restore, when the restore IS
+        // the newest message, and (Garrett 2026-10-20) when the tail
+        // grew after the position was saved: that open lands at the
+        // new bottom under the same rule the restore effect applies,
+        // so the header must start in the state the landing implies.
+        val opensAtNewest = saved != null && newest != null &&
+            (ChatScrollLogic.hasNewerThanSaved(saved, newest.id, newest.date) ||
+                (saved.messageId == newest.id && saved.scrollOffset == 0))
         mutableStateOf(saved != null && !opensAtNewest)
     }
     /** Message whose reaction badge was tapped — shows the who-reacted dialog. */
@@ -430,9 +461,12 @@ fun ChatScreen(
     // list grows underneath — older messages append at higher indices, so
     // the saved message keeps its identity). The effect retries across the
     // load sequence until the saved message appears (cache → network →
-    // deep fill); after a few misses it falls back to newest, and once
-    // restored it never touches scroll again — live arrivals in the
-    // reverseLayout list settle at the bottom on their own.
+    // deep fill); after a few misses it falls back to newest. One exception
+    // to "restore the anchor" (Garrett 2026-10-20): if the tail is NEWER
+    // than the snapshot the position was saved with, the anchor is stale
+    // and the chat opens at the new bottom — see
+    // [ChatScrollLogic.hasNewerThanSaved]. After the restore, the tail
+    // effect below owns all further scroll decisions.
     // (scrollRestored / restoreAttempts are declared above the header
     // state — the header's initial collapse derives from the position
     // this effect restores.)
@@ -444,10 +478,32 @@ fun ChatScreen(
             scrollRestored = true
             return@LaunchedEffect
         }
+        val newest = messages.first()
+        if (ChatScrollLogic.hasNewerThanSaved(saved, newest.id, newest.date)) {
+            // The tail grew after this position was saved (Garrett
+            // 2026-10-20): the saved anchor is stale — open at the NEW
+            // bottom, on the newest message, not on the old tail.
+            listState.scrollToItem(0)
+            scrollRestored = true
+            return@LaunchedEffect
+        }
         val index = messages.indexOfFirst { it.id == saved.messageId }
         if (index >= 0) {
             listState.scrollToItem(index, saved.scrollOffset)
             scrollRestored = true
+            if (saved.newestMessageDate >= 0L &&
+                saved.messageId == saved.newestMessageId
+            ) {
+                // He left at the bottom, and this emission shows no
+                // newer tail — but it may be the CACHE, painted before
+                // the network load lands. Arm the recheck: if a
+                // fresher tail loads while the view still sits on the
+                // anchor, the tail effect re-lands at the bottom.
+                tailRecheck = ChatScrollLogic.TailRecheck(
+                    anchorId = saved.messageId,
+                    savedNewestDate = saved.newestMessageDate,
+                )
+            }
         } else {
             restoreAttempts++
             if (restoreAttempts >= 4) {
@@ -457,6 +513,53 @@ fun ChatScreen(
             }
             // Otherwise a deeper load may still bring it; wait for the
             // next emission without touching scroll.
+        }
+    }
+
+    // Post-restore tail watching (Garrett 2026-10-20): "when I send a
+    // message it should scroll down to the bottom." Every append lands
+    // at index 0 (the visual bottom); this effect decides whether the
+    // VIEW follows. His own send (any path — the tail turns outgoing)
+    // always scrolls; an incoming arrival pins only when he's already
+    // at the bottom (the newest message is the first visible item);
+    // scrolled up into history, the view is never yanked. It also
+    // completes the open-time rule when the first emission was the
+    // cache (see tailRecheck, armed by the restore effect above).
+    LaunchedEffect(messages) {
+        if (!scrollRestored || messages.isEmpty()) return@LaunchedEffect
+        val tail = messages.first()
+        val previousTailId = lastTailId
+        lastTailId = tail.id
+        val check = tailRecheck
+        if (check != null) {
+            val visibleId =
+                messages.getOrNull(listState.firstVisibleItemIndex)?.id
+            when {
+                // The fresher tail arrived: land at the bottom, but
+                // only if the view still sits on the restored anchor —
+                // if he has already scrolled away, his position rules.
+                tail.id != check.anchorId &&
+                    tail.date >= check.savedNewestDate -> {
+                    tailRecheck = null
+                    if (visibleId == check.anchorId) scrollChatToBottom()
+                    return@LaunchedEffect
+                }
+                // He scrolled off the anchor before the fresher tail
+                // landed — the recheck's job is done either way.
+                visibleId != null && visibleId != check.anchorId ->
+                    tailRecheck = null
+                // Otherwise the fresher tail hasn't loaded yet; the
+                // recheck stays armed for the next emission.
+            }
+        }
+        if (previousTailId == null || previousTailId == tail.id) {
+            return@LaunchedEffect
+        }
+        val atBottom = listState.firstVisibleItemIndex == 0
+        if (ChatScrollLogic.onTailChanged(tail.isOutgoing, atBottom) ==
+            ChatScrollLogic.TailAction.TO_BOTTOM
+        ) {
+            scrollChatToBottom()
         }
     }
 
@@ -2818,7 +2921,7 @@ private fun lerpBubbleShape(
  *
  * [+] opens the attachment sheet (Gallery/Camera/GIF/Files); the camera
  * button opens the sheet too; voice and smiley are stubs until those
- * features land. Send keeps its fixed size and spring pop, and no button
+ * features land. Send keeps its fixed size, and no button
  * shrinks while typing (requiredSize throughout — the #110 no-shrink rule).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2891,8 +2994,6 @@ private fun Composer(
     // trying to type" — not only when the field is empty. Send + smiley
     // stay put.
     val expanded = focused
-    val scope = rememberCoroutineScope()
-    val sendPop = remember { Animatable(1f) }
     // The sticker panel takes the keyboard's place, so it takes the
     // keyboard's height too: remember the last real IME height and
     // reuse it when the panel opens (by then the IME inset itself is
@@ -2941,14 +3042,15 @@ private fun Composer(
     fun submit() {
         if (!canSend) return
         onSend(text.trim())
+        // Instant reset (Garrett 2026-10-20): the field clears and the
+        // button returns to idle in this same frame — no send animation
+        // on the composer at all. The old spring pop on the button and
+        // the wire-length "sending" spinner are gone; motion lives on
+        // the message bubble's entrance, and the bubble carries the
+        // wire state (SENDING ticks) itself.
         text = ""
         // End of typing: collapse the pill back (focus loss drives it).
         focusManager.clearFocus()
-        // Spring pop on send — the unified bouncy language.
-        scope.launch {
-            sendPop.snapTo(0.82f)
-            sendPop.animateTo(1f, RelaySprings.bouncy())
-        }
     }
 
     Column {
@@ -3125,25 +3227,18 @@ private fun Composer(
                 modifier = Modifier
                     .padding(end = 2.dp)
                     .requiredSize(52.dp)
-                    .clip(CircleShape)
-                    .graphicsLayer {
-                        scaleX = sendPop.value
-                        scaleY = sendPop.value
-                    },
+                    .clip(CircleShape),
             ) {
-                if (sending) {
-                    // Expressive sending state: the seven-shape loop.
-                    SevenShapeLoadingIndicator(
-                        diameter = 24.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
-                    Icon(
-                        Icons.Filled.Send,
-                        contentDescription = "Send",
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
+                // Always the plain send arrow (Garrett 2026-10-20): no
+                // "sending" spinner state on the button — it used to
+                // spin for the whole wire round trip, visibly outlasting
+                // the message's own delivery ticks. The button is idle
+                // the frame after the tap; the bubble shows the state.
+                Icon(
+                    Icons.Filled.Send,
+                    contentDescription = "Send",
+                    modifier = Modifier.size(24.dp),
+                )
             }
         }
     }

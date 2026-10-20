@@ -17,6 +17,13 @@ import kotlinx.coroutines.flow.asStateFlow
  * older messages append at higher indices, so the saved message keeps its
  * identity even as the list gets longer.
  *
+ * Garrett 2026-10-20: the position ALSO records the newest message's
+ * id + date at save time. A chat left at the bottom whose tail has since
+ * grown must reopen at the NEW bottom, not restored onto the old tail —
+ * [ChatScrollLogic.hasNewerThanSaved] makes that call exactly. Positions
+ * saved before this recorded only the anchor; they still parse (the
+ * newest fields read -1) and [ChatScrollLogic] treats them as legacy.
+ *
  * SharedPreferences-backed (same pattern as CategoryStore); in-memory
  * StateFlow mirrors for synchronous reads on the UI thread.
  */
@@ -27,11 +34,23 @@ class ChatScrollStore(context: Context) {
     val positions: StateFlow<Map<String, ScrollPosition>> = _positions.asStateFlow()
 
     /** Remembers where the user left off in [conversationKey]. */
-    fun save(conversationKey: String, messageId: Long, scrollOffset: Int) {
-        val next = _positions.value + (conversationKey to ScrollPosition(messageId, scrollOffset))
+    fun save(
+        conversationKey: String,
+        messageId: Long,
+        scrollOffset: Int,
+        newestMessageId: Long,
+        newestMessageDate: Long,
+    ) {
+        val position = ScrollPosition(
+            messageId, scrollOffset, newestMessageId, newestMessageDate,
+        )
+        val next = _positions.value + (conversationKey to position)
         _positions.value = next
         prefs.edit()
-            .putString(KEY_PREFIX + conversationKey, "$messageId:$scrollOffset")
+            .putString(
+                KEY_PREFIX + conversationKey,
+                ChatScrollLogic.formatPosition(position),
+            )
             .apply()
     }
 
@@ -52,16 +71,25 @@ class ChatScrollStore(context: Context) {
             for ((k, v) in prefs.all) {
                 if (!k.startsWith(KEY_PREFIX)) continue
                 val raw = v as? String ?: continue
-                val parts = raw.split(":")
-                if (parts.size != 2) continue
-                val id = parts[0].toLongOrNull() ?: continue
-                val off = parts[1].toIntOrNull() ?: continue
-                out[k.removePrefix(KEY_PREFIX)] = ScrollPosition(id, off)
+                val parsed = ChatScrollLogic.parsePosition(raw) ?: continue
+                out[k.removePrefix(KEY_PREFIX)] = parsed
             }
             return out
         }
     }
 }
 
-/** First-visible message id + pixel offset inside it. */
-data class ScrollPosition(val messageId: Long, val scrollOffset: Int)
+/**
+ * First-visible message id + pixel offset inside it, plus the newest
+ * message's id + date in the list when the position was saved
+ * (-1 when unknown — positions written before the newest fields
+ * existed). The newest snapshot is what lets the open path tell
+ * "left mid-history" (restore) from "left at the bottom, then the
+ * tail grew" (open at the new bottom).
+ */
+data class ScrollPosition(
+    val messageId: Long,
+    val scrollOffset: Int,
+    val newestMessageId: Long = -1L,
+    val newestMessageDate: Long = -1L,
+)

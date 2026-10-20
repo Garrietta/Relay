@@ -1,6 +1,5 @@
 package com.garrietta.relay.ui.chat
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -17,7 +16,6 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -126,11 +124,13 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -142,6 +142,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -1610,11 +1612,33 @@ private fun ChatHeader(
 }
 
 /**
- * 1:1 header: their face centered at the top with their name directly
- * under. On scroll it collapses (RelaySprings crossfade) to the height of
- * the top bar: back arrow, small avatar, name + transport. The avatar keeps
- * the inbox shared-element morph target (message content is exempt, so the
- * #45 ghosting fix holds).
+ * 1:1 header: ONE composition that TRAVELS between its two states
+ * (Garrett 2026-10-20 — see [ChatHeaderGeometry]). Open: their face
+ * centered at the top with their name directly under. Standard
+ * (scrolled): the top-bar row — back arrow, small avatar, name +
+ * transport beside it. The old header SWAPPED the two layouts in an
+ * AnimatedContent crossfade, so mid-transition both titles showed at
+ * once and the avatar teleported; now a single progress value on
+ * RelaySprings.bouncy drives THE SAME avatar, name, label and back
+ * button through every intermediate position and size, and the
+ * endpoints are the old layouts exactly.
+ *
+ * The avatar keeps the inbox shared-element morph target, registered
+ * exactly when the old expanded branch registered it — while the
+ * header's state is open. What happens today, preserved: a chat
+ * opened at the newest message starts open, the avatar registers,
+ * and the morph lands on it (the travel rests at progress 1 for the
+ * whole flight — the scroll driver is frozen until the open-time
+ * restore lands, so nothing retargets it mid-morph). A chat reopened
+ * at a restored SCROLLED position starts standard from the first
+ * frame — progress starts AT its target, no travel on entry — the
+ * avatar registers no morph target, and the entrance degrades to the
+ * surface slide, exactly the old collapsed layout's behavior. The
+ * avatar's size animates as layout size, never a layer scale:
+ * ContactAvatar renders its shape by uniform scale inside its square
+ * slot at ANY size and the monogram's text style is identical at
+ * both endpoints, so every intermediate frame is a congruent render
+ * — where a graphicsLayer scale would bitmap-stretch the glyph.
  */
 @Composable
 private fun OneToOneHeader(
@@ -1624,150 +1648,185 @@ private fun OneToOneHeader(
     threadId: Long,
     transportLabel: String,
     scrolled: Boolean,
-    /** Non-null = this peer is unknown; the expanded header offers
-     * "Add contact?" under the transport tag (Garrett 2026-10-20). */
+    /** Non-null = this peer is unknown; the OPEN header offers
+     * "Add contact?" under the transport tag (Garrett 2026-10-20).
+     * It rides the travel (see [ChatHeaderGeometry]) and is never
+     * visible or interactive in the standard state. */
     addContactTarget: ChatHeaderLogic.AddContactTarget?,
     onBack: () -> Unit,
     onOpenDetails: () -> Unit,
     onAddContact: () -> Unit,
 ) {
-    AnimatedContent(
-        targetState = scrolled,
-        transitionSpec = {
-            fadeIn(animationSpec = RelaySprings.bouncy()) togetherWith
-                fadeOut(animationSpec = RelaySprings.bouncy())
-        },
-        label = "oneToOneCollapse",
-    ) { isScrolled ->
-        if (isScrolled) {
-            Row(
+    // 1 = open, 0 = standard. animateFloatAsState starts AT its
+    // initial target, so a chat that opens standard (a restored
+    // scrolled position) starts there — no travel on entry.
+    val progress by animateFloatAsState(
+        targetValue = if (scrolled) 0f else 1f,
+        animationSpec = RelaySprings.bouncy(),
+        label = "oneToOneHeaderTravel",
+    )
+    // Overlay clip matches the resolved per-contact shape (not a
+    // hardcoded WavyBlobShape) — the inbox side was fixed for the
+    // same corner-glitch; both ends must agree.
+    val overlayShape = remember(shapeKey) {
+        AvatarShapeAssigner.namedShapeFor(shapeKey).shape
+    }
+    Layout(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clipToBounds(),
+        content = {
+            // Details-tap layer: the header's whole surface, under
+            // everything else. (The old open layout tapped through
+            // its full-width column; the old standard row tapped
+            // through its avatar and its name column — one layer
+            // under all elements routes every header tap to details
+            // the same way, and the back button and "Add contact?"
+            // sit above it and consume their own taps first.)
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp)
-                    .padding(end = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                }
-                ContactAvatar(
-                    photoUri = photoUri,
-                    name = name,
-                    size = 40.dp,
-                    shapeKey = shapeKey,
-                    textStyle = MaterialTheme.typography.titleMedium,
-                    // Header tap opens the details page (Garrett 2026-10-19).
-                    modifier = Modifier.clickable(
+                    .fillMaxSize()
+                    .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = onOpenDetails,
                     ),
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = onOpenDetails,
-                        ),
-                ) {
-                    Text(
-                        text = name,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+            )
+            ContactAvatar(
+                photoUri = photoUri,
+                name = name,
+                size = ChatHeaderGeometry.avatarSizeDp(progress).dp,
+                shapeKey = shapeKey,
+                textStyle = MaterialTheme.typography.titleMedium,
+                // Registered exactly when the old expanded branch
+                // registered (see the header comment above): while
+                // the header's state is open.
+                modifier = if (!scrolled) {
+                    Modifier.motionSharedAvatar(
+                        SharedElementKeys.avatar(threadId),
+                        shape = overlayShape,
                     )
-                    Text(
-                        text = transportLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                } else {
+                    Modifier
+                },
+            )
+            Text(
+                text = name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = transportLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
             }
-        } else {
-            // Compact expanded header (~half the old footprint): the back
-            // arrow overlays the top-start corner instead of consuming a
-            // full row; 48dp avatar, tighter type and spacing.
-            Box(modifier = Modifier.fillMaxWidth()) {
-                IconButton(
-                    onClick = onBack,
-                    // The details tap region below covers the full width —
-                    // the back button must sit above it in z-order or its
-                    // touches get swallowed (Garrett 2026-10-19 evening).
-                    modifier = Modifier.align(Alignment.TopStart).zIndex(1f),
-                ) {
-                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 2.dp, bottom = 10.dp)
-                        // Header tap opens the details page (Garrett
-                        // 2026-10-19); the back button above stays separate.
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = onOpenDetails,
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    // Overlay clip matches the resolved per-contact shape (not
-                    // a hardcoded WavyBlobShape) — the inbox side was fixed
-                    // for the same corner-glitch; both ends must agree.
-                    val overlayShape = remember(shapeKey) {
-                        AvatarShapeAssigner.namedShapeFor(shapeKey).shape
-                    }
-                    ContactAvatar(
-                        photoUri = photoUri,
-                        name = name,
-                        size = 48.dp,
-                        shapeKey = shapeKey,
-                        textStyle = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.motionSharedAvatar(
-                            SharedElementKeys.avatar(threadId),
-                            shape = overlayShape,
-                        ),
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = name,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 56.dp),
-                    )
-                    Text(
-                        text = transportLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                    // "Add contact?" (Garrett 2026-10-20): directly
-                    // under the transport tag, expanded form only —
-                    // the collapsed row never carries it. It rides
-                    // inside the header's details-tap column but
-                    // consumes its own tap, so it opens the Contacts
-                    // app's new-contact page, never details. Part of
-                    // the expanded content, so the scroll-collapse
-                    // crossfade and its height behavior are untouched.
-                    if (addContactTarget != null) {
-                        TextButton(onClick = onAddContact) {
-                            Icon(
-                                Icons.Filled.PersonAdd,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Add contact?")
+            // "Add contact?" (Garrett 2026-10-20): directly under
+            // the transport tag in the open state. It rides the
+            // travel — fading and sliding with the expansion — and
+            // in the standard state it is fully transparent, out of
+            // the semantics tree, and its click is swallowed, so it
+            // can never float over the collapsed header or answer a
+            // tap meant for anything else.
+            if (addContactTarget != null) {
+                TextButton(
+                    onClick = {
+                        if (ChatHeaderGeometry.addContactInteractive(progress)) {
+                            onAddContact()
                         }
-                    }
+                    },
+                    modifier = Modifier
+                        .graphicsLayer {
+                            alpha = ChatHeaderGeometry.addContactAlpha(progress)
+                        }
+                        .then(
+                            if (ChatHeaderGeometry.addContactInteractive(progress)) {
+                                Modifier
+                            } else {
+                                Modifier.clearAndSetSemantics {}
+                            },
+                        ),
+                ) {
+                    Icon(
+                        Icons.Filled.PersonAdd,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add contact?")
                 }
             }
+        },
+    ) { measurables, constraints ->
+        val g = ChatHeaderGeometry
+        val widthPx = constraints.maxWidth
+        val widthDp = widthPx / density
+        fun px(dpValue: Float): Int = dpValue.dp.roundToPx()
+
+        // Measured in dependency order: the back button's measured
+        // width is an input to the standard state's geometry; the
+        // texts' measured heights stack both endpoint layouts; the
+        // tap layer takes the final size.
+        val backPlaceable = measurables[4].measure(Constraints())
+        val backWidthDp = backPlaceable.width / density
+        val backHeightDp = backPlaceable.height / density
+
+        val avatarSizePx = px(g.avatarSizeDp(progress))
+        val avatarPlaceable = measurables[1].measure(
+            Constraints.fixed(avatarSizePx, avatarSizePx),
+        )
+
+        val textConstraints = Constraints(
+            maxWidth = px(g.textMaxWidthDp(progress, widthDp, backWidthDp)),
+        )
+        val namePlaceable = measurables[2].measure(textConstraints)
+        val labelPlaceable = measurables[3].measure(textConstraints)
+        val nameHeightDp = namePlaceable.height / density
+        val labelHeightDp = labelPlaceable.height / density
+        val nameWidthDp = namePlaceable.width / density
+        val labelWidthDp = labelPlaceable.width / density
+
+        val buttonPlaceable = measurables.getOrNull(5)?.measure(Constraints())
+        val buttonHeightDp = (buttonPlaceable?.height ?: 0) / density
+
+        val heightPx = px(
+            g.headerHeightDp(progress, nameHeightDp, labelHeightDp, buttonHeightDp),
+        ).coerceAtLeast(0)
+        val tapPlaceable = measurables[0].measure(
+            Constraints.fixed(widthPx, heightPx),
+        )
+
+        layout(widthPx, heightPx) {
+            tapPlaceable.placeRelative(0, 0)
+            avatarPlaceable.placeRelative(
+                px(g.avatarXDp(progress, widthDp, backWidthDp)),
+                px(g.avatarYDp(progress)),
+            )
+            namePlaceable.placeRelative(
+                px(g.textXDp(progress, widthDp, backWidthDp, nameWidthDp)),
+                px(g.nameYDp(progress, nameHeightDp, labelHeightDp)),
+            )
+            labelPlaceable.placeRelative(
+                px(g.textXDp(progress, widthDp, backWidthDp, labelWidthDp)),
+                px(g.labelYDp(progress, nameHeightDp, labelHeightDp)),
+            )
+            backPlaceable.placeRelative(
+                0,
+                px(g.backYDp(progress, backHeightDp)),
+            )
+            buttonPlaceable?.placeRelative(
+                px(
+                    g.addContactXDp(
+                        widthDp,
+                        buttonPlaceable.width / density,
+                    ),
+                ),
+                px(g.addContactYDp(progress, nameHeightDp, labelHeightDp)),
+            )
         }
     }
 }

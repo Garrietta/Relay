@@ -268,7 +268,7 @@ fun TopSearchPopup(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         // Results: fill the rest of the card (whose height
                         // comes from the insets, never from this content).
-                        content(requestExit)
+                        content { action -> requestExit(action) }
                     }
                 }
             }

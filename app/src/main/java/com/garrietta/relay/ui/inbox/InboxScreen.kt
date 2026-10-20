@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -124,6 +125,9 @@ fun InboxScreen(
     val categories by viewModel.categories.collectAsState()
     val selectedCategoryId by viewModel.selectedCategoryId.collectAsState()
     val unknownEnabled by viewModel.unknownEnabled.collectAsState()
+    // True-muted conversations (Garrett 2026-10-20): their rows carry a
+    // subtle bell-off indicator; suppression lives in the pipeline.
+    val mutedKeys by viewModel.mutedKeys.collectAsState()
     // The built-in Unknown tab is synthetic: appended LAST after the user's
     // custom categories, always at the far right of the pill bar (Garrett
     // 2026-10-19). The bar shows when custom categories exist OR the
@@ -343,6 +347,7 @@ fun InboxScreen(
                                     ) {
                                         ConversationRow(
                                             conversation = conversation,
+                                            muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                             isSelected = conversation.threadId == selectedThreadId,
                                             onClick = { openChat(conversation) },
                                             onMarkRead = {
@@ -355,6 +360,7 @@ fun InboxScreen(
                                 } else {
                                     ConversationRow(
                                         conversation = conversation,
+                                        muted = CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId) in mutedKeys,
                                         isSelected = conversation.threadId == selectedThreadId,
                                         onClick = { openChat(conversation) },
                                         onMarkRead = {
@@ -853,6 +859,7 @@ private fun ConversationRow(
     onMarkRead: () -> Unit,
     onDelete: () -> Unit,
     isSelected: Boolean = false,
+    muted: Boolean = false,
 ) {
     val dismissState = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
@@ -967,6 +974,17 @@ private fun ConversationRow(
                             MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (muted) {
+                        // True-mute indicator (Garrett 2026-10-20): this
+                        // conversation posts NO system notifications.
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Filled.NotificationsOff,
+                            contentDescription = "Muted",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
                 }
                 Spacer(Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {

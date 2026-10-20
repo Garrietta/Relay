@@ -5,6 +5,7 @@ import android.content.Context
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatScrollStore
+import com.garrietta.relay.data.repo.MuteStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
@@ -37,6 +38,9 @@ class RelayApp : Application() {
 
     /** Per-conversation chat scroll positions (see ChatScrollStore). */
     val chatScrollStore: ChatScrollStore by lazy { ChatScrollStore(this) }
+
+    /** Per-conversation true mute for notifications (see MuteStore). */
+    val muteStore: MuteStore by lazy { MuteStore(this) }
 
     /**
      * Application-scoped coroutine scope: survives Activity destruction.
@@ -130,6 +134,9 @@ class RelayApp : Application() {
      * - skipped when the message's chat is currently on screen,
      * - skipped when unpaired (unpaired SMS is the default app's job),
      * - gated on the Settings → Texting toggle (default ON).
+     * - skipped when the conversation is muted in its details page —
+     *   TRUE mute (Garrett 2026-10-20): nothing posts at all, no
+     *   heads-up, no sound, while the inbox still updates normally.
      * Runs in [appScope]: the old MainActivity-scoped collector died with
      * the activity, which is why notifications never arrived once the app
      * was swiped away. Every decision is recorded in
@@ -197,6 +204,15 @@ class RelayApp : Application() {
         }
         if (!areMessageNotificationsEnabled()) {
             MessageNotifications.recordSkipped("toggle off in Settings")
+            return
+        }
+        // TRUE per-chat mute (Garrett 2026-10-20): this is the single
+        // suppression choke point — both the push flow and the 45s poll
+        // fallback feed this function, so a muted conversation can never
+        // post through either path. The key for an RCS conversation IS
+        // its server conversation id (CategoryStore.conversationKey).
+        if (muteStore.isMuted(msg.conversationId)) {
+            MessageNotifications.recordSkipped("muted")
             return
         }
         val open = repository.openRcsConversation.value

@@ -266,7 +266,7 @@ class MainActivity : ComponentActivity() {
                     when (screen) {
                         is Screen.Inbox -> {
                             val inboxVm: InboxViewModel = viewModel(
-                                factory = InboxViewModelFactory(app.repository, app.categoryStore)
+                                factory = InboxViewModelFactory(app.repository, app.categoryStore, app.muteStore)
                             )
                             InboxScreen(
                                 viewModel = inboxVm,
@@ -421,7 +421,7 @@ class MainActivity : ComponentActivity() {
                             color = MaterialTheme.colorScheme.background,
                         ) {
                         val inboxVm: InboxViewModel = viewModel(
-                            factory = InboxViewModelFactory(app.repository, app.categoryStore)
+                            factory = InboxViewModelFactory(app.repository, app.categoryStore, app.muteStore)
                         )
                         InboxScreen(
                             viewModel = inboxVm,
@@ -724,10 +724,11 @@ class MainActivity : ComponentActivity() {
 private class InboxViewModelFactory(
     private val repo: com.garrietta.relay.data.repo.UnifiedInboxRepository,
     private val categories: com.garrietta.relay.data.repo.CategoryStore,
+    private val mutes: com.garrietta.relay.data.repo.MuteStore,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        InboxViewModel(repo, categories) as T
+        InboxViewModel(repo, categories, mutes) as T
 }
 
 private class ChatViewModelFactory(

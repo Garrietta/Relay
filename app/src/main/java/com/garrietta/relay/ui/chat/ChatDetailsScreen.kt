@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -51,6 +52,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -78,8 +80,10 @@ import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.garrietta.relay.RelayApp
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isUnknownSenderGhost
+import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.theme.ClusterMember
@@ -128,6 +132,15 @@ fun ChatDetailsScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    // True per-chat mute (Garrett 2026-10-20): stored in RelayApp's
+    // MuteStore, keyed exactly like category assignments; while muted
+    // the notification pipeline posts NOTHING for this conversation.
+    val muteStore = remember { (context.applicationContext as RelayApp).muteStore }
+    val mutedKeys by muteStore.mutedKeys.collectAsState()
+    val muteKey = remember(rcsConversationId, threadId) {
+        CategoryStore.conversationKey(rcsConversationId, threadId)
+    }
+    val muted = muteKey in mutedKeys
     val others by viewModel.others.collectAsState()
     val participants by viewModel.participants.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -568,6 +581,7 @@ fun ChatDetailsScreen(
                         }
                         item(key = "options") {
                             DetailsSectionCard(title = "Options") {
+                              Column {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -598,6 +612,51 @@ fun ChatDetailsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
+                                // True per-chat mute (Garrett 2026-10-20):
+                                // while on, Relay posts NO notification at
+                                // all for this conversation — no heads-up, no
+                                // sound — while the inbox updates normally.
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = null,
+                                            onClick = { muteStore.setMuted(muteKey, !muted) },
+                                        )
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        if (muted) Icons.Filled.NotificationsOff
+                                        else Icons.Filled.Notifications,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Mute notifications",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                        )
+                                        Text(
+                                            text = if (muted) {
+                                                "Muted — nothing from this chat posts"
+                                            } else {
+                                                "Off — this chat can notify"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Switch(
+                                        checked = muted,
+                                        onCheckedChange = { muteStore.setMuted(muteKey, it) },
+                                    )
+                                }
+                              }
                             }
                         }
                     }

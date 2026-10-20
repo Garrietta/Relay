@@ -6,6 +6,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.isUnknownNumber
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
+import com.garrietta.relay.data.repo.MuteStore
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 class InboxViewModel(
     private val repository: UnifiedInboxRepository,
     private val categoryStore: CategoryStore,
+    private val muteStore: MuteStore,
 ) : ViewModel() {
 
     private val _query = MutableStateFlow("")
@@ -25,6 +27,18 @@ class InboxViewModel(
     val categories: StateFlow<List<ChatCategory>> = categoryStore.categories
     val selectedCategoryId: StateFlow<String?> = categoryStore.selectedCategoryId
     val unknownEnabled: StateFlow<Boolean> = categoryStore.unknownEnabled
+
+    /**
+     * Conversations with notifications truly muted (Garrett 2026-10-20).
+     * The inbox row shows a bell-off indicator for these; suppression
+     * itself happens in the notification pipeline (see MuteStore).
+     */
+    val mutedKeys: StateFlow<Set<String>> = muteStore.mutedKeys
+
+    fun isMuted(conversation: Conversation): Boolean =
+        muteStore.isMuted(
+            CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId),
+        )
 
     val conversations: StateFlow<List<Conversation>> =
         combine(

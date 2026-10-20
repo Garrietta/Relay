@@ -3,6 +3,7 @@ package com.garrietta.relay.ui.inbox
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.model.isUnknownNumber
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
@@ -35,10 +36,17 @@ class InboxViewModel(
      */
     val mutedKeys: StateFlow<Set<String>> = muteStore.mutedKeys
 
-    fun isMuted(conversation: Conversation): Boolean =
-        muteStore.isMuted(
-            CategoryStore.conversationKey(conversation.rcsConversationId, conversation.threadId),
-        )
+    fun isMuted(conversation: Conversation): Boolean {
+        // Duplicate-merged entry (Garrett 2026-10-20): muted when ANY
+        // member id is muted — every merged server id for RCS rows,
+        // every merged thread's key for Telephony rows.
+        val rcsIds = conversation.allRcsIds()
+        if (rcsIds.isNotEmpty()) return rcsIds.any { muteStore.isMuted(it) }
+        val ids = conversation.threadIds.ifEmpty { listOf(conversation.threadId) }
+        return ids.any {
+            muteStore.isMuted(CategoryStore.conversationKey(null, it))
+        }
+    }
 
     val conversations: StateFlow<List<Conversation>> =
         combine(

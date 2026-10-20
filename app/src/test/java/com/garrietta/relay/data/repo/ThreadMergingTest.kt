@@ -1,5 +1,8 @@
 package com.garrietta.relay.data.repo
 
+import com.garrietta.relay.data.model.Conversation
+import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.allRcsIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -140,5 +143,172 @@ class ThreadMergingTest {
         assertEquals(null, mergeKey("GOOGLE"))
         assertEquals("5551234567", mergeKey("+15551234567"))
         assertEquals("5551234567", mergeKey("(555) 123-4567"))
+    }
+
+    // ---- Duplicate participant-set merge (Garrett 2026-10-20) ----
+
+    private fun row(
+        name: String,
+        date: Long,
+        snippet: String = "hi",
+        unread: Boolean = false,
+        messageCount: Int = 0,
+        transportLabel: String = "RCS",
+        rcsId: String? = null,
+        threadIds: List<Long> = emptyList(),
+        members: List<Pair<String, String>>,
+    ) = Conversation(
+        threadId = ("rcs:" + (rcsId ?: name)).hashCode().toLong(),
+        address = members.firstOrNull()?.first ?: "",
+        displayName = name,
+        snippet = snippet,
+        date = date,
+        unread = unread,
+        messageCount = messageCount,
+        transportLabel = transportLabel,
+        photoUri = null,
+        threadIds = threadIds,
+        rcsConversationId = rcsId,
+        participants = members.map { (addr, disp) ->
+            Participant(address = addr, displayName = disp, photoUri = null)
+        },
+        isGroup = members.size > 1,
+    )
+
+    @Test fun `dad grace duplicate server rows merge into one`() {
+        // Garrett's device evidence: a "Dad" row (participants Dad +
+        // Grace) and a "Dad, Grace Ambrose" row — same participant set.
+        val dadOnly = row(
+            name = "Dad", date = 100L, snippet = "Hell yeah", rcsId = "convA",
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val named = row(
+            name = "Dad, Grace Ambrose", date = 200L,
+            snippet = "I'm good with that", rcsId = "convB", unread = true,
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val out = mergeDuplicateConversations(listOf(dadOnly, named))
+        assertEquals(1, out.size)
+        val merged = out[0]
+        // Canonical = most recently active server conversation.
+        assertEquals("convB", merged.rcsConversationId)
+        assertEquals(listOf("convB", "convA"), merged.allRcsIds())
+        // Snippet/date from the newest message overall.
+        assertEquals("I'm good with that", merged.snippet)
+        assertEquals(200L, merged.date)
+        assertTrue(merged.unread)
+        assertTrue(merged.isGroup)
+        assertEquals(2, merged.participants.size)
+    }
+
+    @Test fun `subset participant sets never merge`() {
+        val one = row(
+            name = "Dad", date = 100L, rcsId = "a",
+            members = listOf("+18125550101" to "Dad"),
+        )
+        val two = row(
+            name = "Dad, Grace Ambrose", date = 200L, rcsId = "b",
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        assertEquals(2, mergeDuplicateConversations(listOf(one, two)).size)
+    }
+
+    @Test fun `different participant sets never merge`() {
+        val a = row(
+            name = "A, B", date = 100L, rcsId = "a",
+            members = listOf("+18125550101" to "A", "+18125550102" to "B"),
+        )
+        val b = row(
+            name = "A, C", date = 200L, rcsId = "b",
+            members = listOf("+18125550101" to "A", "+18125550103" to "C"),
+        )
+        assertEquals(2, mergeDuplicateConversations(listOf(a, b)).size)
+    }
+
+    @Test fun `address format variants of the same set merge`() {
+        val a = row(
+            name = "Dad, Grace Ambrose", date = 100L, rcsId = "a",
+            members = listOf("+18125550101" to "Dad", "8125550102" to "Grace Ambrose"),
+        )
+        val b = row(
+            name = "Dad, Grace Ambrose", date = 200L, rcsId = "b",
+            members = listOf("18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val out = mergeDuplicateConversations(listOf(a, b))
+        assertEquals(1, out.size)
+        assertEquals(listOf("b", "a"), out[0].allRcsIds())
+    }
+
+    @Test fun `short code rows never merge`() {
+        val a = row(
+            name = "22395", date = 100L, rcsId = "a",
+            members = listOf("22395" to "22395"),
+        )
+        val b = row(
+            name = "22395", date = 200L, rcsId = "b",
+            members = listOf("22395" to "22395"),
+        )
+        assertEquals(2, mergeDuplicateConversations(listOf(a, b)).size)
+    }
+
+    @Test fun `canonical prefers server RCS row over telephony row`() {
+        val tel = row(
+            name = "Dad, Grace Ambrose", date = 300L, rcsId = null,
+            transportLabel = "SMS", threadIds = listOf(7L),
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val rcs = row(
+            name = "Dad, Grace Ambrose", date = 100L, rcsId = "srv",
+            transportLabel = "RCS",
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val out = mergeDuplicateConversations(listOf(tel, rcs))
+        assertEquals(1, out.size)
+        // Server id wins routing even though the Telephony row is newer;
+        // snippet/date still come from the newest message overall.
+        assertEquals("srv", out[0].rcsConversationId)
+        assertEquals(listOf("srv"), out[0].allRcsIds())
+        assertEquals(300L, out[0].date)
+        assertTrue(out[0].threadIds.contains(7L))
+    }
+
+    @Test fun `telephony group rows merge and union thread ids`() {
+        val a = row(
+            name = "Dad, Grace Ambrose", date = 100L, rcsId = null,
+            transportLabel = "MMS", threadIds = listOf(11L), messageCount = 3,
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val b = row(
+            name = "Dad, Grace Ambrose", date = 200L, rcsId = null,
+            transportLabel = "MMS", threadIds = listOf(12L), messageCount = 4,
+            members = listOf("+18125550101" to "Dad", "+18125550102" to "Grace Ambrose"),
+        )
+        val out = mergeDuplicateConversations(listOf(a, b))
+        assertEquals(1, out.size)
+        assertEquals(listOf(11L, 12L), out[0].threadIds.sorted())
+        assertEquals(7, out[0].messageCount)
+        assertEquals(null, out[0].rcsConversationId)
+        assertEquals(emptyList<String>(), out[0].allRcsIds())
+    }
+
+    @Test fun `fullest participant list provides the display fields`() {
+        val thin = row(
+            name = "Dad", date = 300L, rcsId = "a",
+            members = listOf(
+                "+18125550101" to "+18125550101",
+                "+18125550102" to "+18125550102",
+            ),
+        )
+        val full = row(
+            name = "Dad, Grace Ambrose", date = 100L, rcsId = "b",
+            members = listOf(
+                "+18125550101" to "Dad",
+                "+18125550102" to "Grace Ambrose",
+            ),
+        )
+        val out = mergeDuplicateConversations(listOf(thin, full))
+        assertEquals(1, out.size)
+        assertEquals("Dad, Grace Ambrose", out[0].displayName)
+        assertEquals("Dad", out[0].participants[0].displayName)
     }
 }

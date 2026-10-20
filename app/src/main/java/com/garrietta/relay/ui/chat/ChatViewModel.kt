@@ -247,7 +247,13 @@ class ChatViewModel(
         }
         viewModelScope.launch {
             repository.observeRcsMessages().collect { msg ->
-                if (msg.conversationId == conversationId) onRcsIncoming(msg)
+                // Duplicate-merged conversation: arrivals on ANY merged
+                // member id belong to this one combined chat.
+                if (msg.conversationId in
+                    repository.mergedRcsIdsFor(conversationId)
+                ) {
+                    onRcsIncoming(msg)
+                }
             }
         }
         viewModelScope.launch {
@@ -263,7 +269,11 @@ class ChatViewModel(
         // sender id, so groups show a generic indicator.
         viewModelScope.launch {
             repository.rcsTransport.typingEvents.collect { te ->
-                if (te.conversationId != conversationId) return@collect
+                if (te.conversationId !in
+                    repository.mergedRcsIdsFor(conversationId)
+                ) {
+                    return@collect
+                }
                 if (te.typing) {
                     lastTypingTrueMs = te.atMs
                     _isTyping.value = true

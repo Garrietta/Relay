@@ -2,6 +2,7 @@ package com.garrietta.relay
 
 import android.app.Application
 import android.content.Context
+import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.AppSeedStore
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatScrollStore
@@ -211,17 +212,24 @@ class RelayApp : Application() {
         // fallback feed this function, so a muted conversation can never
         // post through either path. The key for an RCS conversation IS
         // its server conversation id (CategoryStore.conversationKey).
-        if (muteStore.isMuted(msg.conversationId)) {
+        // Duplicate-merged conversations (Garrett 2026-10-20): the mute
+        // holds when ANY merged member id is muted — a mute recorded
+        // against any one of the unified ids silences them all.
+        if (repository.mergedRcsIdsFor(msg.conversationId)
+                .any { muteStore.isMuted(it) }
+        ) {
             MessageNotifications.recordSkipped("muted")
             return
         }
         val open = repository.openRcsConversation.value
-        if (open != null && open == msg.conversationId) {
+        if (open != null &&
+            msg.conversationId in repository.mergedRcsIdsFor(open)
+        ) {
             MessageNotifications.recordSkipped("chat open on screen")
             return
         }
                 val convTitle = repository.conversations.value
-            .firstOrNull { it.rcsConversationId == msg.conversationId }
+            .firstOrNull { msg.conversationId in it.allRcsIds() }
             ?.displayName?.ifBlank { null } ?: "New message"
         val body = msg.body.ifBlank {
             if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"

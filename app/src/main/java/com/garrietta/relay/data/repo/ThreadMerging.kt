@@ -107,3 +107,107 @@ private fun MergeCandidate.toConversation(ids: List<Long>): Conversation =
         photoUri = photoUri,
         threadIds = ids,
     )
+
+// ---------- Duplicate participant-set merging (Garrett 2026-10-20) ----------
+
+/**
+ * The duplicate-merge key for a unified-inbox row: the EXACT set of
+ * normalized participant numbers, self excluded. [Conversation.participants]
+ * already excludes self on both the RCS path (cleaned server others) and
+ * the Telephony path (recipients minus self); 1:1 rows with no
+ * participant list key on their single address. Returns null when the
+ * row must never merge: no participants at all, or any address that is
+ * not a mergeable phone number (short codes / alphanumeric senders —
+ * the same rule as [mergeKey]).
+ */
+fun participantSetKey(row: Conversation): Set<String>? {
+    val addresses = if (row.participants.isNotEmpty()) {
+        row.participants.map { it.address }
+    } else {
+        listOf(row.address)
+    }
+    val keys = addresses.map { mergeKey(it) ?: return null }
+    return keys.toSet().ifEmpty { null }
+}
+
+/**
+ * Garrett's hard verification rule (2026-10-20): "if a two-person chat
+ * exists, or if any set number of contacts exists in more than one
+ * chat, then those chats are likely the same chat and should simply be
+ * combined and organized by timestamp." His evidence: two inbox rows —
+ * "Dad" (whose own avatar cluster showed Dad + Grace) and "Dad, Grace
+ * Ambrose" — one real group conversation split into two entries.
+ *
+ * Rows whose participant sets are EXACTLY equal (set equality only,
+ * never subset matches) collapse into one entry:
+ *  - title / avatar / participants from the FULLEST participant list,
+ *  - snippet / date / transport chip from the newest message overall,
+ *  - unread OR-ed, message counts summed,
+ *  - routing identity (threadId / rcsConversationId) from the CANONICAL
+ *    member: a live server (RCS) conversation beats a local row, an
+ *    RCS-transport row beats an SMS one, then the most recently active
+ *    member wins.
+ *
+ * Nothing is deleted: this is display unification in the repository's
+ * row list. The merged row remembers every server id in
+ * [Conversation.mergedRcsIds] so message loads fan out across members,
+ * sends canonicalize, and read-marking covers every member.
+ */
+fun mergeDuplicateConversations(rows: List<Conversation>): List<Conversation> {
+    val buckets = LinkedHashMap<Set<String>, MutableList<Conversation>>()
+    val passthrough = mutableListOf<Conversation>()
+    for (row in rows) {
+        val key = participantSetKey(row)
+        if (key == null) {
+            passthrough.add(row)
+        } else {
+            buckets.getOrPut(key) { mutableListOf() }.add(row)
+        }
+    }
+    val out = passthrough.toMutableList()
+    for (bucket in buckets.values) {
+        out.add(if (bucket.size == 1) bucket.single() else mergeDuplicateBucket(bucket))
+    }
+    return out.sortedByDescending { it.date }
+}
+
+/** Combines one bucket of participant-set-identical rows. See above. */
+private fun mergeDuplicateBucket(bucket: List<Conversation>): Conversation {
+    // Canonical (routing identity): live server conversation first,
+    // RCS transport next, then most recent activity.
+    val canonical = bucket.sortedWith(
+        compareByDescending<Conversation> { it.rcsConversationId != null }
+            .thenByDescending { it.transportLabel == "RCS" }
+            .thenByDescending { it.date }
+            .thenByDescending { it.messageCount },
+    ).first()
+    // Display representative: the fullest participant list — most
+    // members, then most contact-resolved names — then most recent.
+    val representative = bucket.sortedWith(
+        compareByDescending<Conversation> { it.participants.size }
+            .thenByDescending { rep ->
+                rep.participants.count { it.displayName != it.address }
+            }
+            .thenByDescending { it.date },
+    ).first()
+    // Snippet / date: the newest message overall.
+    val newest = bucket.maxByOrNull { it.date } ?: canonical
+    // Every server id in the group, canonical first, rest by recency.
+    val mergedIds = (listOfNotNull(canonical.rcsConversationId) +
+        bucket.filter { it !== canonical }
+            .sortedByDescending { it.date }
+            .mapNotNull { it.rcsConversationId }).distinct()
+    return representative.copy(
+        threadId = canonical.threadId,
+        threadIds = bucket.flatMap { it.threadIds }.distinct()
+            .ifEmpty { listOf(canonical.threadId) },
+        rcsConversationId = canonical.rcsConversationId,
+        mergedRcsIds = mergedIds,
+        snippet = newest.snippet,
+        date = newest.date,
+        transportLabel = newest.transportLabel,
+        unread = bucket.any { it.unread },
+        messageCount = bucket.sumOf { it.messageCount },
+        isGroup = bucket.any { it.isGroup } || representative.participants.size > 1,
+    )
+}

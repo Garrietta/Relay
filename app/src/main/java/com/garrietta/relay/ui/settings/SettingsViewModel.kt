@@ -147,6 +147,13 @@ class SettingsViewModel(
     fun rcsConversationCount(): Int =
         repository.rcsTransport.currentRcsConversations().size
 
+    /**
+     * Duplicate inbox entries unified by the participant-set merge at
+     * the last refresh (Garrett's hard rule, 2026-10-20) — Diagnostics
+     * shows it as mergedDuplicates=N so the merge is verifiable.
+     */
+    fun mergedDuplicatesCount(): Int = repository.mergedDuplicatesCount()
+
     data class AppInfo(
         val versionName: String,
         val versionCode: Long,

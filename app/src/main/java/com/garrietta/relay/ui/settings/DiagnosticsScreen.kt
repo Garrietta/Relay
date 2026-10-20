@@ -199,6 +199,12 @@ fun DiagnosticsScreen(
                     onAction = null,
                 )
                 SettingsRow(
+                    title = "Merged duplicates",
+                    subtitle = "mergedDuplicates=${viewModel.mergedDuplicatesCount()}",
+                    actionLabel = null,
+                    onAction = null,
+                )
+                SettingsRow(
                     title = "Group chats",
                     subtitle = conversations.count { it.isGroup }.toString(),
                     actionLabel = null,

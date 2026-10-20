@@ -20,8 +20,7 @@ import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
-import com.garrietta.relay.rcs.proto.deriveRcsIsGroup
-import com.garrietta.relay.rcs.proto.deriveRcsOthers
+import com.garrietta.relay.rcs.proto.deriveRcsMembership
 import com.garrietta.relay.rcs.proto.displayNameOrNumber
 import com.garrietta.relay.rcs.proto.resolveMessageDirection
 import com.garrietta.relay.ui.chat.parseReaction
@@ -92,6 +91,16 @@ class UnifiedInboxRepository(
      * arrives.
      */
     private val readLatch = ReadLatch()
+
+    /**
+     * Sender-evidence membership refinements (Garrett 2026-10-20, see
+     * [MembershipRefinements]): when a field-21-absent, not-a-group
+     * conversation's own messages prove a single peer, the stored row
+     * is refined to that peer and the refinement rides every refresh
+     * until the payload itself changes (field 21 arrives, or the
+     * server flags the conversation a group).
+     */
+    private val membershipRefinements = MembershipRefinements()
 
     /**
      * The tap on an unread chat marks it read (Garrett 2026-10-20):
@@ -259,8 +268,12 @@ class UnifiedInboxRepository(
                     // Optimistic-read latches ride every emission: a
                     // refresh carrying pre-mark-read server metadata
                     // must not resurrect unread on a chat Garrett has
-                    // already opened (see ReadLatch).
-                    _conversations.value = readLatch.applyTo(loaded)
+                    // already opened (see ReadLatch). Sender-evidence
+                    // membership refinements ride along too (see
+                    // MembershipRefinements).
+                    _conversations.value = membershipRefinements.applyTo(
+                        readLatch.applyTo(loaded),
+                    )
                     refreshTick.value += 1
                 }
             }
@@ -399,14 +412,24 @@ class UnifiedInboxRepository(
         // conversation objects with look-alike participant sets that
         // are legitimately SEPARATE chats — his Dad 1:1 and the
         // Dad+Grace group — and combining them corrupted both.)
-        val rows = rcsTransport.currentRcsConversations()
-            .map { mapRcsConversation(it) }
+        val payloads = rcsTransport.currentRcsConversations()
+        // A sender-evidence refinement lives only while its payload
+        // stays field-21-absent and not-a-group: if the server starts
+        // shipping field 21 (or flags the conversation a group), the
+        // derivation is authoritative on its own and the refinement
+        // retires (see MembershipRefinements).
+        payloads.forEach { c ->
+            if (c.otherParticipantIds.isNotEmpty() || c.isGroup) {
+                membershipRefinements.clear(c.id)
+            }
+        }
+        val rows = payloads.map { mapRcsConversation(it) }
         return rows.sortedByDescending { it.date }
     }
 
     /**
-     * RCS participant cleanup, delegated to the pure, unit-tested
-     * [deriveRcsOthers]: the server's participant list can include
+     * RCS membership, delegated to the pure, unit-tested
+     * [deriveRcsMembership]: the server's participant list can include
      * self — sometimes twice, and not always flagged isMe ("Grace, Garrett,
      * Garrett", and the GIRTH ghost: an unflagged self entry with a real
      * number and an "Unknown"/blank name). Self is matched via the isMe flag
@@ -414,10 +437,16 @@ class UnifiedInboxRepository(
      * across conversations — server-grounded, works when the Telephony-based
      * ownAddress() can't resolve in paired mode). His name must never appear
      * in a header unless the chat is to himself specifically, and the word
-     * "Unknown" must never render. And when the payload ships field 21
+     * "Unknown" must never render. When the payload ships field 21
      * (otherParticipantIds — the server's own membership answer), it is
      * the authority over field 20's attribute list: a stale entry the
-     * server no longer counts as a member (Grace in the Dad 1:1) drops.
+     * server no longer counts as a member (Grace in the Dad+Grace
+     * group) drops. When field 21 is absent, the isGroup flag (field
+     * 10) alone decides group-ness, and a not-a-group payload whose
+     * field-20 list still names several others collapses to the
+     * single peer (the Dad 1:1: field 21 never arrives, field 10 says
+     * not a group, and the stale Grace entry in field 20 is exactly
+     * what used to promote it to a "group").
      */
     private suspend fun selfNumberSet(): Set<String> {
         val out = mutableSetOf<String>()
@@ -434,25 +463,27 @@ class UnifiedInboxRepository(
         return out
     }
 
-    private suspend fun cleanRcsParticipants(
-        parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
-        otherIds: List<String>,
-    ): List<com.garrietta.relay.rcs.proto.RcsParticipant> =
-        deriveRcsOthers(parts, otherIds, selfNumberSet())
+    /** THE membership derivation for one server conversation payload. */
+    private suspend fun deriveMembership(
+        c: com.garrietta.relay.rcs.proto.RcsConversation,
+    ): com.garrietta.relay.rcs.proto.RcsMembership =
+        deriveRcsMembership(
+            c.participants, c.otherParticipantIds, selfNumberSet(),
+            c.isGroup, c.name,
+        )
 
     private suspend fun mapRcsConversation(
         c: com.garrietta.relay.rcs.proto.RcsConversation,
     ): Conversation {
-        // UNKNOWN_SENDER! ghosts vanish here — filtered at the RCS
-        // level, before any name is composed or Participant built.
-        // Display-layer only; the server data is untouched.
-        val others = cleanRcsParticipants(c.participants, c.otherParticipantIds)
-            .filterNot { it.isUnknownSenderGhost() }
-        // Group classification (Garrett 2026-10-20): derived in THIS
-        // pass from THIS payload, paired with the others above — when
-        // field 21 shipped, membership decides; the isGroup flag only
-        // stands when there is no membership list to consult.
-        val group = deriveRcsIsGroup(c.isGroup, c.otherParticipantIds, others.size)
+        // THE derivation (Garrett 2026-10-20): membership computed
+        // ONCE in this pass from THIS payload — the others and the
+        // group classification come from the same deriveRcsMembership
+        // result, and UNKNOWN_SENDER! ghosts vanish inside it, before
+        // any name is composed or Participant built. Every surface
+        // (row, header, details, dump) consumes this stored result.
+        val membership = deriveMembership(c)
+        val others = membership.others
+        val group = membership.isGroup
         // The full stored participant list (self included) for chat-side
         // sender resolution and the details page — derived in THIS pass
         // from THIS payload, so no surface ever re-derives membership
@@ -509,7 +540,7 @@ class UnifiedInboxRepository(
         // conversation whose latest entry is "… created this group chat
         // …" must not wear that event as its snippet, prefix or not.
         // The group flag read here is the single derived one above
-        // (deriveRcsIsGroup) — no second local computation.
+        // (deriveRcsMembership) — no second local computation.
         val snippet = when {
             baseSnippet.isBlank() -> baseSnippet
             group && isGroupEventNotice(c.snippet) -> ""
@@ -591,8 +622,16 @@ class UnifiedInboxRepository(
         val anomalies = participantAnomalies
         val inputs = participantAnomalyInputs
         val snapshots = rcsTransport.currentRcsConversations().map { c ->
-            val derived = cleanRcsParticipants(c.participants, c.otherParticipantIds)
-                .filterNot { it.isUnknownSenderGhost() }
+            val membership = deriveMembership(c)
+            // What the UI renders: the derivation's others — or, when
+            // sender evidence has refined this conversation, the
+            // evidence peer the stored row actually shows.
+            val refinedEntry = membershipRefinements.peerEntry(c.id)
+            val derived = if (refinedEntry != null) {
+                listOf(refinedEntry)
+            } else {
+                membership.others
+            }
             val title = _conversations.value.firstOrNull { row ->
                 row.rcsConversationId == c.id
             }?.displayName?.ifBlank { null }
@@ -621,9 +660,8 @@ class UnifiedInboxRepository(
                         name = p.fullName.ifBlank { p.firstName },
                     )
                 },
-                derivedIsGroup = deriveRcsIsGroup(
-                    c.isGroup, c.otherParticipantIds, derived.size,
-                ),
+                derivedIsGroup =
+                    if (refinedEntry != null) false else membership.isGroup,
                 anomaly = c.id in anomalies,
                 detectorClaimedOthers = inp?.first,
                 detectorDistinctSenders = inp?.second,
@@ -678,24 +716,69 @@ class UnifiedInboxRepository(
         synchronized(rcsServerMessages) { rcsServerMessages[conversationId] = server }
         // Participant-integrity evidence (Garrett 2026-10-20): does this
         // conversation's OWN participant list agree with its messages?
-        // A list claiming a group whose loaded messages all come from a
-        // single other sender is contradictory data ("Dad, Grace
+        // The detector measures the derivation's CLAIM (the others
+        // before any not-a-group collapse — see RcsMembership): a list
+        // claiming several others whose loaded messages all come from
+        // a single other sender is contradictory data ("Dad, Grace
         // Ambrose" with only Dad ever speaking) — recorded for
-        // Diagnostics, never silently trusted or silently "fixed".
+        // Diagnostics. And for the field-21-absent, not-a-group shape
+        // the evidence does more than flag: a single distinct sender
+        // across >= 3 incoming IS the peer, so the stored row is
+        // refined to that sender (see MembershipRefinements) and the
+        // detector then sees the claim as the single person it is.
         run {
-            val otherNumbers = cleanRcsParticipants(
-                participants, conv?.otherParticipantIds.orEmpty(),
-            )
-                .filterNot { it.isUnknownSenderGhost() }
+            val membership = conv?.let { deriveMembership(it) }
+            val claimedNumbers = membership?.claimedOthers.orEmpty()
                 .map { normalizedAddress(it.number) }
                 .filter { it.isNotEmpty() }.toSet()
             val byPid = participants.associateBy { it.participantId }
             val incoming = server.filter { !it.fromMe }
-            val distinctSenders = incoming.mapNotNull { m ->
+            val senderNumbers = incoming.mapNotNull { m ->
                 byPid[m.participantId]?.number
                     ?.let { normalizedAddress(it) }
-                    ?.takeIf { it in otherNumbers }
-            }.distinct().size
+                    ?.takeIf { it in claimedNumbers }
+            }
+            val distinctSenders = senderNumbers.distinct().size
+            // Sender-evidence refinement (Garrett 2026-10-20): the
+            // conversation's own messages outrank the name/first-entry
+            // heuristics — when they conclusively name one sender,
+            // membership IS that sender, full stop.
+            if (conv != null) {
+                val peerNumber = senderEvidencePeerNumber(
+                    field21Present = conv.otherParticipantIds.isNotEmpty(),
+                    serverIsGroup = conv.isGroup,
+                    incomingCount = incoming.size,
+                    distinctSenderNumbers = senderNumbers.distinct(),
+                )
+                val peerEntry = peerNumber?.let { number ->
+                    participants.firstOrNull {
+                        normalizedAddress(it.number) == number
+                    }
+                }
+                if (peerEntry != null) {
+                    membershipRefinements.record(
+                        conversationId, peerEntry,
+                        Participant(
+                            address = peerEntry.number,
+                            displayName = peerEntry.fullName
+                                .ifBlank { peerEntry.firstName }
+                                .ifBlank { peerEntry.number },
+                            photoUri = contactLookup.photoUri(peerEntry.number),
+                        ),
+                    )
+                    _conversations.value =
+                        membershipRefinements.applyTo(_conversations.value)
+                }
+            }
+            // Once refined, the effective claim is the single peer;
+            // before that, the detector measures the raw claim.
+            val claimedOthers = if (
+                membershipRefinements.isRecorded(conversationId)
+            ) {
+                1
+            } else {
+                membership?.claimedOthers?.size ?: 0
+            }
             val title = _conversations.value.firstOrNull { row ->
                 row.rcsConversationId == conversationId
             }?.displayName?.ifBlank { null }
@@ -706,14 +789,18 @@ class UnifiedInboxRepository(
                 // membership dump — the verdict alone doesn't show WHY.
                 participantAnomalyInputs = participantAnomalyInputs +
                     (conversationId to
-                        Triple(otherNumbers.size, distinctSenders, incoming.size))
+                        Triple(claimedOthers, distinctSenders, incoming.size))
                 participantAnomalies = when {
                     participantAnomaly(
-                        otherNumbers.size, distinctSenders, incoming.size,
+                        claimedOthers, distinctSenders, incoming.size,
                     ) -> participantAnomalies + (conversationId to title)
                     // Conclusive counter-evidence — a second other
                     // sender has actually spoken: the claim checks out.
                     distinctSenders >= 2 -> participantAnomalies - conversationId
+                    // The claim itself has resolved to a single peer
+                    // (derivation collapse and/or sender evidence):
+                    // nothing left to flag.
+                    claimedOthers <= 1 -> participantAnomalies - conversationId
                     // Too little evidence to judge: keep prior state.
                     else -> participantAnomalies
                 }

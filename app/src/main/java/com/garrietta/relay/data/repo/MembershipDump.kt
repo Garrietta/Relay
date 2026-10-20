@@ -34,7 +34,7 @@ data class MembershipSnapshot(
     val field21: List<String>,
     /** conversations.Conversation.participants (field 20), raw. */
     val field20: List<MembershipEntry>,
-    /** The derived "others" the UI renders (deriveRcsOthers output). */
+    /** The derived "others" the UI renders (deriveRcsMembership output). */
     val derivedOthers: List<MembershipEntry>,
     /** The derived group classification the UI renders. */
     val derivedIsGroup: Boolean,

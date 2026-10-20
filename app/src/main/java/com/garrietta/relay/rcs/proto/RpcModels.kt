@@ -210,48 +210,109 @@ fun cleanRcsParticipantList(
 }
 
 /**
+ * The result of the ONE participant derivation: the "others" every
+ * surface renders, the group classification paired with them, and
+ * [claimedOthers] — the others BEFORE any not-a-group collapse, i.e.
+ * what the payload's participant list claims. The anomaly detector
+ * measures the claim (see ThreadMerging.participantAnomaly); the UI
+ * renders [others].
+ */
+data class RcsMembership(
+    val others: List<RcsParticipant>,
+    val isGroup: Boolean,
+    val claimedOthers: List<RcsParticipant>,
+)
+
+/**
  * THE participant derivation (Garrett 2026-10-20): a conversation's
- * "others" are computed ONCE, here, from that conversation's OWN payload
- * — every surface (inbox row, search, chat header, details, notifications)
- * consumes the stored result and never re-derives.
+ * membership is computed ONCE, here, from that conversation's OWN
+ * payload — every surface (inbox row, search, chat header, details,
+ * notifications, the Diagnostics dump) consumes the stored result and
+ * never re-derives.
  *
  * Two fields of the same conversation object play different roles:
  * field 20 ([parts]) carries the attributes (names, numbers) but can
- * carry STALE entries — his Dad 1:1 payload listed Grace, a leftover of
- * the group conversation's life, even though she is not a member.
+ * carry STALE entries — his Dad 1:1 payload listed Grace, a leftover
+ * of the group conversation's life, even though she is not a member.
  * Field 21 ([otherIds]) is the server's own membership answer —
  * "participant IDs excluding me" — so when it is present it is the
  * AUTHORITY: a cleaned field-20 entry survives only if its participant
- * ID is in field 21. When field 21 is absent/empty there is nothing to
- * cross-check against and the cleaned field-20 list stands (the
- * pre-existing behavior).
+ * ID is in field 21, and group-ness is the derived count (more than
+ * one other = group); the server isGroup flag (field 10) cannot
+ * overrule the membership it itself shipped in the same payload.
+ *
+ * When field 21 is ABSENT there is no membership list to consult, and
+ * Garrett's Diagnostics dump (2026-10-20) settled what decides
+ * instead: every real group in his inbox ships field 21, and every
+ * 1:1 is field-21-absent — so the server's explicit isGroup flag
+ * (field 10) ALONE decides group-ness. The cleaned field-20 count may
+ * NOT overrule it: the old `serverIsGroup || othersCount > 1` fallback
+ * let the noisy field-20 list promote his Dad 1:1 (isGroup=false, one
+ * stale Grace entry) into a group. And when the flag says NOT a group
+ * yet the cleaned list still names several others — a contradictory
+ * payload — the list collapses to the single peer (see
+ * [resolveSinglePeer]); the uncollapsed claim stays in
+ * [RcsMembership.claimedOthers] so the anomaly detector keeps
+ * measuring it until sender evidence resolves it (see
+ * MembershipRefinements in the repository layer).
  */
-fun deriveRcsOthers(
+fun deriveRcsMembership(
     parts: List<RcsParticipant>,
     otherIds: List<String>,
     selfNumbers: Set<String>,
-): List<RcsParticipant> {
+    serverIsGroup: Boolean,
+    conversationName: String,
+): RcsMembership {
     val cleaned = cleanRcsParticipantList(parts, selfNumbers)
-    if (otherIds.isEmpty()) return cleaned
-    val authority = otherIds.toSet()
-    return cleaned.filter { it.participantId in authority }
+        .filterNot { it.isUnknownSenderGhost() }
+    if (otherIds.isNotEmpty()) {
+        val authority = otherIds.toSet()
+        val others = cleaned.filter { it.participantId in authority }
+        return RcsMembership(others, others.size > 1, others)
+    }
+    // Field 21 absent: field 10 alone decides group-ness.
+    if (serverIsGroup) return RcsMembership(cleaned, true, cleaned)
+    if (cleaned.size <= 1) return RcsMembership(cleaned, false, cleaned)
+    // Contradictory payload (the Dad shape): not a group per field 10,
+    // yet the stale field-20 list names several others. Collapse to
+    // the single peer — the conversation is still NOT a group.
+    val peer = resolveSinglePeer(cleaned, conversationName) ?: cleaned.first()
+    return RcsMembership(listOf(peer), false, cleaned)
 }
 
+/** Name comparison form: trimmed, whitespace-collapsed, lowercased. */
+private fun normalizeNameForMatch(name: String): String =
+    name.trim().replace(Regex("\\s+"), " ").lowercase()
+
 /**
- * Group classification paired with [deriveRcsOthers]: when field 21 is
- * present, membership decides (more than one other = group) — the
- * server isGroup flag (field 10) cannot overrule the membership it
- * itself shipped in the same payload. When field 21 is absent, the
- * flag stands with the cleaned count as backstop (the pre-existing
- * rule).
+ * The single peer of a not-a-group conversation whose cleaned
+ * field-20 list names several others (Garrett 2026-10-20, the Dad
+ * shape): the entry the server's own conversation name points at.
+ * The name is compared normalized (case/space-insensitive) against
+ * each entry's server names (full and first); when the conversation
+ * name is a bare number (no letters), an entry also matches on its
+ * number's digits (last-10 comparison, like self matching). Returns
+ * the entry only when EXACTLY ONE matches — no match or an ambiguous
+ * match resolves nothing, and the caller falls back to the first
+ * cleaned other as the provisional peer.
  */
-fun deriveRcsIsGroup(
-    serverIsGroup: Boolean,
-    otherIds: List<String>,
-    othersCount: Int,
-): Boolean =
-    if (otherIds.isNotEmpty()) othersCount > 1
-    else serverIsGroup || othersCount > 1
+private fun resolveSinglePeer(
+    cleaned: List<RcsParticipant>,
+    conversationName: String,
+): RcsParticipant? {
+    val target = normalizeNameForMatch(conversationName)
+    if (target.isEmpty()) return null
+    val nameDigits = conversationName.filter(Char::isDigit)
+    val bareNumber = nameDigits.length >= 3 && conversationName.none { it.isLetter() }
+    val matches = cleaned.filter { p ->
+        normalizeNameForMatch(p.fullName) == target ||
+            normalizeNameForMatch(p.firstName) == target ||
+            (bareNumber && nameDigits.isNotEmpty() &&
+                p.number.filter(Char::isDigit).takeLast(10) ==
+                nameDigits.takeLast(10))
+    }
+    return matches.singleOrNull()
+}
 
 data class RcsMessage(
     val id: String,

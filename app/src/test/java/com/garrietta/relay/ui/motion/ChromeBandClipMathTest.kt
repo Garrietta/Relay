@@ -128,6 +128,55 @@ class ChromeBandClipMathTest {
     }
 
     @Test
+    fun `band bottom is the cluster slot top in the full form`() {
+        // The FULL cluster (pill + search button) composed: its slot
+        // occupies the bottom 264px (88dp at 3x) of the window, and
+        // the band's bottom edge is the slot's top.
+        val slotTop = 2400f - 264f
+        assertEquals(
+            slotTop,
+            ChromeBandClipMath.bandBottomForCluster(slotTop, 264),
+        )
+    }
+
+    @Test
+    fun `band bottom is the same slot top in the minimized form`() {
+        // The MINIMIZED circular button (Garrett 2026-10-20): the
+        // cluster condenses INSIDE the same constant-height slot —
+        // the slot does not resize between forms or during the
+        // morph — so the derivation yields the identical line, and a
+        // morph to/from the last visible row passes behind the
+        // circle exactly as it did behind the pill.
+        val slotTop = 2400f - 264f
+        assertEquals(
+            ChromeBandClipMath.bandBottomForCluster(slotTop, 264),
+            ChromeBandClipMath.bandBottomForCluster(slotTop, 264),
+        )
+        assertEquals(
+            slotTop,
+            ChromeBandClipMath.bandBottomForCluster(slotTop, 264),
+        )
+        // Any composed (positive) height keeps the band closed at
+        // the slot's top; the form's internals never enter the math.
+        assertEquals(
+            slotTop,
+            ChromeBandClipMath.bandBottomForCluster(slotTop, 1),
+        )
+    }
+
+    @Test
+    fun `band bottom opens when the cluster is not composed`() {
+        // Height 0 = the cluster node has left composition (the
+        // inbox is not on screen): there is no bottom chrome to
+        // protect, so the band opens to the window bottom — the
+        // pre-band degenerate behavior.
+        assertEquals(
+            Float.POSITIVE_INFINITY,
+            ChromeBandClipMath.bandBottomForCluster(2136f, 0),
+        )
+    }
+
+    @Test
     fun `visible slice never escapes the band for any span`() {
         // The invariant behind Garrett's report: for ANY animated
         // bounds, the drawn slice lies entirely within the band.

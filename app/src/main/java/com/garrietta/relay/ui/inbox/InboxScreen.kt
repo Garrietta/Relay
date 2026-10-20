@@ -11,6 +11,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -72,6 +73,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
@@ -89,6 +91,7 @@ import com.garrietta.relay.data.model.isUnknownSenderGhost
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.TopSearchPopup
+import com.garrietta.relay.ui.motion.ChromeBandClipMath
 import com.garrietta.relay.ui.motion.InboxChromeBand
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.SharedElementKeys
@@ -209,23 +212,31 @@ fun InboxScreen(
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
-    // Bottom bar auto-hide: the new-chat pill + search button slide down
-    // off the bottom when scrolling down, and return on scroll up (or when
-    // back at the very top).
-    var bottomBarVisible by remember { mutableStateOf(true) }
+    // Bottom cluster form (Garrett 2026-10-20): FULL (new-conversation
+    // pill + search button) at the top of the list; scrolled away from
+    // the top it condenses — Koda mini-player style — into ONE circular
+    // expressive new-conversation button at the bottom-right, and the
+    // full form restores only back at the top. This SUPERSEDES the old
+    // direction-based auto-hide, which slid the whole cluster off the
+    // bottom on scroll-down: the scrolled end state is now the
+    // minimized circle, present and tappable, not an empty slot.
+    // Position-based and driven by this same listState the header
+    // collapse reads (one scroll truth); the pure trigger, including
+    // its hysteresis band, is ClusterStateLogic. Seeded from the
+    // chat-exit restore point when there is one, so a return deep in
+    // the list composes the minimized form on the very first frame.
+    var clusterForm by remember(listState) {
+        mutableStateOf(
+            ClusterStateLogic.initialFormFor(
+                chatExitRestore?.first ?: 0,
+                chatExitRestore?.second ?: 0,
+            ),
+        )
+    }
     LaunchedEffect(listState) {
-        var prevIndex = 0
-        var prevOffset = 0
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .collect { (index, offset) ->
-                bottomBarVisible = when {
-                    index == 0 && offset < 120 -> true
-                    index > prevIndex || (index == prevIndex && offset > prevOffset + 12) -> false
-                    index < prevIndex || (index == prevIndex && offset < prevOffset - 12) -> true
-                    else -> bottomBarVisible
-                }
-                prevIndex = index
-                prevOffset = offset
+                clusterForm = ClusterStateLogic.formFor(index, offset, clusterForm)
             }
     }
 
@@ -464,14 +475,22 @@ fun InboxScreen(
                     },
                 )
             }
-            // Bottom cluster: the new-conversation pill (cropped width-wise to
-            // make room) + the expressive search button at the bottom-right.
-            // Both slide down off the bottom of the phone on scroll-down and
-            // return on scroll-up. One-shot entrance on first appearance.
+            // Bottom cluster (Garrett 2026-10-20): FULL at the top of
+            // the list — the new-conversation pill (cropped width-wise
+            // to make room) + the expressive search button at the
+            // bottom-right; scrolled away from the top it condenses
+            // into the minimized circular new-conversation button
+            // (ClusterStateLogic). The form morph is an expressive
+            // crossfade + corner-anchored scale INSIDE a slot whose
+            // layout size never changes — both forms measure the same
+            // 64dp content + 24dp bottom padding — so the morph can
+            // never resize the slot, shift the list, or move the
+            // chrome band's bottom line. One-shot entrance on first
+            // appearance, as before.
             var pillVisible by remember { mutableStateOf(false) }
             LaunchedEffect(Unit) { pillVisible = true }
             AnimatedVisibility(
-                visible = pillVisible && bottomBarVisible,
+                visible = pillVisible,
                 enter = fadeIn(tween(300, delayMillis = 150)) +
                     slideInVertically(
                         tween(450, delayMillis = 150),
@@ -481,83 +500,89 @@ fun InboxScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     // Chrome band, bottom edge (Garrett 2026-10-20):
-                    // the cluster's top is the line the transition
+                    // the cluster slot's top is the line the transition
                     // overlay must never paint below while the cluster
                     // is on screen — a morph to/from the last visible
-                    // row passes behind the pill + search button
-                    // exactly as it passes behind the header. Layout
-                    // position is the cluster's resting slot (the
-                    // slide is a layer translation), so the band holds
-                    // steady through the slide in/out; once the
-                    // cluster leaves composition the node measures 0
-                    // and the band opens to the window bottom again.
+                    // row passes behind the cluster exactly as it
+                    // passes behind the header, whatever form the
+                    // cluster is in: the slot's height is the same
+                    // constant in the FULL and MINIMIZED forms and on
+                    // every frame of the morph between them, so this
+                    // one measurement serves all of them. Once the
+                    // cluster leaves composition entirely the node
+                    // measures 0 and the band opens to the window
+                    // bottom again (bandBottomForCluster).
                     .onGloballyPositioned { coords ->
                         InboxChromeBand.bottomPx =
-                            if (coords.size.height > 0) {
-                                coords.positionInWindow().y
-                            } else {
-                                Float.POSITIVE_INFINITY
-                            }
+                            ChromeBandClipMath.bandBottomForCluster(
+                                clusterTopPx = coords.positionInWindow().y,
+                                clusterHeightPx = coords.size.height,
+                            )
                     },
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
-                        .padding(bottom = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    NewConversationPill(
-                        onClick = onNewConversation,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    // Search: a distinctive expressive shape (Sunny star) —
-                    // deliberately NOT a circle, per the expressive brief.
-                    // Press-pop: the button itself bounces when tapped, so
-                    // the tap feels connected to the search popup popping in.
-                    val searchInteraction = remember { MutableInteractionSource() }
-                    val searchPressed by searchInteraction.collectIsPressedAsState()
-                    val searchPop by animateFloatAsState(
-                        targetValue = if (searchPressed) 0.82f else 1f,
-                        animationSpec = RelaySprings.bouncy(),
-                        label = "searchBtnPop",
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(60.dp)
-                            .graphicsLayer {
-                                scaleX = searchPop
-                                scaleY = searchPop
-                            }
-                            .clip(expressiveShape("Sunny"))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .clickable(
-                                interactionSource = searchInteraction,
-                                indication = null,
-                                // Tapping the search button while the popup is
-                                // open DISMISSES it (Garrett 2026-10-19) — the
-                                // button is a toggle, not a one-way door. The
-                                // close goes through the popup's dismiss
-                                // signal so it plays the same animated exit as
+                AnimatedContent(
+                    targetState = clusterForm,
+                    transitionSpec = {
+                        // Anchored at the slot's bottom-right corner —
+                        // where the search button sits in FULL and the
+                        // circle lives in MINIMIZED — so condensing
+                        // reads as the row folding INTO that corner and
+                        // restoring as it unfolding back out of it. The
+                        // two forms share the slot's size, so there is
+                        // no size animation to fight the scale.
+                        val corner = TransformOrigin(1f, 1f)
+                        if (targetState == InboxClusterForm.MINIMIZED) {
+                            (fadeIn(RelaySprings.bouncy()) +
+                                scaleIn(
+                                    RelaySprings.bouncy(),
+                                    initialScale = 0.55f,
+                                    transformOrigin = corner,
+                                )) togetherWith
+                                (fadeOut(tween(140)) +
+                                    scaleOut(
+                                        RelaySprings.bouncy(),
+                                        targetScale = 0.92f,
+                                        transformOrigin = corner,
+                                    ))
+                        } else {
+                            (fadeIn(RelaySprings.bouncy()) +
+                                scaleIn(
+                                    RelaySprings.bouncy(),
+                                    initialScale = 0.92f,
+                                    transformOrigin = corner,
+                                )) togetherWith
+                                (fadeOut(tween(140)) +
+                                    scaleOut(
+                                        RelaySprings.bouncy(),
+                                        targetScale = 0.55f,
+                                        transformOrigin = corner,
+                                    ))
+                        }
+                    },
+                    label = "inboxClusterForm",
+                ) { form ->
+                    when (form) {
+                        InboxClusterForm.FULL -> FullClusterRow(
+                            onNewConversation = onNewConversation,
+                            onSearchToggle = {
+                                // Tapping the search button while the
+                                // popup is open DISMISSES it (Garrett
+                                // 2026-10-19) — the button is a toggle,
+                                // not a one-way door; the close goes
+                                // through the popup's dismiss signal so
+                                // it plays the same animated exit as
                                 // Cancel/back/scrim instead of vanishing.
-                                onClick = {
-                                    if (searchOpen) {
-                                        searchDismissSignal++
-                                    } else {
-                                        searchOpen = true
-                                    }
-                                },
-                                role = Role.Button,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.Filled.Search,
-                            contentDescription = "Search conversations",
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.size(26.dp),
+                                if (searchOpen) {
+                                    searchDismissSignal++
+                                } else {
+                                    searchOpen = true
+                                }
+                            },
                         )
+                        InboxClusterForm.MINIMIZED ->
+                            MinimizedConversationButton(
+                                onClick = onNewConversation,
+                            )
                     }
                 }
             }
@@ -854,11 +879,137 @@ private fun CollapsingMessagesHeader(
 }
 
 /**
+ * The bottom cluster's FULL form: the new-conversation pill (cropped
+ * width-wise to make room) + the expressive search button at the
+ * bottom-right. Measures exactly [ClusterStateLogic.SLOT_HEIGHT_DP] —
+ * the 64dp content row plus the 24dp bottom padding — the same slot
+ * the MINIMIZED form measures, so the form morph never resizes the
+ * cluster's layout (or the chrome band read from its top).
+ */
+@Composable
+private fun FullClusterRow(
+    onNewConversation: () -> Unit,
+    onSearchToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp)
+            .padding(bottom = ClusterStateLogic.BOTTOM_PADDING_DP.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NewConversationPill(
+            onClick = onNewConversation,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(12.dp))
+        // Search: a distinctive expressive shape (Sunny star) —
+        // deliberately NOT a circle, per the expressive brief.
+        // Press-pop: the button itself bounces when tapped, so
+        // the tap feels connected to the search popup popping in.
+        val searchInteraction = remember { MutableInteractionSource() }
+        val searchPressed by searchInteraction.collectIsPressedAsState()
+        val searchPop by animateFloatAsState(
+            targetValue = if (searchPressed) 0.82f else 1f,
+            animationSpec = RelaySprings.bouncy(),
+            label = "searchBtnPop",
+        )
+        Box(
+            modifier = Modifier
+                .size(60.dp)
+                .graphicsLayer {
+                    scaleX = searchPop
+                    scaleY = searchPop
+                }
+                .clip(expressiveShape("Sunny"))
+                .background(MaterialTheme.colorScheme.secondaryContainer)
+                .clickable(
+                    interactionSource = searchInteraction,
+                    indication = null,
+                    onClick = onSearchToggle,
+                    role = Role.Button,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Search,
+                contentDescription = "Search conversations",
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The bottom cluster's MINIMIZED form (Garrett 2026-10-20 — the Koda
+ * mini-player model: scrolled down, the bar condenses to one small
+ * circular option parked bottom-right): a single circular expressive
+ * button carrying just the new-conversation action. The shape is
+ * Cookie7, the scalloped circle from Relay's expressive vocabulary —
+ * circular in style (the same shape the header's settings gear
+ * wears), and distinct from search's Sunny star, which exists only
+ * in the FULL form. Flat like the rest of the cluster: a
+ * clipped, opaquely filled shape — no elevation, no shadow — in the
+ * pill's own colors, because this button IS the pill, condensed; its
+ * press language is the pill's gentle press-scale for the same
+ * reason. It occupies the same slot as the FULL form (the 64dp
+ * content row, the button centered against it at the end), so the
+ * form morph never resizes the layout or the chrome band.
+ */
+@Composable
+private fun MinimizedConversationButton(
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp)
+            .padding(bottom = ClusterStateLogic.BOTTOM_PADDING_DP.dp)
+            .height(ClusterStateLogic.CONTENT_HEIGHT_DP.dp),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        val interactionSource = remember { MutableInteractionSource() }
+        val pressed by interactionSource.collectIsPressedAsState()
+        val scale by animateFloatAsState(
+            targetValue = if (pressed) 0.96f else 1f,
+            animationSpec = RelaySprings.gentle(),
+            label = "miniPillPress",
+        )
+        Box(
+            modifier = Modifier
+                .size(60.dp)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .clip(expressiveShape("Cookie7"))
+                .background(MaterialTheme.colorScheme.primaryContainer)
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    onClick = onClick,
+                    role = Role.Button,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Edit,
+                contentDescription = "New conversation",
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+    }
+}
+
+/**
  * Floating "New conversation" bar — a plain full-width, slightly rounded
- * rectangle (18dp corners). Real elevation + shadow so it reads as floating
- * above the conversation list. Gentle press-scale in the unified spring
- * language; the densest color in the scheme, per the expressive contrast
- * rule.
+ * rectangle (18dp corners). FLAT (Garrett 2026-10-20: no shadow effects
+ * on the bottom cluster): zero tonal and shadow elevation — the opaque
+ * primaryContainer fill alone separates it from the list scrolling
+ * beneath. Gentle press-scale in the unified spring language; the
+ * densest color in the scheme, per the expressive contrast rule.
  *
  * FIXED HEIGHT (Garrett 2026-10-19: the pill "keeps getting taller and
  * taller"): the layout height is a constant 64.dp — no padding-driven
@@ -886,8 +1037,8 @@ private fun NewConversationPill(
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         modifier = modifier
             .fillMaxWidth()
             .height(64.dp)

@@ -313,6 +313,13 @@ object SharedElementKeys {
  * overlay frame at draw time, so a transition always clips against the
  * chrome geometry in effect at that moment — including mid-collapse.
  *
+ * The bottom edge is the cluster SLOT's top. The slot's height is a
+ * constant across the cluster's FULL and MINIMIZED forms (the form
+ * morph is a crossfade inside the slot, never a resize — see
+ * ClusterStateLogic), so this one line serves the full pill, the
+ * minimized circle, and every frame of the morph between them; the
+ * traveling surface lands behind the cluster whatever form it is in.
+ *
  * Coordinates: `positionInWindow` of the measured nodes. The nav
  * root's SharedTransitionLayout fills the window at its origin in
  * both hosts, so window coordinates ARE the shared scope's
@@ -352,6 +359,24 @@ object ChromeBandClipMath {
         val park = if (bottom <= bandTopPx) bandTopPx else bandBottomPx
         return park to park
     }
+
+    /**
+     * The band's bottom edge for a cluster slot whose layout top is
+     * [clusterTopPx] and whose measured height is [clusterHeightPx]:
+     * the slot's top while the cluster is composed, +infinity once it
+     * leaves composition (height 0) — with no cluster on screen there
+     * is nothing at the bottom for a morph to pass behind, so the
+     * band opens to the window bottom, exactly as it did before the
+     * band existed.
+     *
+     * Form-independent by construction: the FULL cluster (pill +
+     * search button) and the MINIMIZED circular button share the one
+     * constant-height slot (see ClusterStateLogic.SLOT_HEIGHT_DP), so
+     * any composed height yields the slot's top, for either form and
+     * every frame of the morph between them.
+     */
+    fun bandBottomForCluster(clusterTopPx: Float, clusterHeightPx: Int): Float =
+        if (clusterHeightPx > 0) clusterTopPx else Float.POSITIVE_INFINITY
 }
 
 /**

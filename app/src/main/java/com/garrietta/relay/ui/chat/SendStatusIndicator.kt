@@ -52,7 +52,7 @@ object SendIndicatorLogic {
         isOutgoing: Boolean,
         status: DeliveryStatus,
         uploadInProgress: Boolean,
-        serverTracked: Boolean,
+        sendInFlight: Boolean,
     ): SendIndicatorState {
         if (!isOutgoing) return SendIndicatorState.HIDDEN
         // Media sends: the bubble's own upload scrim owns the upload
@@ -60,14 +60,28 @@ object SendIndicatorLogic {
         if (uploadInProgress) return SendIndicatorState.HIDDEN
         return when (status) {
             DeliveryStatus.NONE -> SendIndicatorState.HIDDEN
-            DeliveryStatus.SENDING -> SendIndicatorState.SPINNER
-            // Server-tracked (RCS) messages keep spinning at SENT:
-            // delivery receipts still flow, and DELIVERED is the
-            // completion Garrett means. A bare Telephony send has no
-            // receipts coming — SENT is its terminal state and reads
-            // as the check, matching its old single tick.
+            // The spinner means "this send is happening right now" —
+            // it is licensed by live-send provenance
+            // (Message.sendInFlight), never by the status value alone.
+            // Only the ViewModel's own send pipeline ever produces
+            // SENDING, and always with the flag set; a SENDING that
+            // somehow arrives without it resolves to the static
+            // marker rather than lying about an in-flight send.
+            DeliveryStatus.SENDING ->
+                if (sendInFlight) SendIndicatorState.SPINNER
+                else SendIndicatorState.CHECK
+            // A live send keeps spinning at SENT: the echo has landed
+            // but delivery receipts still flow, and DELIVERED is the
+            // completion Garrett means. A HISTORICAL SENT (loaded from
+            // the server history or the chat-history cache — including
+            // long-delivered messages whose payload carries no
+            // delivered code, e.g. ones sent from another client)
+            // resolves to its static marker: the check. Spinning there
+            // was the stranded-spinner bug — nothing would ever
+            // resolve it, because status pushes only patch the open
+            // chat and history is never re-asked.
             DeliveryStatus.SENT ->
-                if (serverTracked) SendIndicatorState.SPINNER
+                if (sendInFlight) SendIndicatorState.SPINNER
                 else SendIndicatorState.CHECK
             DeliveryStatus.DELIVERED -> SendIndicatorState.CHECK
             DeliveryStatus.READ -> SendIndicatorState.READ
@@ -115,7 +129,7 @@ fun SendStatusIndicator(
         isOutgoing = message.isOutgoing,
         status = message.deliveryStatus,
         uploadInProgress = message.uploadProgress != null,
-        serverTracked = message.tmpId != null || message.serverId != null,
+        sendInFlight = message.sendInFlight,
     )
 
     // Morph bookkeeping: remembers are keyed by the message id, so the

@@ -168,6 +168,23 @@ data class Message(
      * the normal SENDING delivery state until the echo lands.
      */
     val uploadProgress: Float? = null,
+    /**
+     * Live-send provenance (Garrett 2026-10-20): true only while THIS
+     * session's send pipeline is actively shepherding the message —
+     * set on the optimistic bubble, carried across the server echo,
+     * cleared when a terminal status (DELIVERED/READ) lands. It is
+     * what licenses the send indicator's spinner: the spinner means
+     * "this send is happening right now", so a message whose SENT
+     * status arrived from a HISTORY load (network or the chat-history
+     * cache) must never spin — the server payload carries no delivered
+     * code for some long-delivered shapes (e.g. messages sent from
+     * another client), and the old rule (SENT + server-tracked =
+     * spinner) stranded those on the loading logo forever. History
+     * and cache mappings never set this; the history cache does not
+     * serialize it, so a cached message can never resurrect a spinner
+     * either. Session-only by construction.
+     */
+    val sendInFlight: Boolean = false,
 )
 
 /**

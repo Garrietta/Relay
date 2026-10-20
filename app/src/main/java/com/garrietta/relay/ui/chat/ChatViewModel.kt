@@ -538,7 +538,16 @@ class ChatViewModel(
             ) {
                 setMessages(
                     current.toMutableList().also {
-                        it[idx] = it[idx].copy(deliveryStatus = newStatus)
+                        // A terminal status retires the live-send flag:
+                        // the send is no longer happening, and the flag
+                        // must never outlive it (preserveLiveSendFlags
+                        // enforces the same rule on wholesale loads).
+                        val terminal = newStatus == DeliveryStatus.DELIVERED ||
+                            newStatus == DeliveryStatus.READ
+                        it[idx] = it[idx].copy(
+                            deliveryStatus = newStatus,
+                            sendInFlight = it[idx].sendInFlight && !terminal,
+                        )
                     },
                 )
                 return
@@ -553,6 +562,7 @@ class ChatViewModel(
             }
             return
         }
+        val echoStatus = rcsStatusToDelivery(msg.status, true)
         val mapped = Message(
             id = msg.id.hashCode().toLong(),
             threadId = threadId,
@@ -564,7 +574,14 @@ class ChatViewModel(
             read = true,
             tmpId = tmpId,
             location = msg.location ?: optimistic.location,
-            deliveryStatus = rcsStatusToDelivery(msg.status, true),
+            deliveryStatus = echoStatus,
+            // The echo swap keeps the send's live provenance while
+            // receipts are still outstanding — the spinner survives
+            // the identity change and the DELIVERED push morphs it.
+            // An echo that already carries a terminal status never
+            // claims an in-flight send.
+            sendInFlight = echoStatus == DeliveryStatus.SENDING ||
+                echoStatus == DeliveryStatus.SENT,
         )
         setMessages(
             _messages.value
@@ -611,7 +628,10 @@ class ChatViewModel(
      * of stray bubbles.
      */
     private fun publishMessages(list: List<Message>) {
-        _messages.value = attachReactions(list, ::reactorNameFor)
+        _messages.value = attachReactions(
+            preserveLiveSendFlags(_messages.value, list),
+            ::reactorNameFor,
+        )
     }
 
     /** Resolves a reaction message's reactor display name ("You" when Garrett reacted). */
@@ -780,6 +800,7 @@ class ChatViewModel(
             read = true,
             tmpId = tmpId,
             deliveryStatus = DeliveryStatus.SENDING,
+            sendInFlight = true,
         )
         pendingOptimistic[tmpId] = optimistic
         // Newest first (reverseLayout list): the optimistic bubble lands at the bottom.
@@ -872,6 +893,7 @@ class ChatViewModel(
                 latitude, longitude, name,
             ),
             deliveryStatus = DeliveryStatus.SENDING,
+            sendInFlight = true,
         )
         pendingOptimistic[tmpId] = optimistic
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
@@ -1008,6 +1030,7 @@ class ChatViewModel(
             ),
             deliveryStatus = DeliveryStatus.SENDING,
             uploadProgress = 0f,
+            sendInFlight = true,
         )
         pendingOptimistic[tmpId] = optimistic
         setMessages((_messages.value + optimistic).sortedByDescending { it.date })
@@ -1288,6 +1311,42 @@ fun parseReaction(body: String): Pair<String, String>? {
         }
     }
     return null
+}
+
+/**
+ * Carries live-send provenance ([Message.sendInFlight]) across a wholesale
+ * list replacement (Garrett 2026-10-20). Repository loads — history,
+ * deep fill, the live path's reload fallback — rebuild every message
+ * from the wire with the flag unset; without this carry, a send this
+ * session is still shepherding would lose its spinner mid-flight (and
+ * its spinner→check morph) the moment any reload republishes the list.
+ * A message keeps the flag when the previous list held the same
+ * message (matched by id, or by tmpId across the echo's id swap)
+ * flagged and the incoming copy hasn't reached a terminal status;
+ * a terminal status (DELIVERED/READ) always clears it, so the flag
+ * can never outlive the send it belongs to. Pure; unit-tested
+ * (PreserveLiveSendFlagsTest).
+ */
+fun preserveLiveSendFlags(
+    previous: List<Message>,
+    incoming: List<Message>,
+): List<Message> {
+    val live = previous.filter { it.sendInFlight }
+    if (live.isEmpty() && incoming.none { it.sendInFlight }) return incoming
+    val liveIds = live.map { it.id }.toSet()
+    val liveTmpIds = live.mapNotNull { it.tmpId }.toSet()
+    return incoming.map { m ->
+        val terminal = m.deliveryStatus == DeliveryStatus.DELIVERED ||
+            m.deliveryStatus == DeliveryStatus.READ
+        val wasLive = m.id in liveIds ||
+            (m.tmpId != null && m.tmpId in liveTmpIds)
+        when {
+            terminal && m.sendInFlight -> m.copy(sendInFlight = false)
+            !terminal && !m.sendInFlight && wasLive ->
+                m.copy(sendInFlight = true)
+            else -> m
+        }
+    }
 }
 
 /**

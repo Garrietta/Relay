@@ -1,6 +1,7 @@
 package com.garrietta.relay.ui.chat
 
 import com.garrietta.relay.data.model.DeliveryStatus
+import com.garrietta.relay.data.model.rcsStatusToDelivery
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,6 +13,12 @@ import org.junit.Test
  * while its send is in flight, morphing into a check mark on
  * DELIVERED (his word — completed means delivered). Pure JVM.
  * Run on CI via testDebugUnitTest.
+ *
+ * The spinner is licensed by live-send PROVENANCE
+ * (Message.sendInFlight — set only by this session's send pipeline),
+ * never by the status value alone: a status that arrives from a
+ * history load describes the past, and a past send is not happening
+ * right now.
  */
 class SendIndicatorLogicTest {
 
@@ -19,9 +26,9 @@ class SendIndicatorLogicTest {
         isOutgoing: Boolean = true,
         status: DeliveryStatus = DeliveryStatus.SENDING,
         uploadInProgress: Boolean = false,
-        serverTracked: Boolean = true,
+        sendInFlight: Boolean = true,
     ): SendIndicatorState = SendIndicatorLogic.stateFor(
-        isOutgoing, status, uploadInProgress, serverTracked,
+        isOutgoing, status, uploadInProgress, sendInFlight,
     )
 
     @Test
@@ -55,28 +62,66 @@ class SendIndicatorLogicTest {
     }
 
     @Test
-    fun `sending spins`() {
-        assertEquals(SendIndicatorState.SPINNER, state(status = DeliveryStatus.SENDING))
-    }
-
-    @Test
-    fun `server-tracked sent keeps spinning - delivered is the completion`() {
-        // RCS: at SENT the receipts are still flowing; the spinner
-        // must not resolve to the check until DELIVERED lands.
+    fun `live sending spins`() {
         assertEquals(
             SendIndicatorState.SPINNER,
-            state(status = DeliveryStatus.SENT, serverTracked = true),
+            state(status = DeliveryStatus.SENDING, sendInFlight = true),
         )
     }
 
     @Test
-    fun `untracked sent is terminal and reads as the check`() {
-        // Telephony sends carry no tmpId/serverId and no delivery
+    fun `live sent keeps spinning - delivered is the completion`() {
+        // RCS, this session's send: at SENT the echo has landed but
+        // the receipts are still flowing; the spinner must not
+        // resolve to the check until DELIVERED lands.
+        assertEquals(
+            SendIndicatorState.SPINNER,
+            state(status = DeliveryStatus.SENT, sendInFlight = true),
+        )
+    }
+
+    @Test
+    fun `stranded subset - history sent with no delivered code in its payload shows the check`() {
+        // THE BUG (Garrett 2026-10-20): some long-delivered outgoing
+        // messages sat on the spinner forever — e.g. his photo in the
+        // Kevin/Bram/Charlie group, sent from another client days
+        // earlier. Their history payload carries no delivered code:
+        // the wire status is absent/other, the history mapping's
+        // catch-all derives SENT, and every history message is
+        // server-tracked — so the old rule (SENT + tracked = spinner)
+        // spun them permanently: status pushes only patch the open
+        // chat, and nothing ever re-asks history. Provenance is the
+        // fix: no live send in this session, no spinner — the message
+        // resolves to its static marker.
+        for (wireCode in listOf(0, 1, 3, 15)) {
+            val derived = rcsStatusToDelivery(wireCode, outgoing = true)
+            assertEquals(DeliveryStatus.SENT, derived)
+            assertEquals(
+                SendIndicatorState.CHECK,
+                state(status = derived, sendInFlight = false),
+            )
+        }
+    }
+
+    @Test
+    fun `historical sending state without provenance resolves to the check`() {
+        // Defensive: SENDING is only ever assigned by the live send
+        // pipeline (always with provenance). If one ever arrives from
+        // a load path, it must not claim a send is happening now.
+        assertEquals(
+            SendIndicatorState.CHECK,
+            state(status = DeliveryStatus.SENDING, sendInFlight = false),
+        )
+    }
+
+    @Test
+    fun `telephony sent is terminal and reads as the check`() {
+        // Telephony sends carry no live provenance and no delivery
         // receipts ever arrive — SENT is their final state, matching
         // the old single tick.
         assertEquals(
             SendIndicatorState.CHECK,
-            state(status = DeliveryStatus.SENT, serverTracked = false),
+            state(status = DeliveryStatus.SENT, sendInFlight = false),
         )
     }
 
@@ -84,6 +129,16 @@ class SendIndicatorLogicTest {
     fun `delivered is the check and read is the read marker`() {
         assertEquals(SendIndicatorState.CHECK, state(status = DeliveryStatus.DELIVERED))
         assertEquals(SendIndicatorState.READ, state(status = DeliveryStatus.READ))
+        // Terminal states read the same whether or not the message
+        // was this session's send.
+        assertEquals(
+            SendIndicatorState.CHECK,
+            state(status = DeliveryStatus.DELIVERED, sendInFlight = false),
+        )
+        assertEquals(
+            SendIndicatorState.READ,
+            state(status = DeliveryStatus.READ, sendInFlight = false),
+        )
     }
 
     @Test

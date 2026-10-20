@@ -93,6 +93,7 @@ import com.garrietta.relay.ui.motion.LocalAnimatedVisibilityScope
 import com.garrietta.relay.ui.motion.LocalSharedElementsEnabled
 import com.garrietta.relay.ui.motion.LocalSharedTransitionScope
 import com.garrietta.relay.ui.motion.MotionKind
+import com.garrietta.relay.ui.motion.NavFlightDirection
 import com.garrietta.relay.ui.motion.RelaySprings
 import com.garrietta.relay.ui.motion.rememberMotionTransforms
 import com.garrietta.relay.ui.settings.SettingsScreen
@@ -256,11 +257,17 @@ class MainActivity : ComponentActivity() {
         var newConvNonce by remember { mutableStateOf(0L) }
         fun push(s: Screen) {
             navForward = true
+            // The chrome-band overlay clip reads this at draw time:
+            // entry flights carry the shape clip alone (see
+            // NavFlightDirection). Set synchronously with the
+            // navigation, exactly like navForward above it.
+            NavFlightDirection.forward = true
             backStack.add(s)
         }
         fun pop() {
             if (backStack.size > 1) {
                 navForward = false
+                NavFlightDirection.forward = false
                 backStack.removeLast()
             }
         }
@@ -303,6 +310,7 @@ class MainActivity : ComponentActivity() {
                 // Land directly in the chat: the inbox remains as the
                 // back target; whatever was above it is replaced.
                 navForward = true
+                NavFlightDirection.forward = true
                 backStack.clear()
                 backStack.add(Screen.Inbox)
                 backStack.add(

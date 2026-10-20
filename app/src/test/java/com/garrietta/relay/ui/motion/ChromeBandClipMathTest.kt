@@ -201,4 +201,29 @@ class ChromeBandClipMathTest {
             }
         }
     }
+
+    @Test
+    fun `band clip guards the exit flight`() {
+        // A pop (chat -> inbox) is the flight the band was built for
+        // (Garrett 2026-10-20 12:37): the inbox chrome fades IN over
+        // the leaving copy, so the copy is intersected with the band
+        // for the whole flight — bit-identical to the original rule.
+        assertTrue(ChromeBandClipMath.bandClipApplies(forwardFlight = false))
+    }
+
+    @Test
+    fun `band clip stands down on the entry flight`() {
+        // A push (inbox -> chat): the copy starts inside the band at
+        // the tapped row, and the exiting inbox pane — chrome
+        // included — fades out in the transform's first 100ms, so
+        // there is no living chrome left to protect. Intersecting
+        // the entry copy anyway sliced the incoming chat's top at
+        // the band's top line for the flight's whole spring tail:
+        // the resting top item rendered as a sliver under dead space
+        // until the flight completed (Garrett 2026-10-20 13:53, the
+        // Alec/Trenton image and the family group's teal bubble,
+        // every item below the cut pixel-identical to the settled
+        // frame). Entry keeps the shape clip alone.
+        assertTrue(!ChromeBandClipMath.bandClipApplies(forwardFlight = true))
+    }
 }

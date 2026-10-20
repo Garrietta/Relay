@@ -334,8 +334,51 @@ object InboxChromeBand {
     @Volatile var bottomPx: Float = Float.POSITIVE_INFINITY
 }
 
-/** Pure span math for [ChromeBandOverlayClip] (unit-tested). */
+/**
+ * Direction of the navigation flight currently in progress, for
+ * [ChromeBandOverlayClip]: `true` while a push (inbox → chat) is
+ * flying, `false` while a pop (chat → inbox) is.
+ *
+ * Written by the single-pane nav host synchronously inside its
+ * push/pop — the same statements that set its `navForward` pane
+ * transform flag — so the value is in effect before the flight's
+ * first overlay frame. Read ONLY by the overlay clip, once per
+ * overlay frame at draw time, exactly like [InboxChromeBand] itself:
+ * deliberately NOT snapshot state and NEVER read during composition,
+ * so it cannot recompose anything and — critically — it never gates
+ * shared-element REGISTRATION, the direction-gating sin that tore
+ * morphs mid-flight before #170 deleted it. A stale value can at
+ * worst pick the wrong CLIP for one flight; registrations, springs,
+ * and pane transforms are untouched by it.
+ *
+ * Defaults to forward (entry): before any navigation, no flight
+ * exists for the flag to describe.
+ */
+object NavFlightDirection {
+    @Volatile var forward: Boolean = true
+}
+
+/** Pure span/gate math for [ChromeBandOverlayClip] (unit-tested). */
 object ChromeBandClipMath {
+
+    /**
+     * Whether the chrome-band intersection guards a flight in this
+     * direction: EXIT flights only (Garrett 2026-10-20 13:53).
+     *
+     * The band exists so a LEAVING chat's traveling copy passes
+     * behind the inbox chrome that is fading IN over it (#171: the
+     * returning thread's text painted over the "Messages" title and
+     * the category pills). An ENTERING chat has no living chrome to
+     * protect: its copy starts the flight inside the band at the
+     * tapped row, and the inbox pane (chrome included) fades out in
+     * the pane transform's first 100ms while the copy is still near
+     * that row. Intersecting the entry copy anyway sliced its top at
+     * the band's top line for the bounds spring's whole tail — the
+     * resting top item rendered as a sliver under dead space until
+     * the flight completed — so entry flights keep the shape clip
+     * alone, exactly the pre-band behavior.
+     */
+    fun bandClipApplies(forwardFlight: Boolean): Boolean = !forwardFlight
 
     /**
      * The [top, bottom] slice of a vertical span that lies inside the
@@ -394,11 +437,28 @@ object ChromeBandClipMath {
  * 2026-10-20 12:37; symmetrically, a morph to/from the last visible
  * row could cross the floating bottom cluster). Intersecting the
  * copy with the band makes the traveling surface pass BEHIND the
- * chrome in both directions: it emerges from under the header line,
- * lands in its row, and never hovers over the main page's elements —
- * at any header collapse state, for 1:1 and group rows alike, because
- * the clip hangs on the shared container registration itself, not on
- * any row composable.
+ * chrome: it emerges from under the header line, lands in its row,
+ * and never hovers over the main page's elements — at any header
+ * collapse state, for 1:1 and group rows alike, because the clip
+ * hangs on the shared container registration itself, not on any row
+ * composable.
+ *
+ * DIRECTION (Garrett 2026-10-20 13:53): the intersection guards the
+ * EXIT flight only — [ChromeBandClipMath.bandClipApplies] on
+ * [NavFlightDirection]. Applied to an ENTRY flight it sliced the
+ * incoming chat's top at the band's top line for the whole flight:
+ * his captures show the resting top item (a large image in
+ * Alec/Trenton; a teal bubble in the family group) reduced to its
+ * bottom sliver under a strip of dead space, every item below the
+ * cut pixel-identical to the settled frame, the cut line at the
+ * band's top in both — the copy was whole underneath; only the
+ * overlay clip was still eating its top slice when he caught it.
+ * The slice pops in only when the flight completes and the real
+ * surface takes over. On entry the protected chrome has already
+ * faded out with the exiting pane (100ms) and the copy starts
+ * inside the band at the row, so standing the band down paints over
+ * no living chrome — it restores the pre-band entry behavior. The
+ * exit path through this clip is unchanged, bit for bit.
  *
  * Deliberately NOT applied to [motionSharedAvatar]: the avatar's
  * chat-side endpoint lives in the chat header, ABOVE the band —
@@ -431,6 +491,11 @@ private class ChromeBandOverlayClip(
             shapePath.translate(bounds.topLeft)
         } else {
             shapePath.addRect(bounds)
+        }
+        if (!ChromeBandClipMath.bandClipApplies(NavFlightDirection.forward)) {
+            // Entry flight: the shape clip alone — the band guards
+            // the exit only (see the class doc).
+            return shapePath
         }
         val bandTop = InboxChromeBand.topPx
         val bandBottom = InboxChromeBand.bottomPx
@@ -476,6 +541,10 @@ private class ChromeBandOverlayClip(
  * intersected with the inbox chrome band, so the traveling surface
  * passes BEHIND the main page's header and bottom cluster instead of
  * painting over them (the top-row hover, Garrett 2026-10-20 12:37).
+ * The band intersection guards the EXIT flight only; an entry flight
+ * carries the shape clip alone (the 13:53 top-shear — see the clip's
+ * doc). Registration stays unconditional in both directions either
+ * way: the clip is a draw-time read, never a registration gate.
  *
  * IMPORTANT: apply at the actual visual endpoint only. Never inside reusable item
  * composables that may also be composed in measurement/offscreen layers — duplicate

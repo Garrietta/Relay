@@ -1919,10 +1919,11 @@ private fun BubbleBox(
         // so nothing else competes for the text's gestures.
         SelectionContainer(
             // The container wraps exactly the text, and its parent is the
-            // bubble Box — so boundsInParent() is the text's rect in the
-            // same bubble-local coordinates the press observer sees.
+            // bubble Box — so the text's bounding box within the parent is
+            // its rect in the same bubble-local coordinates the press
+            // observer sees.
             modifier = Modifier.onGloballyPositioned { coords ->
-                textBounds = coords.boundsInParent()
+                textBounds = coords.parentCoordinates?.localBoundingBoxOf(coords)
             },
         ) {
             Text(

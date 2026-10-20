@@ -193,7 +193,21 @@ class RelayApp : Application() {
         val body = msg.body.ifBlank {
             if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
         }
-        MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs)
+        // Garrett 2026-10-19: notifications carry the sender's contact photo
+        // (like Google Messages). The sender is the message's participant in
+        // a group, else the non-self participant in a 1:1.
+        val senderNumber = runCatching {
+            rcsTransport.currentRcsConversations()
+                .firstOrNull { it.id == msg.conversationId }
+                ?.participants
+                ?.let { parts ->
+                    (parts.firstOrNull { it.participantId.isNotEmpty() && it.participantId == msg.participantId }
+                        ?: parts.firstOrNull { !it.isMe })
+                        ?.number?.ifBlank { null }
+                }
+        }.getOrNull()
+        val photoUri = senderNumber?.let { runCatching { repository.resolvePhotoUri(it) }.getOrNull() }
+        MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs, photoUri)
         // Garrett 2026-10-19: a posted notification FORCES the RCS refresh
         // (the same one the Diagnostics Refresh button does) so the inbox
         // and chat panes pick the message up — notification and UI stay

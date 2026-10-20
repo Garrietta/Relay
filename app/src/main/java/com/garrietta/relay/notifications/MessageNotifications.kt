@@ -7,9 +7,14 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
 import com.garrietta.relay.MainActivity
 import com.garrietta.relay.R
 
@@ -94,7 +99,13 @@ object MessageNotifications {
         )
     }
 
-    fun showIncoming(context: Context, sender: String, body: String, timestamp: Long) {
+    fun showIncoming(
+        context: Context,
+        sender: String,
+        body: String,
+        timestamp: Long,
+        photoUri: String? = null,
+    ) {
         // Android 13+: posting without the runtime grant throws. Record the
         // block (visible in Diagnostics) and no-op; never crash.
         if (!isPermissionGranted(context)) {
@@ -111,11 +122,20 @@ object MessageNotifications {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        // Garrett 2026-10-19: notifications show the sender's contact photo
+        // (like Google Messages), not a generic person icon. Falls back to
+        // no large icon when there's genuinely no photo.
+        val photo = photoUri?.let { decodeContactPhoto(context, it) }
+        val person = Person.Builder()
+            .setName(sender)
+            .apply { photo?.let { setIcon(IconCompat.createWithBitmap(it)) } }
+            .build()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
+            .apply { photo?.let { setLargeIcon(it) } }
             .setStyle(
-                NotificationCompat.MessagingStyle(sender)
-                    .addMessage(body, timestamp, sender)
+                NotificationCompat.MessagingStyle(person)
+                    .addMessage(body, timestamp, person)
             )
             .setContentIntent(pending)
             .setAutoCancel(true)
@@ -126,5 +146,29 @@ object MessageNotifications {
         lastPostedAt.set(System.currentTimeMillis())
         lastPostedSender.set(sender)
         postedCount.incrementAndGet()
+    }
+
+    /**
+     * Downsampled contact photo for the notification large icon / avatar.
+     * Null when there's no photo or it can't be decoded — callers fall back
+     * to the generic icon. Never throws.
+     */
+    private fun decodeContactPhoto(context: Context, uriString: String, maxPx: Int = 256): Bitmap? {
+        return try {
+            val uri = Uri.parse(uriString)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            val longest = maxOf(bounds.outWidth, bounds.outHeight)
+            if (longest <= 0) return null
+            val sample = (longest / maxPx).coerceAtLeast(1)
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 }

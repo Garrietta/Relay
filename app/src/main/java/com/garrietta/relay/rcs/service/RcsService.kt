@@ -49,7 +49,7 @@ class RcsService : Service() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Relay RCS")
             .setContentText("Connected — listening for RCS messages")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pending)
             .setOngoing(true)
             .build()

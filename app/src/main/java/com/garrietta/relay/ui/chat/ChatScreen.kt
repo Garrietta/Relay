@@ -425,7 +425,13 @@ fun ChatScreen(
             !(idx == 0 && off == 0)
         }
     }
-    val scrolled = headerCollapsed
+    // The collapse state drives the 1:1 header only. A GROUP header
+    // never collapses (Garrett 2026-10-20): its height is the constant
+    // expanded-cluster height in every scroll state — see
+    // ChatHeaderLogic. Feeding the raw collapse state into the group
+    // header was what flipped it between two heights (and jumped the
+    // message list's top inset) mid-scroll.
+    val scrolled = ChatHeaderLogic.headerCollapsed(isGroup, headerCollapsed)
     // The REAL transport label: the ViewModel refreshes it from the
     // server's Conversation.type for RCS rows (never hardcoded).
     val liveTransportLabel by viewModel.transportLabel.collectAsState()
@@ -1197,10 +1203,11 @@ private enum class HeaderMode { OneToOne, Group }
  * Chat header dispatch. 1:1 = their face centered at the top with their
  * name directly under (compact: ~half the old footprint); on scroll it
  * collapses (RelaySprings) to the height of the top bar. Group = a static
- * inline row: back arrow, the group's unique avatar cluster (spiral / grid
- * / zigzag, max five, then a "+N" circle), comma-separated member names
- * with ellipsis; on scroll the photos drop away and only the names remain.
- * Background matches the thread container — no seam.
+ * inline row at a CONSTANT height (the expanded cluster row — back arrow,
+ * the group's unique avatar cluster (spiral / grid / zigzag, max five,
+ * then a "+N" circle), comma-separated member names with ellipsis): it
+ * never collapses or resizes on scroll (Garrett 2026-10-20 — see
+ * ChatHeaderLogic). Background matches the thread container — no seam.
  */
 @Composable
 private fun ChatHeader(
@@ -1255,7 +1262,6 @@ private fun ChatHeader(
             HeaderMode.Group -> GroupHeader(
                 others = others,
                 transportLabel = transportLabel,
-                scrolled = scrolled,
                 patternKey = patternKey,
                 threadId = threadId,
                 onBack = onBack,
@@ -1411,17 +1417,19 @@ private fun OneToOneHeader(
  * Group header: a static inline row — back arrow, the group's UNIQUE avatar
  * cluster (spiral / grid / zigzag, deterministic per conversation: different
  * sizes, shapes and rotations, overlapping), then the comma-separated member
- * names, ellipsized before the right edge. No scroll-driven avatar
- * animation: the cluster stays in line from the start; on scroll the photos
- * drop away and only the names remain. For NAVIGATION the cluster carries
- * the same shared-avatar morph as a 1:1 photo (in on open, reverse on
- * exit) — one movement language for every chat.
+ * names, ellipsized before the right edge. The row's height is CONSTANT at
+ * [ChatHeaderLogic.GROUP_HEADER_HEIGHT_DP] — the expanded cluster height —
+ * in every state (Garrett 2026-10-20): an earlier version consumed the 1:1
+ * header's scroll-collapse state and dropped the cluster once scrolled,
+ * which flipped the header between two heights and shifted the whole
+ * message list. The cluster is always in line now. For NAVIGATION the
+ * cluster carries the same shared-avatar morph as a 1:1 photo (in on
+ * open, reverse on exit) — one movement language for every chat.
  */
 @Composable
 private fun GroupHeader(
     others: List<Participant>,
     transportLabel: String,
-    scrolled: Boolean,
     patternKey: String,
     threadId: Long,
     onBack: () -> Unit,
@@ -1441,16 +1449,23 @@ private fun GroupHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // The constant group header height (Garrett 2026-10-20):
+            // pinned, not merely implied by the cluster, so no state
+            // (scroll, entry path, fold) can ever resize this header —
+            // and the Scaffold hands the message list the same top
+            // inset every frame.
+            .height(ChatHeaderLogic.GROUP_HEADER_HEIGHT_DP.dp)
             .padding(end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onBack) {
             Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
         }
-        AnimatedVisibility(
-            visible = !scrolled,
-            enter = fadeIn(RelaySprings.gentle()) + expandHorizontally(RelaySprings.gentle()),
-            exit = fadeOut(RelaySprings.gentle()) + shrinkHorizontally(RelaySprings.gentle()),
+        // The cluster is ALWAYS in line (Garrett 2026-10-20): the
+        // scroll-driven AnimatedVisibility that used to drop it (and
+        // shrink this header to top-bar height) is gone.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             // Header tap opens the details page (Garrett 2026-10-19).
             modifier = Modifier.clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -1458,26 +1473,24 @@ private fun GroupHeader(
                 onClick = onOpenDetails,
             ),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                GroupAvatarCluster(
-                    members = visibleOthers.map {
-                        ClusterMember(
-                            photoUri = it.photoUri,
-                            name = it.displayName.ifBlank { it.address },
-                            address = it.address,
-                        )
-                    },
-                    conversationKey = patternKey,
-                    boxSize = 76.dp,
-                    // Morph target matching the inbox group row's
-                    // cluster (Garrett 2026-10-20: same picture movement
-                    // for group chats as for 1:1, in both directions).
-                    modifier = Modifier.motionSharedAvatar(
-                        SharedElementKeys.avatar(threadId),
-                    ),
-                )
-                Spacer(Modifier.width(10.dp))
-            }
+            GroupAvatarCluster(
+                members = visibleOthers.map {
+                    ClusterMember(
+                        photoUri = it.photoUri,
+                        name = it.displayName.ifBlank { it.address },
+                        address = it.address,
+                    )
+                },
+                conversationKey = patternKey,
+                boxSize = 76.dp,
+                // Morph target matching the inbox group row's
+                // cluster (Garrett 2026-10-20: same picture movement
+                // for group chats as for 1:1, in both directions).
+                modifier = Modifier.motionSharedAvatar(
+                    SharedElementKeys.avatar(threadId),
+                ),
+            )
+            Spacer(Modifier.width(10.dp))
         }
         Column(
             modifier = Modifier

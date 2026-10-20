@@ -378,6 +378,25 @@ class ChatViewModel(
     }
 
     /**
+     * Re-derives this chat's others through the repository's refined
+     * membership seam (Garrett 2026-10-20): the stored/on-demand row
+     * plus every sender-evidence refinement (peer collapse, sender
+     * union) — the SAME membership the inbox row renders. Called at
+     * init and again whenever a refinement lands or the inbox
+     * refreshes, so the header and Chat Details never sit on a stale
+     * snapshot taken before the conversation's own messages produced
+     * their census (Game Night showed its field-21 four in the header
+     * and "4 members" in details while eight people were posting).
+     * Sender resolution ([participantIndex]) is NOT rebuilt here: it
+     * reads the full field-20 table, which already contains every
+     * union member.
+     */
+    private suspend fun refreshRcsOthers(conversationId: String) {
+        val refined = repository.rcsOthers(conversationId)
+        if (refined != _others.value) _others.value = refined
+    }
+
+    /**
      * RCS thread init: history from the server, participants from the server
      * (self excluded via isMe + ownAddress fallback, deduped — never in the
      * header unless it's the self-chat), and a live subscription for echoes
@@ -439,7 +458,7 @@ class ChatViewModel(
         viewModelScope.launch {
             val parts = repository.getRcsParticipants(conversationId)
             _participants.value = parts
-            _others.value = repository.rcsOthers(conversationId)
+            refreshRcsOthers(conversationId)
             participantIndex = parts.associateBy { repository.normalizedAddress(it.address) }
             val seeds = mutableMapOf<String, androidx.compose.ui.graphics.Color?>()
             for (p in parts) {
@@ -466,9 +485,23 @@ class ChatViewModel(
             // Inbox tick reload (Garrett 2026-10-19): the notification
             // path forces repository.refresh() when it posts — the open
             // chat re-pulls its thread so the message appears in-app, not
-            // just in the notification shade.
+            // just in the notification shade. The reload also re-runs the
+            // sender census, and a refresh can re-derive membership from
+            // a changed payload — either way the header's others are
+            // re-derived through the refined seam, never left stale.
             repository.inboxChanges().collect {
                 publishMessages(repository.rcsMessages(conversationId, rcsHistoryCount))
+                refreshRcsOthers(conversationId)
+            }
+        }
+        viewModelScope.launch {
+            // Sender-evidence liveness (Garrett 2026-10-20): when a
+            // message load records (or retires) a peer/union refinement
+            // — including THIS chat's own loads above — the header and
+            // Chat Details re-derive immediately, no restart, no waiting
+            // for the next refresh tick.
+            repository.membershipChanges().collect {
+                refreshRcsOthers(conversationId)
             }
         }
         // Remote typing: read the transport's typing store — the same

@@ -4,6 +4,8 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.rcs.proto.RcsMessage
 import com.garrietta.relay.rcs.proto.RcsParticipant
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Sender-evidence membership refinement (Garrett 2026-10-20, the Dad
@@ -60,16 +62,34 @@ class MembershipRefinements {
      */
     private val unions = mutableMapOf<String, List<RefinedPeer>>()
 
+    /**
+     * Monotonic change counter, bumped on every record mutation.
+     * Surfaces that hold a DERIVED participant list (the open chat's
+     * header, Chat Details) collect this and re-derive through
+     * [refinedOthers] when it moves — a census that lands while the
+     * chat is open must reach the header without a restart (Garrett
+     * 2026-10-20: the union reached the inbox rows and the dump, but
+     * the open chat kept the four field-21 names it had snapshotted
+     * at init).
+     */
+    private val _changes = MutableStateFlow(0)
+    val changes: StateFlow<Int> = _changes
+
+    private fun bump() {
+        _changes.value += 1
+    }
+
     /** Records (or refreshes) the refined peer for [conversationId]. */
     @Synchronized
     fun record(conversationId: String, entry: RcsParticipant, peer: Participant) {
         refined[conversationId] = RefinedPeer(entry, peer)
+        bump()
     }
 
     /** Retires the refinement for [conversationId], if one is held. */
     @Synchronized
     fun clear(conversationId: String) {
-        refined.remove(conversationId)
+        if (refined.remove(conversationId) != null) bump()
     }
 
     @Synchronized
@@ -84,17 +104,20 @@ class MembershipRefinements {
     /** Records (or replaces) the sender-union additions for [conversationId]. */
     @Synchronized
     fun recordUnion(conversationId: String, additions: List<RefinedPeer>) {
+        val before = unions[conversationId].orEmpty()
+            .map { it.participant.address }
         if (additions.isEmpty()) {
             unions.remove(conversationId)
         } else {
             unions[conversationId] = additions
         }
+        if (before != additions.map { it.participant.address }) bump()
     }
 
     /** Retires the sender-union record for [conversationId], if held. */
     @Synchronized
     fun clearUnion(conversationId: String) {
-        unions.remove(conversationId)
+        if (unions.remove(conversationId) != null) bump()
     }
 
     @Synchronized
@@ -164,6 +187,25 @@ class MembershipRefinements {
         }
         return if (changed) out else rows
     }
+
+    /**
+     * THE single-row seam (Garrett 2026-10-20): one conversation row
+     * with every held refinement applied — the same [applyTo] pass the
+     * inbox list rides, narrowed to the one conversation a chat or
+     * details surface is showing. Chat-side membership reads go
+     * through here so a row that was mapped ON DEMAND (never stored,
+     * never passed through the refresh-time [applyTo]) still renders
+     * the refined membership, and a surface re-reading after a
+     * [changes] bump picks up a census that landed mid-session.
+     */
+    @Synchronized
+    fun refinedRow(row: Conversation): Conversation =
+        applyTo(listOf(row)).first()
+
+    /** The refined others of [row] — see [refinedRow]. */
+    @Synchronized
+    fun refinedOthers(row: Conversation): List<Participant> =
+        refinedRow(row).participants
 
     /** Number identity for row-level dedupe: digits, last 10. */
     private fun numberKey(address: String): String =

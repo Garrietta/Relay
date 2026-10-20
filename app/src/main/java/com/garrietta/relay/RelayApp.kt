@@ -243,9 +243,9 @@ class RelayApp : Application() {
             MessageNotifications.recordSkipped("chat open on screen")
             return
         }
-                val convTitle = repository.conversations.value
+                val convRow = repository.conversations.value
             .firstOrNull { msg.conversationId in it.allRcsIds() }
-            ?.displayName?.ifBlank { null } ?: "New message"
+        val convTitle = convRow?.displayName?.ifBlank { null } ?: "New message"
         val body = msg.body.ifBlank {
             when {
                 msg.media != null -> "\uD83D\uDCF7 Photo"
@@ -269,7 +269,13 @@ class RelayApp : Application() {
                 it.participantId.isNotEmpty() && it.participantId == msg.participantId
             } ?: parts.firstOrNull { !it.isMe }
             val number = sender?.number?.ifBlank { null }
-            val isGroup = parts.count { !it.isMe } > 1
+            // Group-ness from the stored row — the ONE refined
+            // membership every surface reads (Garrett 2026-10-20) —
+            // not a raw non-self count of the wire table, which counts
+            // stale entries and unflagged self duplicates (the Dad 1:1
+            // would read as a "group" here). The raw count remains
+            // only as the no-row-yet fallback.
+            val isGroup = convRow?.isGroup ?: (parts.count { !it.isMe } > 1)
             val contactName = number?.let {
                 runCatching { repository.resolveDisplayName(it) }.getOrNull()
             }?.takeIf { it.isNotBlank() && it != number }

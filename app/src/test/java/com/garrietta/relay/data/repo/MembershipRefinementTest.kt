@@ -445,6 +445,168 @@ class MembershipRefinementTest {
         assertTrue(out.isGroup)
     }
 
+    // ---------- the chat seam: refinedOthers (Garrett 2026-10-20) --
+    //
+    // The open chat and Chat Details read membership through
+    // MembershipRefinements.refinedOthers — the same refinement pass
+    // the inbox rows ride. Fixtures are his ACTUAL Diagnostics dump of
+    // 2026-10-20 (run #239): Game Night derivedOthers(8) there because
+    // 596 never sent; the earlier union fixture above had 596 sending
+    // once (9). Different evidence, different membership — that is
+    // the rule working, not a contradiction.
+
+    @Test
+    fun `game night dump census - chat seam reads eight, and a late census is not a stale snapshot`() {
+        val membership = deriveRcsMembership(
+            gameNightParts, gameNightF21, selfNums,
+            serverIsGroup = true, conversationName = "Game Night",
+        )
+        val row = rowFor("187", "Game Night", membership.others, group = true)
+        val refinements = MembershipRefinements()
+
+        // What the chat read BEFORE any census (the bug's snapshot):
+        // the raw field-21 four, through the very seam it now uses.
+        assertEquals(
+            listOf("+12197768195", "+16164142008", "+13179879200", "+12243152845"),
+            refinements.refinedOthers(row).map { it.address },
+        )
+
+        // The dump's census, verbatim: sent counts per pid (596, the
+        // one field-20 entry with no sent= line, never sends).
+        val sentCounts = mapOf(
+            "109" to 15, "190" to 37, "191" to 9,
+            "192" to 11, "194" to 13, "595" to 3, "597" to 12,
+        )
+        val byPid = gameNightParts.associateBy { it.participantId }
+        val pool = cleanedPool(gameNightParts)
+        val incoming = sentCounts.flatMap { (pid, n) -> List(n) { msg(pid) } }
+        val census = computeSenderCensus(
+            incoming, byPid, pool.map { it.participantId }.toSet(),
+        )
+        assertEquals(7, census.sentByPid.size)
+        assertTrue(census.unmatchedPids.isEmpty())
+
+        val additions = unionAdditionEntries(
+            pool, census.sentByPid.keys,
+            membership.others.map { it.participantId }.toSet(),
+        )
+        // Exactly the four evidenced bare numbers — 596 stays out.
+        assertEquals(
+            listOf("192", "194", "595", "597"),
+            additions.map { it.participantId },
+        )
+        refinements.recordUnion(
+            "187",
+            additions.map { e ->
+                MembershipRefinements.RefinedPeer(
+                    e,
+                    Participant(
+                        e.number,
+                        e.fullName.ifBlank { e.firstName }.ifBlank { e.number },
+                        null,
+                    ),
+                )
+            },
+        )
+
+        // The SAME row, re-read through the seam after the census
+        // landed (what the open chat does when the changes signal
+        // moves): all eight evidenced members, still a group — the
+        // header title and the details "8 members" read this list.
+        val refined = refinements.refinedOthers(row)
+        assertEquals(8, refined.size)
+        assertEquals(
+            setOf(
+                "+12197768195", "+16164142008", "+13179879200", "+12243152845",
+                "+12066051302", "+13233887100", "+16513347886", "+19899166349",
+            ),
+            refined.map { it.address }.toSet(),
+        )
+        assertTrue(refinements.refinedRow(row).isGroup)
+    }
+
+    @Test
+    fun `group 46 - chat seam keeps silent grace out`() {
+        val membership = deriveRcsMembership(
+            group46Parts, listOf("25", "67"), selfNums,
+            serverIsGroup = true, conversationName = "Dad, Haley Marietta",
+        )
+        val row = rowFor("46", "Dad, Haley", membership.others, group = true)
+        val refinements = MembershipRefinements()
+        // Census: only Dad and Haley ever send.
+        val pool = cleanedPool(group46Parts)
+        val additions = unionAdditionEntries(
+            pool, setOf("25", "67"),
+            membership.others.map { it.participantId }.toSet(),
+        )
+        refinements.recordUnion(
+            "46",
+            additions.map { e ->
+                MembershipRefinements.RefinedPeer(
+                    e, Participant(e.number, e.number, null),
+                )
+            },
+        )
+        val refined = refinements.refinedOthers(row)
+        assertEquals(2, refined.size)
+        assertFalse(refined.any { it.address == "+18122017121" })
+    }
+
+    @Test
+    fun `dad one-to-one - chat seam stays the single peer, never a group`() {
+        // The NO-F21 collapse shape: the derivation itself collapses
+        // to Dad; a sender-evidence peer record (19 incoming, all
+        // Dad) refines the provisional row to the same single person.
+        val dadParts = listOf(
+            gnMe,
+            RcsParticipant("25", "+17653182838", "Dad", "Dad", false),
+            RcsParticipant("74", "+18122017121", "Grace", "Grace Ambrose", false),
+            gnDupe,
+        )
+        val membership = deriveRcsMembership(
+            dadParts, emptyList(), selfNums,
+            serverIsGroup = false, conversationName = "Dad",
+        )
+        val refinements = MembershipRefinements()
+        val derivedRow = rowFor("34", "Dad", membership.others, group = false)
+        assertEquals(
+            listOf("+17653182838"),
+            refinements.refinedOthers(derivedRow).map { it.address },
+        )
+        refinements.record("34", dadEntry, dadPeer)
+        val refinedRow = refinements.refinedRow(provisionalRow())
+        assertEquals(listOf(dadPeer), refinedRow.participants)
+        assertFalse(refinedRow.isGroup)
+    }
+
+    @Test
+    fun `changes signal moves only when a record actually changes`() {
+        // The open chat re-derives on this signal: it must fire when
+        // evidence lands or retires, and stay quiet for no-op
+        // re-records (every governed load re-records its union).
+        val refinements = MembershipRefinements()
+        assertEquals(0, refinements.changes.value)
+        val extra = MembershipRefinements.RefinedPeer(
+            RcsParticipant("192", "+12066051302", "", "", false),
+            Participant("+12066051302", "+12066051302", null),
+        )
+        refinements.recordUnion("187", listOf(extra))
+        val afterRecord = refinements.changes.value
+        assertTrue(afterRecord > 0)
+        // Same additions re-recorded (the next load's census): quiet.
+        refinements.recordUnion("187", listOf(extra))
+        assertEquals(afterRecord, refinements.changes.value)
+        // Retirement fires; clearing nothing does not.
+        refinements.clearUnion("187")
+        assertTrue(refinements.changes.value > afterRecord)
+        val afterClear = refinements.changes.value
+        refinements.clearUnion("187")
+        refinements.clear("34")
+        assertEquals(afterClear, refinements.changes.value)
+        refinements.record("34", dadEntry, dadPeer)
+        assertTrue(refinements.changes.value > afterClear)
+    }
+
     @Test
     fun `census merges monotonically across loads`() {
         val a = SenderCensus(mapOf("190" to 3, "192" to 1), setOf("999"), 1)

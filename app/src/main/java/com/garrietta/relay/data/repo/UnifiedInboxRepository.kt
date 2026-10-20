@@ -1016,14 +1016,38 @@ class UnifiedInboxRepository(
         } ?: emptyList()
 
     /**
-     * Header-ready others for an RCS conversation: the row's STORED
-     * others — self already removed at mapping time (isMe flag plus
-     * every known self number — the server doesn't always flag every
-     * self entry, e.g. the GIRTH ghost), ghosts out, deduped. The word
-     * "Unknown" can never survive into the name list.
+     * Header-ready others for an RCS conversation: the row's
+     * REFINED others — self already removed at mapping time (isMe
+     * flag plus every known self number — the server doesn't always
+     * flag every self entry, e.g. the GIRTH ghost), ghosts out,
+     * deduped. The word "Unknown" can never survive into the name
+     * list.
+     *
+     * THE membership seam for chat surfaces (Garrett 2026-10-20): the
+     * row — stored OR mapped on demand by [storedConversationRow] —
+     * passes through [MembershipRefinements.refinedOthers], the same
+     * refinement pass the inbox rows ride. Before this, an on-demand
+     * row (a chat's first open, before any stored row existed) never
+     * saw the sender union at all, and a stored row's refinement only
+     * reached a chat that re-read AFTER the census landed — the open
+     * chat snapshotted the raw field-21 four at init and kept them
+     * (Game Night's header read four names while eight people were
+     * posting). Surfaces re-read this getter when [membershipChanges]
+     * moves, so a census landing mid-session reaches the header and
+     * Chat Details live.
      */
     suspend fun rcsOthers(conversationId: String): List<Participant> =
-        storedConversationRow(conversationId)?.participants ?: emptyList()
+        storedConversationRow(conversationId)
+            ?.let { membershipRefinements.refinedOthers(it) }
+            ?: emptyList()
+
+    /**
+     * Refinement change signal (see [MembershipRefinements.changes]):
+     * bumps whenever a peer/union record is recorded or retired, so
+     * an open chat can re-derive its participants through [rcsOthers]
+     * the moment sender evidence lands.
+     */
+    fun membershipChanges(): StateFlow<Int> = membershipRefinements.changes
 
     /**
      * The participant list of the inbox ROW for a conversation — the exact

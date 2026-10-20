@@ -7,12 +7,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
+import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.garrietta.relay.MainActivity
@@ -99,12 +97,26 @@ object MessageNotifications {
         )
     }
 
+    /**
+     * Posts an incoming-message notification, Google Messages style
+     * (Garrett 2026-10-19 22:00): for GROUP chats the MessagingStyle
+     * message carries the SENDER as a Person (name + photo), with the
+     * conversation title as the group header — not the generic icon +
+     * conversation-name-as-sender the old build showed. The sender's photo
+     * is clipped to their per-contact expressive M3E shape
+     * ([NotificationAvatar]); Mark as read + inline Reply actions included.
+     */
     fun showIncoming(
         context: Context,
-        sender: String,
+        conversationId: String,
+        messageId: String,
+        conversationTitle: String,
+        senderName: String,
+        senderNumber: String,
         body: String,
         timestamp: Long,
         photoUri: String? = null,
+        isGroup: Boolean = false,
     ) {
         // Android 13+: posting without the runtime grant throws. Record the
         // block (visible in Diagnostics) and no-op; never crash.
@@ -118,57 +130,77 @@ object MessageNotifications {
         }
         val pending = PendingIntent.getActivity(
             context,
-            0,
+            conversationId.hashCode(),
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        // Garrett 2026-10-19: notifications show the sender's contact photo
-        // (like Google Messages), not a generic person icon. Falls back to
-        // no large icon when there's genuinely no photo.
-        val photo = photoUri?.let { decodeContactPhoto(context, it) }
-        val person = Person.Builder()
-            .setName(sender)
-            .apply { photo?.let { setIcon(IconCompat.createWithBitmap(it)) } }
+        // Expressive-shape sender avatar (never the generic person icon):
+        // photo clipped to the contact's M3E shape, or the initial-letter
+        // avatar in the same shape when there's no photo.
+        val avatar = NotificationAvatar.shapedAvatar(
+            context,
+            photoUri,
+            shapeKey = senderNumber.ifBlank { senderName },
+            displayName = senderName,
+        )
+        val sender = Person.Builder()
+            .setName(senderName)
+            .apply { avatar?.let { setIcon(IconCompat.createWithBitmap(it)) } }
             .build()
+        val style = NotificationCompat.MessagingStyle(sender)
+            .addMessage(body, timestamp, sender)
+        if (isGroup) style.conversationTitle = conversationTitle
+        val notifId = conversationId.hashCode()
+        // Mark as read.
+        val markReadPending = PendingIntent.getBroadcast(
+            context,
+            notifId,
+            NotificationActionReceiver.intent(
+                context,
+                NotificationActionReceiver.ACTION_MARK_READ,
+                conversationId, notifId,
+            ),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // Inline reply (RemoteInput needs a MUTABLE PendingIntent).
+        val replyPending = PendingIntent.getBroadcast(
+            context,
+            notifId + 1,
+            NotificationActionReceiver.intent(
+                context,
+                NotificationActionReceiver.ACTION_REPLY,
+                conversationId, notifId,
+            ),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+        )
+        val replyAction = NotificationCompat.Action.Builder(
+            R.drawable.ic_notification,
+            "Reply",
+            replyPending,
+        ).addRemoteInput(
+            RemoteInput.Builder(NotificationActionReceiver.KEY_REPLY)
+                .setLabel("Reply")
+                .build(),
+        ).build()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .apply { photo?.let { setLargeIcon(it) } }
-            .setStyle(
-                NotificationCompat.MessagingStyle(person)
-                    .addMessage(body, timestamp, person)
-            )
+            .apply { avatar?.let { setLargeIcon(it) } }
+            .setStyle(style)
             .setContentIntent(pending)
+            .addAction(
+                R.drawable.ic_notification,
+                "Mark as read",
+                markReadPending,
+            )
+            .addAction(replyAction)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        manager.notify(sender.hashCode(), notification)
+        manager.notify(notifId, notification)
         lastPostedAt.set(System.currentTimeMillis())
-        lastPostedSender.set(sender)
+        lastPostedSender.set(if (isGroup) "$senderName ($conversationTitle)" else senderName)
         postedCount.incrementAndGet()
     }
 
-    /**
-     * Downsampled contact photo for the notification large icon / avatar.
-     * Null when there's no photo or it can't be decoded — callers fall back
-     * to the generic icon. Never throws.
-     */
-    private fun decodeContactPhoto(context: Context, uriString: String, maxPx: Int = 256): Bitmap? {
-        return try {
-            val uri = Uri.parse(uriString)
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, bounds)
-            }
-            val longest = maxOf(bounds.outWidth, bounds.outHeight)
-            if (longest <= 0) return null
-            val sample = (longest / maxPx).coerceAtLeast(1)
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, opts)
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
 }

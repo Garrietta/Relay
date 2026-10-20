@@ -35,6 +35,16 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import android.graphics.BitmapFactory
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -135,7 +145,6 @@ import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import com.garrietta.relay.ui.theme.senderBubbleColors
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -176,7 +185,12 @@ fun ChatScreen(
     val isTyping by viewModel.isTyping.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val chatContext = LocalContext.current
     val listState = rememberLazyListState()
+    // Fullscreen image pager (Garrett 2026-10-19 21:42): tapping ANY image
+    // opens a Google Photos-style pager across the conversation's images.
+    // The message id of the tapped image; null = pager closed.
+    var viewerMessageId by remember { mutableStateOf<Long?>(null) }
     // Composer collapse-back triggers (Garrett 2026-10-19: the expand worked
     // but "whenever i stop typing" it never collapsed back — nothing ever
     // cleared focus). Focus loss is the single driver of the collapse
@@ -395,6 +409,13 @@ fun ChatScreen(
                                     // ratio. Text bubbles keep the 0.8 cap.
                                     maxBubbleWidth = maxWidth * 0.66f,
                                     onShowReactions = { reactionDetail = it },
+                                    // Tapping an image opens the conversation
+                                    // image pager (Garrett 2026-10-19 21:42),
+                                    // landing on this image's page.
+                                    onOpenImage = { viewerMessageId = it.id },
+                                    onReact = { emoji ->
+                                        viewModel.sendReaction(message, emoji)
+                                    },
                                 )
                                 return@itemsIndexed
                             }
@@ -427,6 +448,9 @@ fun ChatScreen(
                                 maxBubbleWidth = maxBubbleWidth,
                                 onAvatarClick = { sender -> onOpenDetails(sender.address) },
                                 onShowReactions = { reactionDetail = it },
+                                onReact = { emoji ->
+                                    viewModel.sendReaction(message, emoji)
+                                },
                             )
                         }
                         }
@@ -435,14 +459,37 @@ fun ChatScreen(
                         sending = sending,
                         onSend = { viewModel.send(recipient, it) },
                         onAttachmentSoon = {
+                            // Voice messages stay stubbed (Garrett 2026-10-19:
+                            // the four picker options send for real now).
                             scope.launch {
-                                snackbarHostState.showSnackbar("Attachments are coming soon")
+                                snackbarHostState.showSnackbar("Voice messages are coming soon")
                             }
+                        },
+                        onAttach = { uri ->
+                            viewModel.sendAttachment(uri, chatContext.contentResolver)
                         },
                     )
                 }
             }
         }
+    }
+
+    // Fullscreen image pager (Garrett 2026-10-19 21:40/21:41/21:42):
+    // swipe left/right across the conversation's images, each page fills
+    // the screen edge-to-edge with its own pinch-zoom/pan. Opens on the
+    // tapped image's page; neighbors preload (beyondViewportPageCount).
+    val viewerId = viewerMessageId
+    if (viewerId != null) {
+        val imageMessages = remember(messages) {
+            messages.filter { it.media?.isImage == true }.sortedBy { it.date }
+        }
+        FullscreenImagePager(
+            images = imageMessages,
+            initialIndex = imageMessages.indexOfFirst { it.id == viewerId }
+                .coerceAtLeast(0),
+            loadMedia = { att -> viewModel.mediaBytes(att) },
+            onDismiss = { viewerMessageId = null },
+        )
     }
 
     // Who-reacted dialog (Garrett 2026-10-19): tapping an inline reaction
@@ -914,10 +961,15 @@ private fun MediaBubble(
     maxBubbleWidth: Dp,
     /** Tapping the reaction badge lists who reacted (Garrett 2026-10-19). */
     onShowReactions: (Message) -> Unit = {},
+    /** Tapping an image opens the conversation image pager (Garrett
+     * 2026-10-19 21:42). */
+    onOpenImage: (Message) -> Unit = {},
+    /** Long-press reaction send (Garrett 2026-10-19: reactions both ways). */
+    onReact: (String) -> Unit = {},
 ) {
     var bytes by remember(message.id) { mutableStateOf<ByteArray?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
-    var zoomed by remember(message.id) { mutableStateOf(false) }
+    var showReactMenu by remember(message.id) { mutableStateOf(false) }
     // Bumped on tap-to-retry so the loader below re-runs with a fresh key.
     var retryNonce by remember(message.id) { mutableStateOf(0) }
     val context = LocalContext.current
@@ -965,7 +1017,9 @@ private fun MediaBubble(
                             error = null
                             retryNonce++
                         } else if (bytes != null && media.isImage) {
-                            zoomed = true
+                            // Opens the conversation image pager on this
+                            // image's page (Garrett 2026-10-19 21:42).
+                            onOpenImage(message)
                         } else if (bytes != null) {
                             // Non-image attachment: open in the system
                             // viewer (Garrett 2026-10-19).
@@ -984,7 +1038,7 @@ private fun MediaBubble(
                             }
                         }
                     },
-                    onLongClick = { },
+                    onLongClick = { showReactMenu = true },
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -1094,6 +1148,34 @@ private fun MediaBubble(
                     )
                 }
             }
+            // Upload progress (Garrett 2026-10-19: attachment sending):
+            // the optimistic bubble carries the local bytes and a live
+            // progress scrim until the upload finishes.
+            val progress = message.uploadProgress
+            if (progress != null) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.45f)),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(16.dp),
+                    ) {
+                        LinearProgressIndicator(
+                            progress = { progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Uploading ${(progress * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
         }
             ReactionBadgeOverlay(message, onShowReactions)
         }
@@ -1120,33 +1202,34 @@ private fun MediaBubble(
         }
     }
 
-    if (zoomed) {
-        val b = bytes
-        if (b != null && media.isImage) {
-            Dialog(onDismissRequest = { zoomed = false }) {
-                ZoomableFullscreenImage(
-                    bytes = b,
-                    contentDescription = "Shared image fullscreen",
-                )
-            }
-        }
-    }
+    // Long-press reaction menu (Garrett 2026-10-19: reactions both ways).
+    ReactionPickerMenu(
+        expanded = showReactMenu,
+        onDismiss = { showReactMenu = false },
+        onReact = onReact,
+    )
 }
 
 /**
  * Fullscreen image viewer (Garrett 2026-10-19): pinch-to-zoom, pan while
  * zoomed, double-tap to toggle zoom — Google Photos / Messages style.
- * The image starts fit-to-screen at a legible size; zoom range 1x-5x with
- * a bouncy snap back to 1x on double-tap-out.
+ * The image FILLS the screen at rest (fit-to-screen, edge to edge — no
+ * floating margin box), and zooming expands across the whole display:
+ * the transform lives on a full-screen surface with NO clip, so the
+ * zoomed image is never cropped to the rest frame. [onZoomChanged] lets
+ * the host pager disable swipe-to-change while a page is zoomed (pan
+ * wins over page, standard behavior).
  */
 @Composable
 private fun ZoomableFullscreenImage(
     bytes: ByteArray,
     contentDescription: String,
     modifier: Modifier = Modifier,
+    onZoomChanged: (Boolean) -> Unit = {},
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    LaunchedEffect(scale) { onZoomChanged(scale > 1.01f) }
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         val newScale = (scale * zoomChange).coerceIn(1f, 5f)
         offset = if (newScale <= 1f) Offset.Zero else offset + panChange * newScale
@@ -1183,6 +1266,124 @@ private fun ZoomableFullscreenImage(
                     translationY = offset.y
                 },
         )
+    }
+}
+
+/**
+ * The conversation image pager (Garrett 2026-10-19 21:42): swipe
+ * left/right through the conversation's images, Google Photos style.
+ * The dialog uses usePlatformDefaultWidth = false so the viewer is the
+ * FULL screen (the old platform-default-width dialog was the small
+ * floating rectangle Garrett filmed, and its window bounds were what
+ * clipped the zoom). Each page is the same fill-screen + zoom/pan
+ * viewer; when the current page is zoomed the pager locks so the pan
+ * takes the gesture first.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FullscreenImagePager(
+    images: List<Message>,
+    initialIndex: Int,
+    loadMedia: suspend (RcsMediaAttachment) -> ByteArray,
+    onDismiss: () -> Unit,
+) {
+    if (images.isEmpty()) {
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        val pagerState = rememberPagerState(initialPage = initialIndex) { images.size }
+        var pageZoomed by remember { mutableStateOf(false) }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                userScrollEnabled = !pageZoomed,
+                beyondViewportPageCount = 1,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                val msg = images[page]
+                var bytes by remember(msg.id) { mutableStateOf<ByteArray?>(null) }
+                var loadFailed by remember(msg.id) { mutableStateOf(false) }
+                LaunchedEffect(msg.id) {
+                    val att = msg.media
+                    bytes = if (att == null) null
+                        else runCatching { loadMedia(att) }.getOrNull()
+                    if (bytes == null) loadFailed = true
+                }
+                val b = bytes
+                when {
+                    b != null -> ZoomableFullscreenImage(
+                        bytes = b,
+                        contentDescription = "Shared image fullscreen",
+                        onZoomChanged = { zoomed ->
+                            // Only the visible page drives the pager lock.
+                            if (page == pagerState.currentPage) pageZoomed = zoomed
+                        },
+                    )
+                    loadFailed -> Text(
+                        text = "Media unavailable",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color.White,
+                    )
+                    else -> SevenShapeLoadingIndicator(
+                        diameter = 40.dp,
+                        color = Color.White,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Long-press reaction picker (Garrett 2026-10-19: reactions both ways):
+ * the standard reaction set plus Select (multi-select stays one long-press
+ * away — the menu replaces the bare selection toggle on text bubbles).
+ */
+@Composable
+private fun ReactionPickerMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onReact: (String) -> Unit,
+    onSelect: (() -> Unit)? = null,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = {
+                Row {
+                    ReactionEmojis.forEach { emoji ->
+                        Text(
+                            text = emoji,
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier
+                                .clickable {
+                                    onReact(emoji)
+                                    onDismiss()
+                                }
+                                .padding(6.dp),
+                        )
+                    }
+                }
+            },
+            onClick = {},
+        )
+        onSelect?.let { select ->
+            DropdownMenuItem(
+                text = { Text("Select") },
+                onClick = {
+                    select()
+                    onDismiss()
+                },
+            )
+        }
     }
 }
 
@@ -1271,6 +1472,8 @@ private fun MessageBubble(
     onAvatarClick: (Participant) -> Unit = {},
     /** Tapping the reaction badge lists who reacted (Garrett 2026-10-19). */
     onShowReactions: (Message) -> Unit = {},
+    /** Long-press reaction send (Garrett 2026-10-19: reactions both ways). */
+    onReact: (String) -> Unit = {},
 ) {
     val squareness by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
@@ -1345,6 +1548,7 @@ private fun MessageBubble(
                             onToggleSelect = onToggleSelect,
                             body = message.body,
                             maxBubbleWidth = maxBubbleWidth,
+                            onReact = onReact,
                         )
                         ReactionBadgeOverlay(message, onShowReactions)
                     }
@@ -1364,6 +1568,7 @@ private fun MessageBubble(
                     onToggleSelect = onToggleSelect,
                     body = message.body,
                     maxBubbleWidth = maxBubbleWidth,
+                    onReact = onReact,
                 )
                 ReactionBadgeOverlay(message, onShowReactions)
             }
@@ -1475,7 +1680,10 @@ private fun BubbleBox(
     onToggleSelect: () -> Unit,
     body: String,
     maxBubbleWidth: Dp = Dp.Unspecified,
+    /** Long-press reaction send (Garrett 2026-10-19: reactions both ways). */
+    onReact: (String) -> Unit = {},
 ) {
+    var showReactMenu by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .widthIn(max = maxBubbleWidth)
@@ -1483,7 +1691,9 @@ private fun BubbleBox(
             .background(containerColor)
             .combinedClickable(
                 onClick = { if (selectionActive) onToggleSelect() },
-                onLongClick = onToggleSelect,
+                // Long-press opens the reaction picker (Google Messages
+                // style); Select stays one tap away inside the menu.
+                onLongClick = { showReactMenu = true },
             )
             // Uniform interior padding on every bubble.
             .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -1494,6 +1704,12 @@ private fun BubbleBox(
             color = contentColor,
         )
     }
+    ReactionPickerMenu(
+        expanded = showReactMenu,
+        onDismiss = { showReactMenu = false },
+        onReact = onReact,
+        onSelect = onToggleSelect,
+    )
 }
 
 /** Corner radii for the soft resting bubble shape. */
@@ -1566,12 +1782,17 @@ private fun Composer(
     sending: Boolean,
     onSend: (String) -> Unit,
     onAttachmentSoon: () -> Unit,
+    /** Fires when an attachment picker returns a content URI (Garrett
+     * 2026-10-19: [+] finally SENDS — the "coming soon" toast is gone for
+     * the four picker options; only the voice-mic stub keeps it). */
+    onAttach: (Uri) -> Unit = {},
 ) {
     var text by remember { mutableStateOf("") }
     var showAttachSheet by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && !sending
     val focusManager = LocalFocusManager.current
+    val context = LocalContext.current
     // Focus animation (Garrett's directive): tapping the text field expands
     // the inner Message pill to the full width of the outer pill while the
     // attachment buttons fade+shrink away. They spring back WHENEVER the
@@ -1582,6 +1803,38 @@ private fun Composer(
     val expanded = focused
     val scope = rememberCoroutineScope()
     val sendPop = remember { Animatable(1f) }
+    // Attachment pickers (Garrett 2026-10-19): the [+] sheet's four
+    // options launch real pickers. GIFs come through as image/gif and are
+    // sent with their bytes untouched (never transcoded to JPEG), so they
+    // stay animated end to end.
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(onAttach) }
+    val gifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(onAttach) }
+    val filesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(onAttach) }
+    // Camera: TakePicture writes into a pre-created FileProvider URI. The
+    // file lives in cacheDir/shared/, covered by file_paths.xml's
+    // cache-path entry (the same staging dir attachment VIEWING uses).
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { ok -> if (ok) cameraUri?.let(onAttach) }
+    fun launchCamera() {
+        val file = java.io.File(
+            context.cacheDir,
+            "shared/capture-${System.currentTimeMillis()}.jpg",
+        )
+        file.parentFile?.mkdirs()
+        val uri = FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file,
+        )
+        cameraUri = uri
+        cameraLauncher.launch(uri)
+    }
 
     fun submit() {
         if (!canSend) return
@@ -1783,9 +2036,16 @@ private fun Composer(
     if (showAttachSheet) {
         AttachmentSheet(
             onDismiss = { showAttachSheet = false },
-            onPick = {
+            onPick = { label ->
                 showAttachSheet = false
-                onAttachmentSoon()
+                // The four picker options send for real now (Garrett
+                // 2026-10-19: "attachments are coming soon" is gone).
+                when (label) {
+                    "Gallery" -> galleryLauncher.launch("image/*")
+                    "GIF" -> gifLauncher.launch("image/gif")
+                    "Camera" -> launchCamera()
+                    "Files" -> filesLauncher.launch("*/*")
+                }
             },
         )
     }

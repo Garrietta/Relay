@@ -277,6 +277,37 @@ fun encodeDownloadAttachmentRequest(
     ),
 )
 
+/**
+ * Media UPLOAD request metadata (Garrett 2026-10-19: attachment sending),
+ * sent base64 in the x-goog-upload-metadata header of POST .../upload —
+ * the mirror of [encodeDownloadAttachmentRequest]. Structure mirrors the
+ * download request: field 1 = upload info {1:mimeType, 2:fileName,
+ * 3:plaintext size}, field 2 = AuthMessage. The encrypted bytes are the
+ * POST body; the response carries the assigned media ID.
+ *
+ * NOTE: the upload-side metadata schema is the least-verified part of the
+ * media flow (the download side is device-proven). Any server rejection
+ * surfaces verbatim through the transport's error path so it can be
+ * diagnosed from the device.
+ */
+fun encodeUploadMediaRequest(
+    auth: AuthMessage,
+    mimeType: String,
+    fileName: String,
+    plainSize: Long,
+): ByteArray = ProtoCodec.encode(
+    mapOf(
+        1 to FieldVal.Msg(
+            mapOf(
+                1 to FieldVal.Str(mimeType),
+                2 to FieldVal.Str(fileName),
+                3 to FieldVal.Varint(plainSize),
+            ),
+        ),
+        2 to FieldVal.Msg(authMessageFields(auth)),
+    ),
+)
+
 // ---------- outgoing envelope ----------
 
 /** Binary OutgoingRPCData{1:requestID, 2:action, 5:encryptedProtoData, 6:sessionID}. */
@@ -478,6 +509,78 @@ fun encodeSendMessageRequest(
     )
 }
 
+/**
+ * An uploaded media blob ready to send (Garrett 2026-10-19: attachment
+ * sending). [mediaId] comes from the upload endpoint; [decryptionKey] is the
+ * sender-generated 32-byte AES key the bytes were encrypted with — it
+ * travels in the message itself (MediaContent field 11), which is how the
+ * recipient decrypts. [wireSize] is the ENCRYPTED size actually uploaded
+ * (MediaContent field 5 carries the encrypted wire size — see the download
+ * size-accounting note in RcsTransport).
+ */
+data class UploadedMediaRef(
+    val mediaId: String,
+    val decryptionKey: ByteArray,
+    val mimeType: String,
+    val fileName: String,
+    val wireSize: Long,
+    val width: Long = 0,
+    val height: Long = 0,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is UploadedMediaRef && mediaId == other.mediaId &&
+            decryptionKey.contentEquals(other.decryptionKey)
+    override fun hashCode(): Int = mediaId.hashCode()
+}
+
+/**
+ * client.SendMessageRequest carrying a media attachment (Garrett
+ * 2026-10-19): same envelope as [encodeSendMessageRequest], but the
+ * MessageInfo carries field 3 = MediaContent instead of field 2 text.
+ * MediaContent fields (conversations.proto): format=1, mediaID=2,
+ * mediaName=4, size=5, dimensions=6{1:width, 2:height}, decryptionKey=11,
+ * mimeType=14. An optional caption rides in the standard text content.
+ */
+fun encodeSendMediaMessageRequest(
+    conversationId: String,
+    tmpId: String,
+    media: UploadedMediaRef,
+    caption: String = "",
+    forceRcs: Boolean = true,
+): ByteArray {
+    val mediaContent = mutableMapOf<Int, FieldVal>(
+        1 to FieldVal.Varint(1),
+        2 to FieldVal.Str(media.mediaId),
+        4 to FieldVal.Str(media.fileName),
+        5 to FieldVal.Varint(media.wireSize),
+        11 to FieldVal.Bytes(media.decryptionKey),
+        14 to FieldVal.Str(media.mimeType),
+    )
+    if (media.width > 0 && media.height > 0) {
+        mediaContent[6] = FieldVal.Msg(
+            mapOf(
+                1 to FieldVal.Varint(media.width),
+                2 to FieldVal.Varint(media.height),
+            ),
+        )
+    }
+    val payload = mapOf(
+        1 to FieldVal.Str(tmpId),
+        6 to FieldVal.Msg(mapOf(1 to FieldVal.Msg(mapOf(1 to FieldVal.Str(caption))))),
+        7 to FieldVal.Str(conversationId),
+        10 to FieldVal.Rep(
+            listOf(FieldVal.Msg(mapOf(3 to FieldVal.Msg(mediaContent)))),
+        ),
+    )
+    return ProtoCodec.encode(
+        mapOf(
+            2 to FieldVal.Str(conversationId),
+            3 to FieldVal.Msg(payload),
+            5 to FieldVal.Str(tmpId),
+            6 to FieldVal.Varint(if (forceRcs) 1 else 0),
+        ),
+    )
+}
 /** client.MessageReadRequest{2:conversationID, 3:messageID} as binary protobuf. */
 fun encodeMessageReadRequest(conversationId: String, messageId: String): ByteArray =
     ProtoCodec.encode(

@@ -522,6 +522,152 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Sends an attachment picked in the composer [+] sheet (Garrett
+     * 2026-10-19: attachment SENDING, finally). Reads the bytes, shows an
+     * optimistic bubble carrying the local bytes + live upload progress,
+     * uploads through the RCS file-transfer path, then sends the media
+     * message; the server echo replaces the optimistic bubble via tmpId.
+     * Failures remove the optimistic bubble and surface the VERBATIM
+     * reason. Attachments are RCS-only (SMS/MMS sending goes through the
+     * SMS transport, which Relay never drives as the default SMS app).
+     */
+    fun sendAttachment(uri: android.net.Uri, resolver: android.content.ContentResolver) {
+        if (_sending.value) return
+        _sending.value = true
+        _sendError.value = null
+        viewModelScope.launch {
+            var tmpId: String? = null
+            try {
+                val mime = resolver.getType(uri) ?: "application/octet-stream"
+                var name = "attachment"
+                resolver.query(uri, null, null, null, null)?.use { c ->
+                    val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (i >= 0 && c.moveToFirst()) name = c.getString(i) ?: name
+                }
+                val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw IllegalStateException("media unavailable: couldn't read the selected file")
+                if (bytes.isEmpty()) {
+                    throw IllegalStateException("media unavailable: the selected file is empty")
+                }
+                val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
+                    runCatching { repository.rcsConversationFor(address) }
+                        .getOrNull()?.also { rcsConversationId = it }
+                } else null
+                if (convId == null || repository.rcsConversationType(convId) == 1) {
+                    _sendError.value = "Attachments need an RCS chat"
+                    return@launch
+                }
+                // Image dimensions for the MediaContent dimensions field.
+                var w = 0L
+                var h = 0L
+                if (mime.startsWith("image/")) {
+                    val opts = android.graphics.BitmapFactory.Options().apply {
+                        inJustDecodeBounds = true
+                    }
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    if (opts.outWidth > 0 && opts.outHeight > 0) {
+                        w = opts.outWidth.toLong(); h = opts.outHeight.toLong()
+                    }
+                }
+                tmpId = java.util.UUID.randomUUID().toString()
+                val optimistic = Message(
+                    id = -System.currentTimeMillis(),
+                    threadId = threadId,
+                    address = "",
+                    body = "",
+                    date = System.currentTimeMillis(),
+                    isOutgoing = true,
+                    isMms = false,
+                    read = true,
+                    tmpId = tmpId,
+                    media = com.garrietta.relay.rcs.proto.RcsMediaAttachment(
+                        mediaId = "",
+                        mimeType = mime,
+                        decryptionKey = byteArrayOf(),
+                        width = w,
+                        height = h,
+                        size = bytes.size.toLong(),
+                        inlineData = bytes,
+                    ),
+                    deliveryStatus = DeliveryStatus.SENDING,
+                    uploadProgress = 0f,
+                )
+                pendingOptimistic[tmpId] = optimistic
+                setMessages((_messages.value + optimistic).sortedByDescending { it.date })
+                val uploaded = repository.uploadRcsMedia(bytes, mime, name) { p ->
+                    val cur = _messages.value
+                    val idx = cur.indexOfFirst { it.tmpId == tmpId }
+                    if (idx >= 0) {
+                        setMessages(cur.toMutableList().apply {
+                            this[idx] = this[idx].copy(uploadProgress = p)
+                        })
+                    }
+                }
+                when (val outcome = repository.sendRcsMedia(
+                    convId, uploaded.copy(width = w, height = h), "", tmpId,
+                )) {
+                    is UnifiedInboxRepository.RcsSendOutcome.Sent -> {
+                        val cur = _messages.value
+                        val idx = cur.indexOfFirst { it.tmpId == tmpId }
+                        if (idx >= 0) {
+                            setMessages(cur.toMutableList().apply {
+                                this[idx] = this[idx].copy(uploadProgress = null)
+                            })
+                        }
+                        pendingOptimistic[tmpId]?.let {
+                            pendingOptimistic[tmpId] = it.copy(uploadProgress = null)
+                        }
+                    }
+                    is UnifiedInboxRepository.RcsSendOutcome.Failed -> {
+                        pendingOptimistic.remove(tmpId)
+                        setMessages(_messages.value.filterNot { it.tmpId == tmpId })
+                        _sendError.value = outcome.reason
+                    }
+                }
+            } catch (e: Exception) {
+                if (tmpId != null) {
+                    pendingOptimistic.remove(tmpId)
+                    setMessages(_messages.value.filterNot { it.tmpId == tmpId })
+                }
+                _sendError.value = e.message ?: "Attachment send failed"
+            } finally {
+                _sending.value = false
+            }
+        }
+    }
+
+    /**
+     * Sends an emoji reaction to [target] (Garrett 2026-10-19: reactions
+     * both ways). The paired web protocol's observed wire format for
+     * incoming reactions is the formatted text `{emoji} to "{snippet}"`
+     * (see [parseReaction]) — so a reaction is sent as exactly that text
+     * through the normal routed RCS send; the echo reconciles through
+     * [attachReactions] and renders as an inline badge. RCS chats only.
+     */
+    fun sendReaction(target: Message, emoji: String) {
+        viewModelScope.launch {
+            val convId = rcsConversationId ?: if (repository.isRcsPaired() && address.isNotBlank()) {
+                runCatching { repository.rcsConversationFor(address) }
+                    .getOrNull()?.also { rcsConversationId = it }
+            } else null
+            if (convId == null || repository.rcsConversationType(convId) == 1) {
+                _sendError.value = "Reactions need an RCS chat"
+                return@launch
+            }
+            val snippet = when {
+                target.body.isNotBlank() -> {
+                    val trimmed = target.body.trim()
+                    if (trimmed.length > 50) trimmed.take(50).trimEnd() + "…"
+                    else trimmed
+                }
+                target.media?.isImage == true -> "Photo"
+                else -> return@launch
+            }
+            send(address, "$emoji to \"$snippet\"")
+        }
+    }
+
     private suspend fun sendSms(recipient: String, body: String) {
         when (val result = repository.smsTransport.sendMessage(recipient, body)) {
             is SendResult.Sent -> {
@@ -565,8 +711,9 @@ class ChatViewModel(
     }
 }
 
-/** The standard reaction set (Google Messages' picker). */
-private val ReactionEmojis = listOf("❤️", "👍", "👎", "😂", "😮", "😢", "😡")
+/** The standard reaction set (Google Messages' picker). Shared with the
+ * chat UI's long-press reaction picker. */
+val ReactionEmojis = listOf("❤️", "👍", "👎", "😂", "😮", "😢", "😡")
 
 /** iPhone tapback verb forms → emoji, as Google Messages renders them. */
 private val TapbackVerbs = linkedMapOf(
@@ -588,19 +735,31 @@ private val TapbackVerbs = linkedMapOf(
  */
 fun parseReaction(body: String): Pair<String, String>? {
     val t = body.trim()
+    // NORMALIZE (Garrett 2026-10-19 21:38: reactions still not rendering):
+    // the wire sends the heart both as U+2764 U+FE0F ("❤️", what's in
+    // ReactionEmojis) and as BARE U+2764 — and the old matcher compared the
+    // raw body, so the bare form never matched and no badge ever appeared.
+    // Strip variation selectors (U+FE0F) from BOTH sides before matching,
+    // and accept straight or curly quotes around the snippet.
+    val norm = t.replace("\uFE0F", "")
     for (emoji in ReactionEmojis) {
-        val prefix = "$emoji to \""
-        if (t.startsWith(prefix) && t.endsWith("\"") && t.length > prefix.length + 1) {
-            return emoji to t.removePrefix(prefix).dropLast(1)
+        val normEmoji = emoji.replace("\uFE0F", "")
+        for (open in listOf("\"", "“")) {
+            val close = if (open == "\"") "\"" else "”"
+            val prefix = "$normEmoji to $open"
+            if (norm.startsWith(prefix) && norm.endsWith(close) && norm.length > prefix.length + 1) {
+                return emoji to norm.removePrefix(prefix).dropLast(1)
+            }
         }
     }
     for ((verb, emoji) in TapbackVerbs) {
         for (open in listOf("\"", "“")) {
+            val close = if (open == "\"") "\"" else "”"
             val prefix = "$verb $open"
-            if (t.startsWith(prefix) && (t.endsWith("\"") || t.endsWith("”")) &&
-                t.length > prefix.length + 1
+            if (norm.startsWith(prefix) && norm.endsWith(close) &&
+                norm.length > prefix.length + 1
             ) {
-                return emoji to t.removePrefix(prefix).dropLast(1)
+                return emoji to norm.removePrefix(prefix).dropLast(1)
             }
         }
     }

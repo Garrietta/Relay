@@ -911,21 +911,53 @@ private fun videoCallNumber(context: Context, number: String) {
 }
 
 /**
- * Contact info: ACTION_VIEW on the PhoneLookup URI is resolved by the
- * Contacts app itself — no READ_CONTACTS needed on our side for this.
+ * Contact info (Garrett 2026-10-19 21:54 bug fix): the old code fired
+ * ACTION_VIEW on the PhoneLookup FILTER URI — a bare implicit intent any
+ * app can claim, and on his phone PokeDaisy (an unrelated emulator) had
+ * claimed it, so "Contact info" opened that instead of Contacts. Fixed
+ * per his steer: resolve the number on OUR side to the concrete
+ * ContactsContract contact and ACTION_VIEW that contact's own URI
+ * (content://com.android.contacts/contacts/<id>); if the person has no
+ * contact entry, fall back to the Contacts app main list
+ * (ContactsContract.Contacts.CONTENT_URI). Never a filter/intent an
+ * arbitrary app can intercept.
  */
 private fun openSystemContact(context: Context, number: String) {
     if (number.isBlank()) return
     runCatching {
-        val uri = Uri.withAppendedPath(
-            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
-            Uri.encode(number.trim()),
-        )
+        val target = resolveContactViewUri(context, number.trim())
+            ?: ContactsContract.Contacts.CONTENT_URI
         context.startActivity(
-            Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(Intent.ACTION_VIEW, target).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
 }
+
+/** Resolves a phone number to that contact's view URI, or null. */
+private fun resolveContactViewUri(context: Context, number: String): Uri? = runCatching {
+    val filter = Uri.withAppendedPath(
+        ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+        Uri.encode(number),
+    )
+    context.contentResolver.query(
+        filter,
+        arrayOf(
+            ContactsContract.PhoneLookup._ID,
+            ContactsContract.PhoneLookup.LOOKUP_KEY,
+        ),
+        null, null, null,
+    )?.use { c ->
+        if (c.moveToFirst()) {
+            val id = c.getLong(0)
+            val key = c.getString(1)
+            return@runCatching ContactsContract.Contacts.getLookupUri(id, key)
+                ?: Uri.withAppendedPath(
+                    ContactsContract.Contacts.CONTENT_URI, id.toString(),
+                )
+        }
+    }
+    null
+}.getOrNull()
 
 /** Notifications row: straight to the system per-app notification settings. */
 private fun openNotificationSettings(context: Context) {

@@ -82,6 +82,13 @@ data class Message(
      * inline badges, Google Messages style, instead of stray text bubbles.
      */
     val reactions: List<MessageReaction> = emptyList(),
+    /**
+     * Upload progress (0..1) while THIS outgoing attachment is uploading
+     * (Garrett 2026-10-19: the attachment-send path). Null once the upload
+     * finishes and the send is handed to the server — the bubble then shows
+     * the normal SENDING delivery state until the echo lands.
+     */
+    val uploadProgress: Float? = null,
 )
 
 /**

@@ -99,7 +99,10 @@ dependencies {
     implementation("androidx.palette:palette:1.0.0")
 
     // Coil: load contact profile photos (content:// photo URIs) into avatars.
+    // coil-gif: animated GIF decoding (ImageDecoderDecoder / GifDecoder) so
+    // received GIFs animate in bubbles and the fullscreen viewer.
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-gif:2.7.0")
 
     // RCS transport: clean-room Messages-for-web protocol client (branch rcs).
     implementation("com.google.protobuf:protobuf-javalite:3.25.5")

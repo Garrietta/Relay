@@ -524,6 +524,36 @@ class UnifiedInboxRepository(
         }
     }
 
+    /**
+     * Uploads an attachment through the RCS file-transfer path with
+     * progress callbacks (Garrett 2026-10-19: the [+] picker finally sends
+     * for real). Returns the [UploadedMediaRef] for the send step.
+     */
+    suspend fun uploadRcsMedia(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String,
+        onProgress: (Float) -> Unit,
+    ): com.garrietta.relay.rcs.proto.UploadedMediaRef =
+        rcsTransport.uploadMedia(bytes, mimeType, fileName, onProgress)
+
+    /** Sends an uploaded media attachment; the echo reconciles via tmpId. */
+    suspend fun sendRcsMedia(
+        conversationId: String,
+        media: com.garrietta.relay.rcs.proto.UploadedMediaRef,
+        caption: String,
+        tmpId: String,
+    ): RcsSendOutcome {
+        return try {
+            rcsTransport.sendRcsMedia(conversationId, media, caption, tmpId)
+            rcsTransport.refreshConversations()
+            refresh()
+            RcsSendOutcome.Sent(tmpId)
+        } catch (e: Exception) {
+            RcsSendOutcome.Failed(e.message ?: "RCS send failed")
+        }
+    }
+
     /** Marks the latest incoming RCS message read (mirrors markThreadRead). */
     suspend fun markRcsRead(conversationId: String) = withContext(Dispatchers.IO) {
         val latest = synchronized(rcsServerMessages) {

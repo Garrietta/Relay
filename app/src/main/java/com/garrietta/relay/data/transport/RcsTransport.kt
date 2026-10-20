@@ -19,7 +19,10 @@ import com.garrietta.relay.data.model.isUnknownSenderGhostName
 import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.encodeDevice
 import com.garrietta.relay.rcs.proto.encodeDownloadAttachmentRequest
+import com.garrietta.relay.rcs.proto.encodeUploadMediaRequest
+import com.garrietta.relay.rcs.proto.UploadedMediaRef
 import com.garrietta.relay.rcs.media.aesGcmDecryptChunked
+import com.garrietta.relay.rcs.media.aesGcmEncryptChunked
 import com.garrietta.relay.rcs.session.AuthData
 import com.garrietta.relay.rcs.session.AuthStore
 import com.garrietta.relay.rcs.session.RcsSession
@@ -821,6 +824,139 @@ class RcsTransport(context: Context) : Transport {
         RelayApi.client().newBuilder()
             .readTimeout(120, TimeUnit.SECONDS)
             .build()
+
+    /**
+     * Uploads an attachment through the RCS file-transfer path (Garrett
+     * 2026-10-19: the attachment SEND path — the [+] picker finally sends
+     * for real). The bytes are AES-GCM chunked-encrypted with a fresh
+     * 32-byte sender key (exact inverse of [aesGcmDecryptChunked]), POSTed
+     * to .../upload with the upload metadata in the x-goog-upload-metadata
+     * header (the mirror of the download flow), and the returned media ID
+     * goes into the message's MediaContent (the key rides in the message
+     * itself, field 11, so the recipient can decrypt).
+     *
+     * [onProgress] reports 0..1 as the encrypted body streams. Throws with
+     * a VERBATIM reason on failure — the upload-side metadata schema is
+     * best-effort (mirrored from the device-proven download side); any
+     * server rejection surfaces here for diagnosis from the device.
+     */
+    suspend fun uploadMedia(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String,
+        onProgress: (Float) -> Unit = {},
+    ): UploadedMediaRef = withContext(Dispatchers.IO) {
+        val token = session.currentAuth()?.tachyonToken
+            ?: throw IllegalStateException("media unavailable: not paired")
+        val key = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        val encrypted = aesGcmEncryptChunked(key, bytes)
+        val meta = java.util.Base64.getEncoder().encodeToString(
+            encodeUploadMediaRequest(
+                AuthMessage(
+                    requestId = java.util.UUID.randomUUID().toString(),
+                    network = "GDitto",
+                    tachyonToken = token,
+                ),
+                mimeType.ifBlank { "application/octet-stream" },
+                fileName.ifBlank { "attachment" },
+                bytes.size.toLong(),
+            ),
+        )
+        val body = object : okhttp3.RequestBody() {
+            override fun contentType(): okhttp3.MediaType? =
+                okhttp3.MediaType.parse("application/octet-stream")
+            override fun contentLength(): Long = encrypted.size.toLong()
+            override fun writeTo(sink: okio.BufferedSink) {
+                val total = encrypted.size.toLong()
+                var written = 0L
+                val chunk = 65536
+                while (written < total) {
+                    val end = minOf(written + chunk, total).toInt()
+                    sink.write(encrypted, written.toInt(), end - written.toInt())
+                    written = end.toLong()
+                    onProgress((written.toFloat() / total).coerceIn(0f, 1f))
+                }
+            }
+        }
+        val req = okhttp3.Request.Builder()
+            .url(UPLOAD_URL)
+            .post(body)
+            .header("x-goog-upload-metadata", meta)
+            .header("User-Agent", MEDIA_UA)
+            .header("accept", "*/*")
+            .header("origin", "https://messages.google.com")
+            .header("referer", "https://messages.google.com/")
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-dest", "empty")
+            .build()
+        val respText = try {
+            mediaHttpClient().newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException(
+                        "media unavailable: upload HTTP ${resp.code} ${text.take(300)}",
+                    )
+                }
+                text
+            }
+        } catch (e: IllegalStateException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "media unavailable: upload failed (${e.message ?: e.javaClass.simpleName})",
+            )
+        }
+        val mediaId = parseUploadMediaId(respText)
+            ?: throw IllegalStateException(
+                "media unavailable: upload returned no media ID (${respText.take(200)})",
+            )
+        // Seed the v3 download cache with the plaintext: the server echo
+        // of this message carries the same mediaId, and MediaBubble renders
+        // it from cache instantly instead of re-downloading our own upload.
+        val cacheDir = java.io.File(appContext.cacheDir, "rcs_media/v3")
+        cacheDir.mkdirs()
+        java.io.File(cacheDir, mediaId.sanitizeFileName()).writeBytes(bytes)
+        UploadedMediaRef(
+            mediaId = mediaId,
+            decryptionKey = key,
+            mimeType = mimeType,
+            fileName = fileName,
+            wireSize = encrypted.size.toLong(),
+        )
+    }
+
+    /**
+     * Extracts the media ID from the upload endpoint's response. The exact
+     * response shape is unverified — try JSON fields, a bare ID string,
+     * then a binary-proto string field — and report verbatim when none
+     * matches.
+     */
+    private fun parseUploadMediaId(respText: String): String? {
+        val t = respText.trim()
+        if (t.isEmpty()) return null
+        // JSON: {"mediaId": "..."} / {"media_id": "..."} / {"id": "..."}.
+        val jsonHit = Regex("\"(?:mediaId|media_id|id)\"\\s*:\\s*\"([^\"]+)\"")
+            .find(t)?.groupValues?.get(1)
+        if (!jsonHit.isNullOrEmpty()) return jsonHit
+        // Bare ID on one line.
+        if (!t.contains("\n") && t.length in 8..256 && t.all { it.isLetterOrDigit() || it in "-_." }) {
+            return t
+        }
+        return null
+    }
+
+    /**
+     * Sends an already-uploaded media attachment via the RCS session.
+     * Returns the tmpId for echo correlation; throws RcsException with the
+     * verbatim failure reason.
+     */
+    suspend fun sendRcsMedia(
+        conversationId: String,
+        media: UploadedMediaRef,
+        caption: String = "",
+        tmpId: String = java.util.UUID.randomUUID().toString(),
+    ): String = session.sendMedia(conversationId, media, caption, tmpId)
 
     /**
      * A body that ended before its declared length. Carries the partial

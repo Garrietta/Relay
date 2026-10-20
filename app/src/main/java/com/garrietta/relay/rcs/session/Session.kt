@@ -19,6 +19,8 @@ import com.garrietta.relay.rcs.proto.Rpc
 import com.garrietta.relay.rcs.proto.buildGaiaOutgoingPblite
 import com.garrietta.relay.rcs.proto.encodeOutgoingRpcDataUnencrypted
 import com.garrietta.relay.rcs.proto.UpdateEvent
+import com.garrietta.relay.rcs.proto.UploadedMediaRef
+import com.garrietta.relay.rcs.proto.encodeSendMediaMessageRequest
 import com.garrietta.relay.rcs.proto.buildOutgoingRpcPblite
 import com.garrietta.relay.rcs.proto.decodeConversationsResponse
 import com.garrietta.relay.rcs.proto.decodeLongPollBody
@@ -231,6 +233,25 @@ class RcsSession(context: Context) {
         val inner = rpc(
             Rpc.ACTION_SEND_MESSAGE,
             encodeSendMessageRequest(conversationId, tmpId, text, forceRcs = true),
+        )
+        val status = decodeSendMessageStatus(inner)
+        if (status != 1) throw RcsException("SendMessage status=$status")
+        return tmpId
+    }
+
+    /**
+     * Sends an uploaded media attachment. Returns the tmpID used for echo
+     * correlation. Throws on transport failure.
+     */
+    suspend fun sendMedia(
+        conversationId: String,
+        media: UploadedMediaRef,
+        caption: String = "",
+        tmpId: String = UUID.randomUUID().toString(),
+    ): String {
+        val inner = rpc(
+            Rpc.ACTION_SEND_MESSAGE,
+            encodeSendMediaMessageRequest(conversationId, tmpId, media, caption, forceRcs = true),
         )
         val status = decodeSendMessageStatus(inner)
         if (status != 1) throw RcsException("SendMessage status=$status")

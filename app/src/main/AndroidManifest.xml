@@ -63,6 +63,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Notification actions (Garrett 2026-10-19 22:00): Mark as read +
+             inline Reply on incoming-message notifications. Explicit intents
+             only, never exported. -->
+        <receiver
+            android:name=".notifications.NotificationActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>
 

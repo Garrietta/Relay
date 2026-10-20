@@ -90,6 +90,23 @@ class RelayApp : Application() {
         // Settings (no logcat access from his device).
         CrashReporter.install(this)
         MessageNotifications.ensureChannel(this)
+        // GIF support (Garrett 2026-10-19: "gifs should be usable and
+        // visible too"): register Coil's animated-GIF decoders on the
+        // app-wide ImageLoader so received GIFs animate inline in bubbles
+        // AND in the fullscreen viewer. ImageDecoderDecoder (API 28+)
+        // animates via ImageDecoder; GifDecoder covers API 26-27
+        // (minSdk 26). coil-gif is in app/build.gradle.kts.
+        coil.Coil.setImageLoader(
+            coil.ImageLoader.Builder(this)
+                .components {
+                    if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        add(coil.decode.ImageDecoderDecoder.Factory())
+                    } else {
+                        add(coil.gif.GifDecoder.Factory())
+                    }
+                }
+                .build(),
+        )
         // Fresh avatar-shape variety on every cold start (Garrett: shapes
         // "maybe even changing shape on each startup").
         AvatarShapeAssigner.reshuffle()
@@ -187,27 +204,52 @@ class RelayApp : Application() {
             MessageNotifications.recordSkipped("chat open on screen")
             return
         }
-        val name = repository.conversations.value
+                val convTitle = repository.conversations.value
             .firstOrNull { it.rcsConversationId == msg.conversationId }
             ?.displayName?.ifBlank { null } ?: "New message"
         val body = msg.body.ifBlank {
             if (msg.media != null) "\uD83D\uDCF7 Photo" else "New message"
         }
-        // Garrett 2026-10-19: notifications carry the sender's contact photo
-        // (like Google Messages). The sender is the message's participant in
-        // a group, else the non-self participant in a 1:1.
-        val senderNumber = runCatching {
-            rcsTransport.currentRcsConversations()
+        // Group notifications identify the SENDER (Garrett 2026-10-19
+        // 22:00, Google Messages parity): the message's participant (via
+        // participantId) is resolved to their contact name + photo; the
+        // conversation title is the group header, not the sender. The old
+        // code passed the conversation title AS the sender, so a group
+        // notification just showed "GIRTH / Good boy" with a generic icon.
+        val senderInfo = runCatching {
+            val parts = rcsTransport.currentRcsConversations()
                 .firstOrNull { it.id == msg.conversationId }
-                ?.participants
-                ?.let { parts ->
-                    (parts.firstOrNull { it.participantId.isNotEmpty() && it.participantId == msg.participantId }
-                        ?: parts.firstOrNull { !it.isMe })
-                        ?.number?.ifBlank { null }
-                }
-        }.getOrNull()
-        val photoUri = senderNumber?.let { runCatching { repository.resolvePhotoUri(it) }.getOrNull() }
-        MessageNotifications.showIncoming(this@RelayApp, name, body, msg.timestampMs, photoUri)
+                ?.participants.orEmpty()
+            val sender = parts.firstOrNull {
+                it.participantId.isNotEmpty() && it.participantId == msg.participantId
+            } ?: parts.firstOrNull { !it.isMe }
+            val number = sender?.number?.ifBlank { null }
+            val isGroup = parts.count { !it.isMe } > 1
+            val contactName = number?.let {
+                runCatching { repository.resolveDisplayName(it) }.getOrNull()
+            }?.takeIf { it.isNotBlank() && it != number }
+            val name = contactName
+                ?: sender?.fullName?.ifBlank { null }
+                ?: number
+                ?: "Unknown sender"
+            Triple(name, number ?: "", isGroup)
+        }.getOrNull() ?: Triple("Unknown sender", "", false)
+        val (senderName, senderNumber, isGroup) = senderInfo
+        val photoUri = senderNumber.ifBlank { null }?.let {
+            runCatching { repository.resolvePhotoUri(it) }.getOrNull()
+        }
+        MessageNotifications.showIncoming(
+            context = this@RelayApp,
+            conversationId = msg.conversationId,
+            messageId = msg.id,
+            conversationTitle = convTitle,
+            senderName = senderName,
+            senderNumber = senderNumber,
+            body = body,
+            timestamp = msg.timestampMs,
+            photoUri = photoUri,
+            isGroup = isGroup,
+        )
         // Garrett 2026-10-19: a posted notification FORCES the RCS refresh
         // (the same one the Diagnostics Refresh button does) so the inbox
         // and chat panes pick the message up — notification and UI stay

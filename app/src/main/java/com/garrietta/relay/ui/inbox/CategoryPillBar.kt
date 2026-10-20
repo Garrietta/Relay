@@ -10,11 +10,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -34,31 +33,29 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
 import com.garrietta.relay.data.repo.ChatCategory
 import com.garrietta.relay.ui.motion.RelaySprings
 import kotlin.math.roundToInt
 
 /**
- * The inbox category bar — Garrett's 2026-10-19 directive, refined 2026-10-19
- * evening: SEPARATE chips with spacing between them (his music-app
- * reference), each morphing WITHIN its own padded slot so the selected oval
- * can never overlap its neighbors. The end chips (All first, Unknown last)
- * are ALWAYS half-oval outward (20dp = h/2) with the middle-chip radius on
- * the inward edge — whether selected or not. Middle chips are rounded
- * rectangles with the reference radius (10dp = 0.25h, measured pixel-to-pixel
- * on his music-app screenshots). When a chip is SELECTED it morphs into a
- * full 20dp stadium oval and pops (scale + z-order), bouncy.
+ * The inbox category bar — Garrett 2026-10-19 21:45 directive (supersedes
+ * the #125/#127 squeeze-to-fit rule): SEPARATE chips with spacing between
+ * them, and EVERY chip is IDENTICAL in size at ALL times. Selection never
+ * changes a chip's width — the selected state is SHAPE + COLOR ONLY,
+ * morphing within the same fixed slot. Adding a category INSERTS a new
+ * same-size chip in order and pushes later chips (Unknown always last)
+ * right; when the chips exceed the bar's width the bar SCROLLS
+ * horizontally — no squeezing, no compact text, no per-chip width changes,
+ * ever.
  *
- * Unselected, the chips sit as the spaced strip; selected, the tapped chip
- * blooms into the floating oval inside its own slot. The morph fires the
- * frame the tap lands (RelaySprings bouncy).
+ * Geometry kept: 40dp height, 8dp gaps, 10dp middle radius (0.25h measured
+ * on his music-app screenshots), end chips (All first, Unknown last)
+ * ALWAYS half-oval (20dp = h/2) outward with the 10dp radius on the inward
+ * edge, selected morphs to the full 20dp stadium. Corner radii are clamped
+ * >= 0 against the bouncy spring's overshoot (the #122 crash).
  *
  * Segments: "All" first (always), then the user's custom categories in
- * their Settings order, then the built-in Unknown tab last. Equal widths
- * while they fit (2 = halves, 3 = thirds, ...); beyond a readable width the
- * bar scrolls with fixed-width segments. Shown when at least one custom
- * category exists or the Unknown tab is on.
+ * their Settings order, then the built-in Unknown tab last.
  *
  * [selectedId]: null = "All".
  */
@@ -79,70 +76,55 @@ fun CategoryPillBar(
     val count = segmentIds.size
     val selectedIndex = segmentIds.indexOf(selectedId).takeIf { it >= 0 } ?: 0
 
-    // BoxWithConstraints is measurement only — it draws nothing. The chips
-    // themselves are the bar.
-    BoxWithConstraints(
+    val density = LocalDensity.current
+    val scrollState = rememberScrollState()
+
+    // Keep the selected chip on screen: scroll so the selected chip's slot
+    // starts at the leading edge (clamped to the scroll range).
+    LaunchedEffect(selectedIndex, count) {
+        val chipPx = with(density) { (ChipWidth + ChipGap).toPx() }
+        val target = (selectedIndex * chipPx).roundToInt().coerceAtLeast(0)
+        scrollState.animateScrollTo(
+            target.coerceAtMost(scrollState.maxValue),
+            RelaySprings.bouncy(),
+        )
+    }
+
+    Row(
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 4.dp)
-            .height(40.dp),
+            .height(40.dp)
+            .fillMaxWidth()
+            .horizontalScroll(scrollState),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ChipGap),
     ) {
-        val density = LocalDensity.current
-        val containerWPx = with(density) { maxWidth.toPx() }
-        // Squeeze rule (Garrett 2026-10-19 evening): up to 5 chips total
-        // (All + customs + Unknown) always fit without scrolling — text
-        // shrinks to make room. Horizontal scroll only kicks in at 6+.
-        val fillMode = count <= 5
-        // Compact text when squeezing 4-5 chips in.
-        val compact = fillMode && count >= 4
-        val scrollState = rememberScrollState()
-
-        // Keep the selected chip on screen in scroll mode.
-        LaunchedEffect(selectedIndex, fillMode) {
-            if (!fillMode) {
-                val chipPx = with(density) { 120.dp.toPx() }
-                val target = (selectedIndex * chipPx - containerWPx / 2 + chipPx / 2)
-                    .roundToInt().coerceAtLeast(0)
-                scrollState.animateScrollTo(target, RelaySprings.bouncy())
-            }
-        }
-
-        // Tighter inter-chip gaps (music-app reference, Garrett 2026-10-19
-        // evening): 8dp, not 10dp. Each chip still morphs WITHIN its own
-        // slot, so the selected oval's pop-out scale can never reach its
-        // neighbors.
-        Row(
-            modifier = if (fillMode) Modifier.fillMaxSize()
-            else Modifier.fillMaxSize().horizontalScroll(scrollState),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            segmentIds.forEachIndexed { index, id ->
-                val isFirst = index == 0
-                val isLast = index == count - 1
-                ChocolateSegment(
-                    name = segmentNames[index],
-                    selected = index == selectedIndex,
-                    isFirst = isFirst,
-                    isLast = isLast,
-                    compact = compact,
-                    onClick = { onSelect(id) },
-                    modifier = (if (fillMode) Modifier.weight(1f) else Modifier.width(120.dp))
-                        .fillMaxHeight()
-                        // The selected oval pops within its own slot, drawn
-                        // over the gaps (never over neighbors).
-                        .zIndex(if (index == selectedIndex) 1f else 0f),
-                )
-            }
+        segmentIds.forEachIndexed { index, id ->
+            ChocolateSegment(
+                name = segmentNames[index],
+                selected = index == selectedIndex,
+                isFirst = index == 0,
+                isLast = index == count - 1,
+                onClick = { onSelect(id) },
+                modifier = Modifier
+                    .width(ChipWidth)
+                    .fillMaxHeight(),
+            )
         }
     }
 }
 
+/** Fixed chip geometry: one width for every chip, forever. */
+private val ChipWidth = 96.dp
+private val ChipGap = 8.dp
+
 /**
- * One chocolate-bar segment. Unselected middles are rounded rectangles with
- * a slight corner radius (Garrett 2026-10-19 evening: match the music-app
- * reference — NOT sharp rectangles); unselected end caps are half-oval
- * outward with the same slight radius on the inward edge. On selection the
- * segment morphs to a FULL oval, fills, and scales up within its own slot.
+ * One chocolate-bar segment. Unselected middles are rounded rectangles at
+ * the reference radius (10dp); unselected end caps are half-oval outward
+ * (20dp) with 10dp on the inward edge. Selection morphs to the full 20dp
+ * stadium and fills with the dynamic accent — SHAPE + COLOR ONLY, no
+ * scale, no width change: the chip is pixel-identical in size whether
+ * selected or not.
  */
 @Composable
 private fun RowScope.ChocolateSegment(
@@ -150,27 +132,17 @@ private fun RowScope.ChocolateSegment(
     selected: Boolean,
     isFirst: Boolean,
     isLast: Boolean,
-    compact: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Selection morph 0->1 on the bouncy spring; every corner lerps from
-    // its tiled value to the full 26dp oval.
+    // its tiled value to the full 20dp oval. Clamped so the spring's
+    // overshoot can never drive a corner radius negative (the #122 crash).
     val sel by animateFloatAsState(
         targetValue = if (selected) 1f else 0f,
         animationSpec = RelaySprings.bouncy(),
         label = "chocSel",
     )
-    // CRASH GUARD (Garrett 2026-10-19 evening: IllegalArgumentException
-    // "Corner size in Px can't be negative"): the bouncy spring overshoots
-    // below 0 / above 1 mid-animation. Clamp the morph factor so no animated
-    // corner radius can ever go negative.
-    // Unselected middle chips are rounded rectangles with the reference
-    // radius (music-app screenshots, Garrett 2026-10-19 evening): measured
-    // 0.21-0.27 of chip height pixel-to-pixel -> 10dp at the 40dp bar height.
-    // End caps keep the half-oval outward edge (20dp = h/2) and take the same
-    // 10dp radius on the inward edge. Selection morphs everything to the full
-    // 20dp stadium oval.
     val selC = sel.coerceIn(0f, 1f)
     fun corner(outwardRounded: Boolean): androidx.compose.ui.unit.Dp {
         val base = if (outwardRounded) 20f else 10f
@@ -190,7 +162,8 @@ private fun RowScope.ChocolateSegment(
         animationSpec = tween(180),
         label = "chocBg",
     )
-    // Tactile press scale composes with the selected pop-out scale.
+    // Tactile press feedback only — a shrink, never a grow, so it can never
+    // overlap a neighbor. Selection itself does not scale.
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
@@ -198,12 +171,11 @@ private fun RowScope.ChocolateSegment(
         animationSpec = RelaySprings.bouncy(),
         label = "chocPress",
     )
-    val popScale = 1f + 0.08f * selC
     Box(
         modifier = modifier
             .graphicsLayer {
-                scaleX = popScale * pressScale
-                scaleY = popScale * pressScale
+                scaleX = pressScale
+                scaleY = pressScale
             }
             .clip(shape)
             .background(bgColor)
@@ -216,26 +188,18 @@ private fun RowScope.ChocolateSegment(
     ) {
         Text(
             text = name,
-            style = if (compact) MaterialTheme.typography.titleSmall
-            else MaterialTheme.typography.titleMedium,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            // IDENTICAL typography for every state (Garrett 2026-10-19
+            // 21:45): only color distinguishes the selected chip, so the
+            // text metrics — and therefore the chip — can never differ.
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Medium,
             color = if (selected)
                 MaterialTheme.colorScheme.onPrimaryContainer
             else
                 MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            // Snugger horizontal padding (music-app reference, Garrett
-            // 2026-10-19 evening): the selected stadium hugs its text
-            // (measured 0.15h -> 6dp); unselected keeps 8dp (4dp when
-            // squeezing 4-5 chips).
-            modifier = Modifier.padding(
-                horizontal = when {
-                    selected -> 6.dp
-                    compact -> 4.dp
-                    else -> 8.dp
-                },
-            ),
+            modifier = Modifier.padding(horizontal = 8.dp),
         )
     }
 }

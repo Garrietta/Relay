@@ -87,13 +87,27 @@ private fun zigzagPlacements(n: Int): List<Placement> =
         Placement(x, y, 0.42f - i * 0.015f)
     }
 
-/** Airiness factor (Garrett 2026-10-19): larger counts get slightly
- * smaller avatars so the cluster fills the 1:1 square without ever
- * feeling cramped — larger scale for 2, smaller as counts rise. */
+/** Airiness factor (Garrett 2026-10-19, corrected 21:37): the overlap
+ * amount VARIES by participant count — more participants = tighter overlap
+ * (smaller avatars) so the cluster stays airy inside the 1:1 box; fewer
+ * participants = looser overlap. Deterministic per conversation. */
 private fun countScale(n: Int): Float = when {
     n <= 3 -> 1f
-    n == 4 -> 0.95f
-    else -> 0.9f
+    n == 4 -> 0.92f
+    else -> 0.84f
+}
+
+/**
+ * Spread factor (Garrett 2026-10-19, 21:37): small clusters loosen
+ * outward, large clusters pull tighter toward center — applied to each
+ * placement's offset from the box center BEFORE the 1:1 clamp. Combined
+ * with [countScale] this makes 3-person clusters breathe and 5+ clusters
+ * tuck together.
+ */
+private fun spreadScale(n: Int): Float = when {
+    n <= 3 -> 1.07f
+    n == 4 -> 1f
+    else -> 0.93f
 }
 /** Deterministic slight rotation per member (±11°) — the scattered feel. */
 private fun memberRotation(address: String): Float {
@@ -122,6 +136,7 @@ fun GroupAvatarCluster(
     val remaining = members.size - shown.size
     val placements = remember(pattern, shown.size) {
         val air = countScale(shown.size)
+        val spread = spreadScale(shown.size)
         when (pattern) {
             GroupPattern.SPIRAL -> spiralPlacements(shown.size)
             GroupPattern.GRID -> gridPlacements(shown.size)
@@ -129,14 +144,14 @@ fun GroupAvatarCluster(
         }.map { p ->
             // 1:1 BOUND RULE (Garrett 2026-10-19): the whole cluster must
             // fill exactly the square a single avatar occupies — scale for
-            // airiness, then clamp every placement so no avatar spills
-            // outside the box.
+            // airiness, spread per participant count, then clamp every
+            // placement so no avatar spills outside the box.
             val sizeFrac = p.sizeFrac * air
             val half = sizeFrac / 2f
             p.copy(
                 sizeFrac = sizeFrac,
-                xFrac = p.xFrac.coerceIn(half, 1f - half),
-                yFrac = p.yFrac.coerceIn(half, 1f - half),
+                xFrac = (0.5f + (p.xFrac - 0.5f) * spread).coerceIn(half, 1f - half),
+                yFrac = (0.5f + (p.yFrac - 0.5f) * spread).coerceIn(half, 1f - half),
             )
         }
     }
@@ -214,13 +229,14 @@ private fun TwoAvatarOverlap(
     // Diagonal direction (↘ or ↙), deterministic per conversation.
     val flipX = (h and 1) == 1
     // Deterministic jitter ±0.02 around the diagonal slots; centers are
-    // clamped to [0.375, 0.625] so with the 0.375 half-size the avatars
-    // never cross the box edges.
+    // clamped to [0.36, 0.64] (Garrett 2026-10-19 21:37: LOOSER overlap for
+    // 2-person chats — a wider diagonal spread than the n>=3 clusters) so
+    // with the 0.375 half-size the avatars never cross the box edges.
     fun jitter(shift: Int): Float = (((h ushr shift) and 255) / 255f) * 0.04f - 0.02f
-    val axC = (0.375f + jitter(1)).coerceIn(0.375f, 0.625f)
-    val ayC = (0.375f + jitter(9)).coerceIn(0.375f, 0.625f)
-    val bxC = (0.625f + jitter(17)).coerceIn(0.375f, 0.625f)
-    val byC = (0.625f + jitter(25)).coerceIn(0.375f, 0.625f)
+    val axC = (0.36f + jitter(1)).coerceIn(0.36f, 0.64f)
+    val ayC = (0.36f + jitter(9)).coerceIn(0.36f, 0.64f)
+    val bxC = (0.64f + jitter(17)).coerceIn(0.36f, 0.64f)
+    val byC = (0.64f + jitter(25)).coerceIn(0.36f, 0.64f)
     val ax = if (flipX) 1f - axC else axC
     val bx = if (flipX) 1f - bxC else bxC
     val aOnTop = ((h ushr 5) and 1) == 1

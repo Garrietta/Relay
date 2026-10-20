@@ -51,6 +51,18 @@
             android:name=".rcs.service.RcsService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />
+
+        <!-- Attachment viewing (Garrett 2026-10-19): share downloaded
+             attachments with the system viewer via ACTION_VIEW. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
 

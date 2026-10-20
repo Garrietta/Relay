@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths for attachment viewing: downloaded attachments are
+     staged under cache/shared/ and opened with ACTION_VIEW. -->
+<paths>
+    <cache-path name="shared_files" path="shared/" />
+</paths>

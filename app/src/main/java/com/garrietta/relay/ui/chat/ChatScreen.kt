@@ -90,6 +90,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -127,10 +128,18 @@ import com.garrietta.relay.ui.theme.SevenShapeLoadingIndicator
 import com.garrietta.relay.ui.theme.WavyBlobShape
 import com.garrietta.relay.ui.theme.rememberContactChatScheme
 import com.garrietta.relay.ui.theme.senderBubbleColors
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.webkit.MimeTypeMap
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -870,6 +879,8 @@ private fun MediaBubble(
     var zoomed by remember(message.id) { mutableStateOf(false) }
     // Bumped on tap-to-retry so the loader below re-runs with a fresh key.
     var retryNonce by remember(message.id) { mutableStateOf(0) }
+    val context = LocalContext.current
+    val ioScope = rememberCoroutineScope()
 
     LaunchedEffect(message.id, retryNonce) {
         if (bytes == null && error == null) {
@@ -911,7 +922,25 @@ private fun MediaBubble(
                             // truncations first).
                             error = null
                             retryNonce++
-                        } else if (bytes != null && media.isImage) zoomed = true
+                        } else if (bytes != null && media.isImage) {
+                            zoomed = true
+                        } else if (bytes != null) {
+                            // Non-image attachment: open in the system
+                            // viewer (Garrett 2026-10-19).
+                            val fileBytes = bytes!!
+                            ioScope.launch(Dispatchers.IO) {
+                                val failure = openAttachmentInSystemViewer(
+                                    context, media, fileBytes,
+                                )
+                                if (failure != null) {
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(
+                                            context, failure, Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
+                                }
+                            }
+                        }
                     },
                     onLongClick = { },
                 ),
@@ -979,7 +1008,8 @@ private fun MediaBubble(
                     }
                 }
                 b != null -> {
-                    // Non-image file: labeled tile.
+                    // Non-image file: labeled tile. Tap opens it in the
+                    // system viewer (Garrett 2026-10-19).
                     Row(
                         modifier = Modifier.padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1004,6 +1034,11 @@ private fun MediaBubble(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
+                            Text(
+                                text = "Tap to open",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
                         }
                     }
                 }
@@ -1104,6 +1139,44 @@ private fun ZoomableFullscreenImage(
                     translationY = offset.y
                 },
         )
+    }
+}
+
+/**
+ * Attachment viewing (Garrett 2026-10-19): stages the attachment bytes in
+ * the shared cache dir and opens them with the system viewer (ACTION_VIEW
+ * through FileProvider, no hardcoded app — PDFs, docs, audio, video open
+ * in his default apps). Returns null on success, or a user-facing error.
+ */
+private fun openAttachmentInSystemViewer(
+    context: Context,
+    media: RcsMediaAttachment,
+    bytes: ByteArray,
+): String? {
+    return try {
+        val ext = MimeTypeMap.getSingleton()
+            .getExtensionFromMimeType(media.mimeType)?.ifBlank { null } ?: "bin"
+        val safeId = media.mediaId.ifBlank { media.hashCode().toString() }
+            .replace(Regex("[^A-Za-z0-9._-]"), "_").take(64).ifBlank { "file" }
+        val dir = java.io.File(context.cacheDir, "shared").apply { mkdirs() }
+        val file = java.io.File(dir, "attachment_${safeId}.$ext")
+        if (!file.exists()) file.writeBytes(bytes)
+        val uri: Uri = FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file,
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, media.mimeType.ifBlank { "*/*" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(intent, "Open attachment").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
+        null
+    } catch (e: android.content.ActivityNotFoundException) {
+        "No app installed can open this file type (${media.mimeType.ifBlank { "unknown" }})"
+    } catch (e: Exception) {
+        "Couldn't open attachment: ${e.message ?: e.javaClass.simpleName}"
     }
 }
 

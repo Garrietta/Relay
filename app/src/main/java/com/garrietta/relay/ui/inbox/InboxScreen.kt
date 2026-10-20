@@ -135,8 +135,26 @@ fun InboxScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // One scroll state per category: switching categories starts the new
     // list at the top, and the header-collapse + bottom-bar effects below
-    // re-key on it.
-    val listState = remember(selectedCategoryId) { LazyListState() }
+    // re-key on it. EXCEPT on return from a chat: the state is then
+    // constructed from the ViewModel's one-shot restore point, so the
+    // list sits at the exact pre-chat scroll position on the first frame
+    // (Garrett 2026-10-20) — which also puts the tapped row exactly
+    // where the reverse avatar morph expects to land.
+    val listState = remember(selectedCategoryId) {
+        val restore = viewModel.consumeChatExitScroll(selectedCategoryId)
+        if (restore != null) LazyListState(restore.first, restore.second) else LazyListState()
+    }
+    // Every chat entry point funnels through here so the scroll position
+    // is captured BEFORE the chat opens, whichever surface opened it
+    // (row tap or a search-popup result).
+    val openChat: (Conversation) -> Unit = { conversation ->
+        viewModel.saveChatExitScroll(
+            selectedCategoryId,
+            listState.firstVisibleItemIndex,
+            listState.firstVisibleItemScrollOffset,
+        )
+        onOpenChat(conversation)
+    }
     // Search lives behind the bottom-right expressive button; tapping it
     // opens the shared top-center search popup (see ConversationSearchPopup
     // below). The button also CLOSES the popup: it stays visible above the
@@ -318,7 +336,7 @@ fun InboxScreen(
                                         ConversationRow(
                                             conversation = conversation,
                                             isSelected = conversation.threadId == selectedThreadId,
-                                            onClick = { onOpenChat(conversation) },
+                                            onClick = { openChat(conversation) },
                                             onMarkRead = {
                                                 if (conversation.unread) viewModel.markRead(conversation.threadIds)
                                                 else viewModel.markUnread(conversation.threadIds)
@@ -330,7 +348,7 @@ fun InboxScreen(
                                     ConversationRow(
                                         conversation = conversation,
                                         isSelected = conversation.threadId == selectedThreadId,
-                                        onClick = { onOpenChat(conversation) },
+                                        onClick = { openChat(conversation) },
                                         onMarkRead = {
                                             if (conversation.unread) viewModel.markRead(conversation.threadIds)
                                             else viewModel.markUnread(conversation.threadIds)
@@ -366,7 +384,7 @@ fun InboxScreen(
                     onOpenChat = { conversation ->
                         searchOpen = false
                         viewModel.setQuery("")
-                        onOpenChat(conversation)
+                        openChat(conversation)
                     },
                 )
             }
@@ -994,8 +1012,8 @@ private fun ConversationRow(
 private fun Avatar(conversation: Conversation, pressed: Boolean) {
     // Shape-as-state: the blob morphs tighter while pressed, with a bouncy
     // press scale — the avatar feels alive under the finger. The avatar
-    // shared-morphs on push (motionSharedAvatar); on pop the morph is
-    // disabled so nothing draws above the incoming inbox — message content
+    // shared-morphs in BOTH directions (motionSharedAvatar): up into the
+    // chat header on open, back into this row on exit — message content
     // carries no shared modifiers, preserving the #45 text-ghosting fix.
     val pressScale by animateFloatAsState(
         targetValue = if (pressed) 0.9f else 1f,
@@ -1021,10 +1039,18 @@ private fun Avatar(conversation: Conversation, pressed: Boolean) {
                 conversationKey = conversation.rcsConversationId
                     ?: "tel:${conversation.threadId}",
                 boxSize = 60.dp,
-                modifier = Modifier.graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
-                },
+                // Same shared-avatar morph as 1:1 rows (Garrett
+                // 2026-10-20: ONE picture-movement animation for every
+                // chat, group or not) — the whole cluster travels as one
+                // element into the group header cluster, and back on exit.
+                modifier = Modifier
+                    .motionSharedAvatar(
+                        SharedElementKeys.avatar(conversation.threadId),
+                    )
+                    .graphicsLayer {
+                        scaleX = pressScale
+                        scaleY = pressScale
+                    },
             )
         } else {
             // Overlay-clip fix (Garrett 2026-10-19: the avatar "bugs" at its

@@ -87,6 +87,7 @@ import com.garrietta.relay.ui.inbox.InboxScreen
 import com.garrietta.relay.ui.inbox.InboxViewModel
 import com.garrietta.relay.ui.motion.LocalAnimatedVisibilityScope
 import com.garrietta.relay.ui.motion.LocalNavForward
+import com.garrietta.relay.ui.motion.LocalSharedElementsEnabled
 import com.garrietta.relay.ui.motion.LocalSharedTransitionScope
 import com.garrietta.relay.ui.motion.MotionKind
 import com.garrietta.relay.ui.motion.RelaySprings
@@ -209,13 +210,15 @@ class MainActivity : ComponentActivity() {
         }
         // #45 regression fix: after a pop transition finishes, restore
         // navForward to true. If we leave it false, the settled inbox keeps
-        // its shared-element modifiers INACTIVE (LocalNavForward=false), so
-        // the next push's outgoing row never registers its shared bounds —
-        // silently killing the avatar morph. The delay exceeds BACKWARD's
-        // 400ms total; any new navigation cancels it via the backStack key.
+        // its CONTAINER shared-bounds modifiers INACTIVE
+        // (LocalNavForward=false), so the next push's outgoing row never
+        // registers its shared bounds — silently killing the container
+        // morph. (The avatar morph ignores this flag now: it runs in both
+        // directions.) The delay exceeds the spring-based BACKWARD's
+        // settle time; any new navigation cancels it via the backStack key.
         LaunchedEffect(backStack.last()) {
             if (!navForward) {
-                delay(550)
+                delay(900)
                 navForward = true
             }
         }
@@ -249,15 +252,15 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(
                     LocalSharedTransitionScope provides this@SharedTransitionLayout,
                     LocalAnimatedVisibilityScope provides this@AnimatedContent,
-                    // Container shared-element morphs run on push only. On pop
-                    // the shared bounds are disabled so the exiting chat fades
-                    // and settles within its own bounds — nothing from the chat
-                    // may draw above the incoming inbox (the transition
-                    // overlay renders above both destinations, so a morphing
-                    // avatar would flash over the "New conversation" pill).
-                    // The exiting screen sits UNDER the incoming inbox from
-                    // the first frame: avatars move immediately to the layer
-                    // under the new-chat button layer, no flash.
+                    // Container shared-element morphs run on push only
+                    // (LocalNavForward=false on pop disables the CONTAINER
+                    // bounds). The AVATAR morph ignores the flag and runs in
+                    // both directions — the exact reverse on exit (Garrett
+                    // 2026-10-20). Its landing target is guaranteed by the
+                    // inbox scroll restore point: the list is back at its
+                    // pre-chat position on the first pop frame, so the
+                    // avatar lands on its row instead of flashing in the
+                    // overlay (the 2026-10-19 pop-flash root cause).
                     LocalNavForward provides navForward,
                 ) {
                     when (screen) {
@@ -472,6 +475,15 @@ class MainActivity : ComponentActivity() {
                         ) { convo ->
                             CompositionLocalProvider(
                                 LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                                // No shared elements in the detail pane: the
+                                // list rows register under the inbox's own
+                                // internal category-swap scope, so a chat
+                                // registered here is one-sided and renders
+                                // in the transition overlay during the
+                                // crossfade — the two-pane flash. Pure
+                                // crossfade instead (Garrett 2026-10-20).
+                                LocalNavForward provides false,
+                                LocalSharedElementsEnabled provides false,
                             ) {
                                 if (convo == null) {
                                     ConversationPlaceholder()

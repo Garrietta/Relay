@@ -22,8 +22,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -181,28 +179,29 @@ private fun buildTransforms(reducedMotion: Boolean): Map<MotionKind, ContentTran
 
         put(
             MotionKind.BACKWARD,
-            // Pop: the exiting screen fades and settles down WITHIN its
-            // bounds — no horizontal slide, so its content can never sweep
-            // across the incoming destination. The scale is a short TWEEN,
-            // never a spring: a bouncy scaleOut overshoots and settles back,
-            // which reads as the exiting content flashing/flickering once
-            // (diagnosed 2026-10-19 from his exit-flash report). The inbox
-            // fades in beneath it. Nothing from the exiting screen may draw
-            // in the transition overlay on pop (see motionSharedAvatar) —
-            // the exiting screen sits UNDER the incoming inbox from the
-            // first frame, so avatars can never flash above the incoming
-            // "New conversation" pill.
-            fadeIn(
-                tween(
-                    M3Duration.FADE_IN,
-                    easing = M3Easing.EmphasizedDecelerate,
-                ),
-            ) togetherWith
-                (fadeOut(tween(180, easing = M3Easing.Standard)) +
-                    scaleOut(
-                        tween(220, easing = M3Easing.EmphasizedAccelerate),
-                        targetScale = 0.97f,
-                    )),
+            // Pop = the EXACT geometric mirror of FORWARD (Garrett
+            // 2026-10-20): every horizontal offset is negated and the very
+            // same specs are reused, so each screen retraces the path it
+            // took in — the returning inbox slides in from the -travel
+            // side it exited to, and the chat slides out to the +travel
+            // side it entered from, on the identical bouncy spring and
+            // fade tokens. No scale settle, no different animation: the
+            // exit IS the entrance played in reverse. The avatar
+            // shared-element morph (motionSharedAvatar) likewise runs in
+            // both directions now; its old pop-flash was rooted in the
+            // inbox returning at scroll position 0 (a wrong/absent morph
+            // target), which the inbox scroll restore point fixed at the
+            // source.
+            (slideInHorizontally(RelaySprings.bouncy()) { full -> -full / SHARED_AXIS_TRAVEL_DIVISOR } +
+                fadeIn(
+                    tween(
+                        M3Duration.FADE_IN,
+                        delayMillis = M3Duration.FADE_OUT,
+                        easing = M3Easing.EmphasizedDecelerate,
+                    ),
+                )) togetherWith
+                (slideOutHorizontally(RelaySprings.bouncy()) { full -> full / SHARED_AXIS_TRAVEL_DIVISOR } +
+                    fadeOut(tween(M3Duration.FADE_OUT, easing = M3Easing.Standard))),
         )
     }
 
@@ -242,15 +241,23 @@ val LocalAnimatedVisibilityScope = staticCompositionLocalOf<AnimatedVisibilitySc
 
 /**
  * Navigation direction for the current transition, provided by the nav root.
- * Shared-element morphs run on push only: on pop the shared bounds are
- * disabled so the exiting screen fades and settles within its own bounds —
- * nothing from the exiting screen may draw above the incoming one (the
- * transition overlay always renders above both destinations, so anything
- * morphing there would flash over the incoming "New conversation" pill).
- * Defaults to true so surfaces outside the single-pane backstack (two-pane
- * detail, previews) keep the morph behavior.
+ * CONTAINER bounds / shared-element morphs ([motionSharedBounds],
+ * [motionSharedElement]) run on push only. The AVATAR morph
+ * ([motionSharedAvatar]) ignores this flag: it is bidirectional, running
+ * the exact reverse on pop (Garrett 2026-10-20).
  */
 val LocalNavForward = staticCompositionLocalOf { true }
+
+/**
+ * Master switch for shared-element registration in a subtree. The two-pane
+ * detail pane provides `false`: its chat has no shared-element counterpart
+ * in the list pane (the rows register under the inbox's own internal
+ * category-swap scope), and a one-sided registration renders in the
+ * SharedTransitionLayout overlay during the detail crossfade — the
+ * two-pane transition flash. With registration off, the detail pane is a
+ * pure crossfade and nothing can flash in the overlay.
+ */
+val LocalSharedElementsEnabled = staticCompositionLocalOf { true }
 
 /** Namespaced keys prevent duplicate-key collisions across features. */
 object SharedElementKeys {
@@ -273,6 +280,7 @@ fun Modifier.motionSharedBounds(
     shape: Shape? = null,
     scaleToFit: ContentScale? = null,
 ): Modifier {
+    if (!LocalSharedElementsEnabled.current) return this
     // No shared morph on pop: the transition overlay renders above both
     // destinations, so a morphing exiting screen would draw over the
     // incoming one (e.g. thread text ghosting over the inbox pill).
@@ -322,23 +330,28 @@ fun Modifier.motionSharedBounds(
 }
 
 /**
- * AVATAR-ONLY shared bounds — active on PUSH only, so the avatar morphs up
- * into the chat header when opening a conversation. On POP the modifier is
- * a no-op: the transition overlay always renders ABOVE both destinations,
- * so a reverse-morphing avatar would draw over the incoming inbox —
- * visibly flashing above the "New conversation" pill (diagnosed 2026-10-19).
- * On pop the avatar instead fades+settles WITH the exiting chat, which sits
- * UNDER the incoming inbox from the first frame: contact photos move
- * immediately to the layer under the new-chat button layer, no flash.
+ * AVATAR-ONLY shared bounds — BIDIRECTIONAL (Garrett 2026-10-20): the
+ * avatar morphs up into the chat header when a conversation opens AND
+ * morphs back down into its inbox row when the chat exits — the exact
+ * reverse movement, driven by the same [BoundsTransform] spring in both
+ * directions, for EVERY chat (1:1 and group alike; group clusters carry
+ * this modifier on the whole cluster).
  *
- * Scoped NARROWLY to the avatar: message content carries no shared
- * modifiers, so the #45 text-ghosting fix is preserved.
+ * The 2026-10-19 pop-flash that originally disabled the reverse morph was
+ * a SYMPTOM, not a property of the morph: the inbox returned at scroll
+ * position 0, so the morph's target row was absent or at the wrong place
+ * and the avatar drew in the overlay with nowhere true to land. The inbox
+ * now restores its exact pre-chat scroll position on the first pop frame
+ * (see InboxViewModel's chat-exit scroll restore point), so the target is
+ * always where the entrance left it.
+ *
+ * Scoped NARROWLY to the avatar/cluster: message content carries no
+ * shared modifiers, so the #45 text-ghosting fix is preserved.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.motionSharedAvatar(key: String, shape: Shape? = null): Modifier {
-    // No overlay morph on pop — see above.
-    if (!LocalNavForward.current) return this
+    if (!LocalSharedElementsEnabled.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this
     val boundsTransform = rememberExpressiveBoundsTransform()
@@ -370,6 +383,7 @@ fun Modifier.motionSharedAvatar(key: String, shape: Shape? = null): Modifier {
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.motionSharedElement(key: String, shape: Shape? = null): Modifier {
+    if (!LocalSharedElementsEnabled.current) return this
     if (!LocalNavForward.current) return this
     val sharedScope = LocalSharedTransitionScope.current ?: return this
     val animatedScope = LocalAnimatedVisibilityScope.current ?: return this

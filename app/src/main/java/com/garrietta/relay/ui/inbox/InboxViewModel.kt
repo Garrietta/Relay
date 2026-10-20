@@ -70,6 +70,33 @@ class InboxViewModel(
 
     fun clearSyncError() = repository.clearRcsSyncError()
 
+    /**
+     * One-shot inbox scroll restore point (Garrett 2026-10-20): the inbox
+     * list's scroll position (first visible index + offset) captured at
+     * the moment a chat is opened. In single-pane the InboxScreen
+     * composition is destroyed while a chat is open, so its LazyListState
+     * dies with it and the list used to come back at the top. The state
+     * is CONSTRUCTED from this point when the inbox is composed again, so
+     * the list — and with it the avatar morph's target row — is at the
+     * exact pre-chat position on the very first frame of the exit
+     * transition: no jump, no re-scroll animation. One-shot: consumed by
+     * the restore, and tagged with the category it belongs to so a stale
+     * point can never land in a different category's list. Category
+     * switches never write a point, so switching still starts at the top.
+     */
+    private var chatExitScroll: Triple<String?, Int, Int>? = null
+
+    fun saveChatExitScroll(categoryId: String?, firstVisibleIndex: Int, firstVisibleOffset: Int) {
+        chatExitScroll = Triple(categoryId, firstVisibleIndex, firstVisibleOffset)
+    }
+
+    fun consumeChatExitScroll(categoryId: String?): Pair<Int, Int>? {
+        val saved = chatExitScroll ?: return null
+        if (saved.first != categoryId) return null
+        chatExitScroll = null
+        return saved.second to saved.third
+    }
+
     fun setQuery(q: String) {
         _query.value = q
     }

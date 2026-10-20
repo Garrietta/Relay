@@ -845,7 +845,9 @@ private fun OneToOneHeader(
  * sizes, shapes and rotations, overlapping), then the comma-separated member
  * names, ellipsized before the right edge. No scroll-driven avatar
  * animation: the cluster stays in line from the start; on scroll the photos
- * drop away and only the names remain.
+ * drop away and only the names remain. For NAVIGATION the cluster carries
+ * the same shared-avatar morph as a 1:1 photo (in on open, reverse on
+ * exit) — one movement language for every chat.
  */
 @Composable
 private fun GroupHeader(
@@ -853,6 +855,7 @@ private fun GroupHeader(
     transportLabel: String,
     scrolled: Boolean,
     patternKey: String,
+    threadId: Long,
     onBack: () -> Unit,
     onOpenDetails: () -> Unit,
 ) {
@@ -898,6 +901,12 @@ private fun GroupHeader(
                     },
                     conversationKey = patternKey,
                     boxSize = 76.dp,
+                    // Morph target matching the inbox group row's
+                    // cluster (Garrett 2026-10-20: same picture movement
+                    // for group chats as for 1:1, in both directions).
+                    modifier = Modifier.motionSharedAvatar(
+                        SharedElementKeys.avatar(threadId),
+                    ),
                 )
                 Spacer(Modifier.width(10.dp))
             }

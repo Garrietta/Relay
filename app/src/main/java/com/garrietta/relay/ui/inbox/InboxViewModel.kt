@@ -166,6 +166,16 @@ class InboxViewModel(
         return saved.second to saved.third
     }
 
+    /**
+     * The tap on a chat IS the read (Garrett 2026-10-20): the inbox's
+     * open-chat funnel calls this at tap time so the repository flips
+     * the row read locally (and latches it against stale refreshes)
+     * in the same frame — the homepage never shows the just-read chat
+     * as unread while the server mark-read propagates.
+     */
+    fun markOpened(conversation: Conversation) =
+        repository.markConversationOpened(conversation)
+
     fun setQuery(q: String) {
         _query.value = q
     }

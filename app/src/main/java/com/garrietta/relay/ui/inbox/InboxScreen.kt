@@ -170,13 +170,18 @@ fun InboxScreen(
     }
     // Every chat entry point funnels through here so the scroll position
     // is captured BEFORE the chat opens, whichever surface opened it
-    // (row tap or a search-popup result).
+    // (row tap or a search-popup result). The same funnel carries the
+    // optimistic read (Garrett 2026-10-20): the tap itself marks the
+    // chat read in the local list, so the homepage shows it read on
+    // the first frame back — the server mark-read still runs from the
+    // chat screen exactly as before, this only removes the wait.
     val openChat: (Conversation) -> Unit = { conversation ->
         viewModel.saveChatExitScroll(
             selectedCategoryId,
             listState.firstVisibleItemIndex,
             listState.firstVisibleItemScrollOffset,
         )
+        viewModel.markOpened(conversation)
         onOpenChat(conversation)
     }
     // Search lives behind the bottom-right expressive button; tapping it

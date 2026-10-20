@@ -81,6 +81,49 @@ class UnifiedInboxRepository(
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
     /**
+     * Optimistic-read latches (Garrett 2026-10-20, see [ReadLatch]):
+     * a tapped-open chat renders read on the first frame back to the
+     * inbox instead of waiting for the server mark-read to propagate
+     * through a refresh. The server path itself (ChatViewModel's
+     * markRcsRead / markThreadRead) is unchanged — this only governs
+     * what the local list shows in the gap, and a refresh that would
+     * resurrect the unread flag from stale metadata is held by the
+     * latch until the server catches up or a genuinely newer message
+     * arrives.
+     */
+    private val readLatch = ReadLatch()
+
+    /**
+     * The tap on an unread chat marks it read (Garrett 2026-10-20):
+     * called from the inbox's single open-chat funnel at the moment of
+     * the tap, BEFORE navigation. Latches the conversation at its
+     * current newest-message timestamp and flips the row read in the
+     * published list immediately, so the Unread category releases the
+     * row and every unread surface updates with the same emission.
+     * Synchronous on purpose — the flip must land before the chat
+     * opens, not after an async round-trip.
+     */
+    fun markConversationOpened(conversation: Conversation) {
+        val key = CategoryStore.conversationKey(
+            conversation.rcsConversationId, conversation.threadId,
+        )
+        readLatch.latch(key, conversation.date)
+        val current = _conversations.value
+        if (current.any { it.unread && conversationKeyOf(it) == key }) {
+            _conversations.value = current.map { row ->
+                if (row.unread && conversationKeyOf(row) == key) {
+                    row.copy(unread = false)
+                } else {
+                    row
+                }
+            }
+        }
+    }
+
+    private fun conversationKeyOf(row: Conversation): String =
+        CategoryStore.conversationKey(row.rcsConversationId, row.threadId)
+
+    /**
      * The RCS conversation id of the chat currently on screen (null when
      * none). Set by ChatViewModel via ChatScreen's DisposableEffect; read by
      * MainActivity's notification collector so an incoming message for the
@@ -213,7 +256,11 @@ class UnifiedInboxRepository(
                 if (loaded == null) {
                     Log.w(TAG, "refresh: conversation load failed; keeping last-good list")
                 } else {
-                    _conversations.value = loaded
+                    // Optimistic-read latches ride every emission: a
+                    // refresh carrying pre-mark-read server metadata
+                    // must not resurrect unread on a chat Garrett has
+                    // already opened (see ReadLatch).
+                    _conversations.value = readLatch.applyTo(loaded)
                     refreshTick.value += 1
                 }
             }
@@ -1134,6 +1181,11 @@ class UnifiedInboxRepository(
     suspend fun markThreadRead(threadId: Long) = markThreadRead(listOf(threadId))
 
     suspend fun markThreadUnread(threadIds: List<Long>) = withContext(Dispatchers.IO) {
+        // Manual Mark-as-unread must stick (Garrett 2026-10-20): drop
+        // any optimistic-read latch for these threads FIRST, or the
+        // refresh below — and every later one — would hold the row read
+        // against the state the user just chose by hand.
+        threadIds.forEach { readLatch.clear(CategoryStore.conversationKey(null, it)) }
         try {
             val values = ContentValues().apply { put("read", 0) }
             for (threadId in threadIds) {
@@ -1149,6 +1201,10 @@ class UnifiedInboxRepository(
     suspend fun markThreadUnread(threadId: Long) = markThreadUnread(listOf(threadId))
 
     suspend fun deleteThread(threadIds: List<Long>): Boolean = withContext(Dispatchers.IO) {
+        // A deleted thread's read latch dies with it — provider thread
+        // ids can be reused, and a stale latch must never hold a future
+        // thread read.
+        threadIds.forEach { readLatch.clear(CategoryStore.conversationKey(null, it)) }
         return@withContext try {
             for (threadId in threadIds) {
                 context.contentResolver.delete(

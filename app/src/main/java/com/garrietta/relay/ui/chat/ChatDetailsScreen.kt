@@ -177,6 +177,12 @@ fun ChatDetailsScreen(
         when {
             addr != null -> viewModel.senderFor(addr)
                 ?: (participants + visibleOthers).firstOrNull { it.address == addr }
+            // Exactly ONE stored other: a 1:1 for display, whatever any
+            // classification claims — feature the peer (Garrett
+            // 2026-10-20: the Dad chat read "0 members" because an
+            // empty chat-side list plus the row's group flag forced
+            // group mode over a chat that has exactly one other person).
+            visibleOthers.size == 1 -> visibleOthers.single()
             // Known group, conversation mode: never feature a lone
             // participant just because this screen's list came back
             // thinner than the inbox row's (Garrett 2026-10-20).
@@ -187,12 +193,15 @@ fun ChatDetailsScreen(
         }
     }
     // Group mode when there really are multiple others — or when the
-    // inbox row classified the conversation as a group (conversation
-    // mode only; a member drill-down is person mode). While the
-    // participant list is still loading we stay in person mode (never a
-    // flash of an empty "group" view).
+    // inbox row classified the conversation as a group AND its stored
+    // others have loaded (conversation mode only; a member drill-down
+    // is person mode). While the participant list is still loading we
+    // stay in person mode (never a flash of an empty "group" view, and
+    // never a "0 members" subtitle: the members count reads the stored
+    // others and only appears in true group mode).
     val isGroup = featured == null &&
-        (visibleOthers.size > 1 || (knownGroup && personAddress == null))
+        (visibleOthers.size > 1 ||
+            (knownGroup && personAddress == null && visibleOthers.isNotEmpty()))
 
     val personName = featured?.let {
         if (it.isUnknownSenderGhost()) it.address

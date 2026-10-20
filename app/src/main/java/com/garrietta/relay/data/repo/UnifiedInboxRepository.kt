@@ -12,6 +12,7 @@ import com.garrietta.relay.data.model.Conversation
 import com.garrietta.relay.data.model.DeliveryStatus
 import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
+import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isUnknownSenderGhostName
 import com.garrietta.relay.rcs.proto.isUnknownSenderGhost
 import com.garrietta.relay.data.model.rcsStatusToDelivery
@@ -19,7 +20,8 @@ import com.garrietta.relay.data.transport.IncomingMessage
 import com.garrietta.relay.data.transport.RcsTransport
 import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
-import com.garrietta.relay.rcs.proto.cleanRcsParticipantList
+import com.garrietta.relay.rcs.proto.deriveRcsIsGroup
+import com.garrietta.relay.rcs.proto.deriveRcsOthers
 import com.garrietta.relay.rcs.proto.displayNameOrNumber
 import com.garrietta.relay.rcs.proto.resolveMessageDirection
 import com.garrietta.relay.ui.chat.parseReaction
@@ -357,7 +359,7 @@ class UnifiedInboxRepository(
 
     /**
      * RCS participant cleanup, delegated to the pure, unit-tested
-     * [cleanRcsParticipantList]: the server's participant list can include
+     * [deriveRcsOthers]: the server's participant list can include
      * self — sometimes twice, and not always flagged isMe ("Grace, Garrett,
      * Garrett", and the GIRTH ghost: an unflagged self entry with a real
      * number and an "Unknown"/blank name). Self is matched via the isMe flag
@@ -365,7 +367,10 @@ class UnifiedInboxRepository(
      * across conversations — server-grounded, works when the Telephony-based
      * ownAddress() can't resolve in paired mode). His name must never appear
      * in a header unless the chat is to himself specifically, and the word
-     * "Unknown" must never render.
+     * "Unknown" must never render. And when the payload ships field 21
+     * (otherParticipantIds — the server's own membership answer), it is
+     * the authority over field 20's attribute list: a stale entry the
+     * server no longer counts as a member (Grace in the Dad 1:1) drops.
      */
     private suspend fun selfNumberSet(): Set<String> {
         val out = mutableSetOf<String>()
@@ -384,8 +389,9 @@ class UnifiedInboxRepository(
 
     private suspend fun cleanRcsParticipants(
         parts: List<com.garrietta.relay.rcs.proto.RcsParticipant>,
+        otherIds: List<String>,
     ): List<com.garrietta.relay.rcs.proto.RcsParticipant> =
-        com.garrietta.relay.rcs.proto.cleanRcsParticipantList(parts, selfNumberSet())
+        deriveRcsOthers(parts, otherIds, selfNumberSet())
 
     private suspend fun mapRcsConversation(
         c: com.garrietta.relay.rcs.proto.RcsConversation,
@@ -393,8 +399,34 @@ class UnifiedInboxRepository(
         // UNKNOWN_SENDER! ghosts vanish here — filtered at the RCS
         // level, before any name is composed or Participant built.
         // Display-layer only; the server data is untouched.
-        val others = cleanRcsParticipants(c.participants)
+        val others = cleanRcsParticipants(c.participants, c.otherParticipantIds)
             .filterNot { it.isUnknownSenderGhost() }
+        // Group classification (Garrett 2026-10-20): derived in THIS
+        // pass from THIS payload, paired with the others above — when
+        // field 21 shipped, membership decides; the isGroup flag only
+        // stands when there is no membership list to consult.
+        val group = deriveRcsIsGroup(c.isGroup, c.otherParticipantIds, others.size)
+        // The full stored participant list (self included) for chat-side
+        // sender resolution and the details page — derived in THIS pass
+        // from THIS payload, so no surface ever re-derives membership
+        // from a second transport lookup that can miss or disagree with
+        // the row (Garrett 2026-10-20, single source of truth). Cleaning
+        // mirrors what the chat getters used to apply on their own:
+        // dedupe by normalized address, ghosts out, isSelf flags kept.
+        val allParticipants = run {
+            val seen = mutableSetOf<String>()
+            c.participants.filter { p ->
+                val norm = normalizedAddress(p.number)
+                if (norm.isEmpty()) true else seen.add(norm)
+            }.filterNot { it.isUnknownSenderGhost() }.map { p ->
+                Participant(
+                    address = p.number,
+                    displayName = p.fullName.ifBlank { p.firstName }.ifBlank { p.number },
+                    photoUri = contactLookup.photoUri(p.number),
+                    isSelf = p.isMe,
+                )
+            }
+        }
         // Never trust a server conversation name containing "unknown" — the
         // server auto-names groups from raw participants ("Alec, Trenton,
         // Unknown"); rebuild from the cleaned list instead. A genuine custom
@@ -420,19 +452,22 @@ class UnifiedInboxRepository(
         // inbox snippet — it renders as an inline badge in the thread.
         val baseSnippet = parseReaction(c.snippet)?.let { (emoji, _) -> "$emoji reaction" }
             ?: c.snippet
-        // The authoritative group flag (Garrett 2026-10-20): the server's
-        // own isGroup (Conversation field 10), with the cleaned others
-        // count as backstop — computed once here; the row, the chat header
-        // and the details page all read it, so they can't diverge.
-        val group = c.isGroup || others.size > 1
         // GM snippet prefixes (Garrett 2026-10-20): the server's own
         // LatestMessage fields say who sent the snippet's message —
         // fromMe (field 2) and displayName (field 4). "You: " when the
         // latest is his, "{FirstName}: " when it's a group member's, bare
         // text for a 1:1 — exactly Google Messages' rendering. Applied to
-        // the final snippet text, reaction form included.
-        val snippet = if (baseSnippet.isBlank()) baseSnippet
-            else snippetPrefix(c.latestFromMe, group, c.latestSenderName) + baseSnippet
+        // the final snippet text, reaction form included. Group EVENT
+        // sentences are not message traffic (Garrett 2026-10-20): a
+        // conversation whose latest entry is "… created this group chat
+        // …" must not wear that event as its snippet, prefix or not.
+        // The group flag read here is the single derived one above
+        // (deriveRcsIsGroup) — no second local computation.
+        val snippet = when {
+            baseSnippet.isBlank() -> baseSnippet
+            group && isGroupEventNotice(c.snippet) -> ""
+            else -> snippetPrefix(c.latestFromMe, group, c.latestSenderName) + baseSnippet
+        }
         return Conversation(
             threadId = ("rcs:" + c.id).hashCode().toLong(),
             address = address,
@@ -456,6 +491,9 @@ class UnifiedInboxRepository(
                     photoUri = contactLookup.photoUri(it.number),
                 )
             },
+            // The full stored list (self included) — chat/details read
+            // membership from HERE, never from a fresh transport lookup.
+            allParticipants = allParticipants,
             isGroup = group,
         )
     }
@@ -531,7 +569,9 @@ class UnifiedInboxRepository(
         // Ambrose" with only Dad ever speaking) — recorded for
         // Diagnostics, never silently trusted or silently "fixed".
         run {
-            val otherNumbers = cleanRcsParticipants(participants)
+            val otherNumbers = cleanRcsParticipants(
+                participants, conv?.otherParticipantIds.orEmpty(),
+            )
                 .filterNot { it.isUnknownSenderGhost() }
                 .map { normalizedAddress(it.number) }
                 .filter { it.isNotEmpty() }.toSet()
@@ -631,80 +671,50 @@ class UnifiedInboxRepository(
         rcsTransport.currentRcsConversations()
             .firstOrNull { it.id == conversationId }?.type ?: 0
 
-    /** Server participants for an RCS conversation, deduped by normalized address (self kept). */
-    suspend fun getRcsParticipants(conversationId: String): List<Participant> =
-        // Participant integrity (Garrett 2026-10-20): membership comes
-        // from THIS conversation's own server payload only — never a
-        // union across server conversations and never another
-        // conversation's list: a union takes the maximum of every
-        // payload's claim, so one stale or over-broad list would
-        // cement a foreign participant into a chat that never had them.
-        getRcsParticipantsSingle(conversationId)
-
-    /** Single-server-conversation participants (see [getRcsParticipants]). */
-    private suspend fun getRcsParticipantsSingle(conversationId: String): List<Participant> =
-        withContext(Dispatchers.IO) {
-            val conv = rcsTransport.currentRcsConversations()
-                .firstOrNull { it.id == conversationId }
-                ?: return@withContext emptyList()
-            val seen = mutableSetOf<String>()
-            conv.participants.filter { p ->
-                val norm = normalizedAddress(p.number)
-                if (norm.isEmpty()) true else seen.add(norm)
-            }.filterNot { it.isUnknownSenderGhost() }.map { p ->
-                Participant(
-                    address = p.number,
-                    displayName = p.fullName.ifBlank { p.firstName }.ifBlank { p.number },
-                    photoUri = contactLookup.photoUri(p.number),
-                    isSelf = p.isMe,
-                )
-            }
-        }
+    /**
+     * The stored inbox ROW for a server conversation — the single
+     * source of truth for its membership (Garrett 2026-10-20). The row
+     * in [_conversations] wins: it is the exact object the inbox and
+     * search rendered, so a chat opened from it can never disagree
+     * with what the user tapped. When the row isn't in the flow yet
+     * (a chat opened from a notification before the first refresh
+     * lands), the row is mapped on demand from the transport's current
+     * payload through the SAME [mapRcsConversation] derivation — same
+     * rule, same result a refresh would store; never a second,
+     * differently-cleaned derivation. (The previous getters re-derived
+     * from a live `currentRcsConversations()` lookup with their own
+     * cleaning: when that snapshot's entry carried an empty field 20 —
+     * or the lookup missed — the chat header rendered nobody and the
+     * details page reported "0 members" for a chat whose row showed
+     * its people. That whole class of divergence is now impossible:
+     * there is one derivation, stored on the row, read everywhere.)
+     */
+    private suspend fun storedConversationRow(conversationId: String): Conversation? {
+        _conversations.value.firstOrNull { it.rcsConversationId == conversationId }
+            ?.let { return it }
+        val conv = rcsTransport.currentRcsConversations()
+            .firstOrNull { it.id == conversationId } ?: return null
+        return mapRcsConversation(conv)
+    }
 
     /**
-     * Header-ready others for an RCS conversation: self removed (isMe flag
-     * plus every known self number — the server doesn't always flag every
-     * self entry, e.g. the GIRTH ghost) and deduped by normalized address.
-     * The word "Unknown" can never survive into the name list.
+     * Server participants for an RCS conversation (self kept, isSelf
+     * flagged): the row's STORED full list — see [storedConversationRow].
+     */
+    suspend fun getRcsParticipants(conversationId: String): List<Participant> =
+        storedConversationRow(conversationId)?.let { row ->
+            row.allParticipants.ifEmpty { row.participants }
+        } ?: emptyList()
+
+    /**
+     * Header-ready others for an RCS conversation: the row's STORED
+     * others — self already removed at mapping time (isMe flag plus
+     * every known self number — the server doesn't always flag every
+     * self entry, e.g. the GIRTH ghost), ghosts out, deduped. The word
+     * "Unknown" can never survive into the name list.
      */
     suspend fun rcsOthers(conversationId: String): List<Participant> =
-        withContext(Dispatchers.IO) {
-            // Participant integrity (Garrett 2026-10-20): the header's
-            // membership is THIS conversation's OWN server participant
-            // list — never a union across conversations. A union
-            // presents the maximum claim any payload ever made, so a
-            // person listed by some other conversation object would
-            // appear in a chat whose own payload doesn't list them.
-            val proto = rcsTransport.currentRcsConversations()
-                .firstOrNull { it.id == conversationId }
-                ?.participants.orEmpty()
-            if (proto.isEmpty()) return@withContext emptyList()
-            val selfNumbers = selfNumberSet()
-            val cleaned = cleanRcsParticipantList(proto, selfNumbers)
-                .filterNot { it.isUnknownSenderGhost() }
-                .map { p ->
-                    Participant(
-                        address = p.number,
-                        displayName = p.displayNameOrNumber()
-                            .ifBlank { p.number },
-                        photoUri = contactLookup.photoUri(p.number),
-                        isSelf = p.isMe,
-                    )
-                }
-            // Same-conversation reconciliation (Garrett 2026-10-20,
-            // "No Dad"): the conversation list is wholesale-replaced on
-            // every sync pull, and a later pull can carry a THINNER
-            // participant list for the same conversation than the pull
-            // the inbox row was rendered from. The chat must agree with
-            // the row the user actually saw and tapped, so when the
-            // inbox row's own participant list is the fuller one, it
-            // wins. (When the fresh server list is fuller, it wins
-            // instead.) The row is matched by exact conversation
-            // identity ONLY (see inboxRowParticipants) — a fuller list
-            // from any OTHER conversation can never win its way in.
-            val inboxOthers = inboxRowParticipants(conversationId, -1L, emptyList())
-            if (inboxOthers.size > cleaned.size) inboxOthers else cleaned
-        }
+        storedConversationRow(conversationId)?.participants ?: emptyList()
 
     /**
      * The participant list of the inbox ROW for a conversation — the exact

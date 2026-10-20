@@ -9,6 +9,7 @@ import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.MessageReaction
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.locationMapsLink
+import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.repo.AppSeedStore
@@ -158,6 +159,10 @@ class ChatViewModel(
         val batch = _messages.value
             .filter { it.id in _selectedIds.value }
             .filterNot { isTransportSystemNotice(it.body) }
+            // Group event sentences are system items, not messages —
+            // they never forward (they can't be selected in the UI
+            // either; this is the belt-and-braces half).
+            .filterNot { _others.value.size > 1 && isGroupEventNotice(it.body) }
             .sortedBy { it.date }
         if (batch.isEmpty()) {
             clearSelection()

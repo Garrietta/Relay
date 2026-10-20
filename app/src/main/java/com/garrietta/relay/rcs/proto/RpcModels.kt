@@ -209,6 +209,50 @@ fun cleanRcsParticipantList(
     }
 }
 
+/**
+ * THE participant derivation (Garrett 2026-10-20): a conversation's
+ * "others" are computed ONCE, here, from that conversation's OWN payload
+ * — every surface (inbox row, search, chat header, details, notifications)
+ * consumes the stored result and never re-derives.
+ *
+ * Two fields of the same conversation object play different roles:
+ * field 20 ([parts]) carries the attributes (names, numbers) but can
+ * carry STALE entries — his Dad 1:1 payload listed Grace, a leftover of
+ * the group conversation's life, even though she is not a member.
+ * Field 21 ([otherIds]) is the server's own membership answer —
+ * "participant IDs excluding me" — so when it is present it is the
+ * AUTHORITY: a cleaned field-20 entry survives only if its participant
+ * ID is in field 21. When field 21 is absent/empty there is nothing to
+ * cross-check against and the cleaned field-20 list stands (the
+ * pre-existing behavior).
+ */
+fun deriveRcsOthers(
+    parts: List<RcsParticipant>,
+    otherIds: List<String>,
+    selfNumbers: Set<String>,
+): List<RcsParticipant> {
+    val cleaned = cleanRcsParticipantList(parts, selfNumbers)
+    if (otherIds.isEmpty()) return cleaned
+    val authority = otherIds.toSet()
+    return cleaned.filter { it.participantId in authority }
+}
+
+/**
+ * Group classification paired with [deriveRcsOthers]: when field 21 is
+ * present, membership decides (more than one other = group) — the
+ * server isGroup flag (field 10) cannot overrule the membership it
+ * itself shipped in the same payload. When field 21 is absent, the
+ * flag stands with the cleaned count as backstop (the pre-existing
+ * rule).
+ */
+fun deriveRcsIsGroup(
+    serverIsGroup: Boolean,
+    otherIds: List<String>,
+    othersCount: Int,
+): Boolean =
+    if (otherIds.isNotEmpty()) othersCount > 1
+    else serverIsGroup || othersCount > 1
+
 data class RcsMessage(
     val id: String,
     val conversationId: String,

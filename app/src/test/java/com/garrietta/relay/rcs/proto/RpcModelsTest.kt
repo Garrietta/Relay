@@ -174,6 +174,54 @@ class RpcModelsTest {
         assertEquals(listOf("p-alice"), c.otherParticipantIds)
     }
 
+    // ---------- single participant derivation (field 21 authority) ----------
+
+    private val me = RcsParticipant("p-me", "+15550001111", "Me", "Me", true)
+    private val dad = RcsParticipant("p-dad", "+15550002222", "Dad", "Dad", false)
+    private val grace = RcsParticipant("p-grace", "+15550003333", "Grace", "Grace Ambrose", false)
+    private val selfNums = setOf("+15550001111")
+
+    @Test fun `derive others drops a stale field-20 member field 21 excludes`() {
+        // Garrett's Dad 1:1 (2026-10-20): field 20 still lists Grace
+        // (leftover of the group conversation's life) while field 21 —
+        // the server's own membership answer — names only Dad. The
+        // derived others are Dad alone, and the chat is not a group.
+        val others = deriveRcsOthers(
+            listOf(me, dad, grace), listOf("p-dad"), selfNums,
+        )
+        assertEquals(listOf("p-dad"), others.map { it.participantId })
+        assertEquals(false, deriveRcsIsGroup(true, listOf("p-dad"), others.size))
+    }
+
+    @Test fun `derive others keeps every member field 21 names`() {
+        // The real Dad+Grace group: field 21 names both, both survive,
+        // and the conversation classifies as a group.
+        val others = deriveRcsOthers(
+            listOf(me, dad, grace), listOf("p-dad", "p-grace"), selfNums,
+        )
+        assertEquals(listOf("p-dad", "p-grace"), others.map { it.participantId })
+        assertEquals(true, deriveRcsIsGroup(true, listOf("p-dad", "p-grace"), others.size))
+    }
+
+    @Test fun `derive others falls back to cleaned field 20 when field 21 is absent`() {
+        // No membership list to consult: the cleaned field-20 list
+        // stands (pre-existing behavior), self still removed.
+        val others = deriveRcsOthers(listOf(me, dad, grace), emptyList(), selfNums)
+        assertEquals(listOf("p-dad", "p-grace"), others.map { it.participantId })
+        assertEquals(true, deriveRcsIsGroup(false, emptyList(), others.size))
+        assertEquals(false, deriveRcsIsGroup(false, emptyList(), 1))
+    }
+
+    @Test fun `derive others never resurrects self via field 21`() {
+        // Self is cleaned BEFORE the field-21 filter, so even a payload
+        // that (wrongly) listed the self id in field 21 cannot put
+        // Garrett in his own chat's others.
+        val others = deriveRcsOthers(
+            listOf(me, dad), listOf("p-me", "p-dad"), selfNums,
+        )
+        assertEquals(listOf("p-dad"), others.map { it.participantId })
+    }
+
     @Test fun `message direction resolves from participant isMe`() {
         val parts = listOf(
             RcsParticipant("p-me", "+15550001111", "Me", "Me", true),

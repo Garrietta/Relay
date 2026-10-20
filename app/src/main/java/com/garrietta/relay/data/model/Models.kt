@@ -16,6 +16,41 @@ fun isTransportSystemNotice(body: String): Boolean {
     return RcsChatNotice.matches(t) || SmsMmsNotice.matches(t)
 }
 
+/**
+ * Group/conversation EVENT notices (Garrett 2026-10-20): "Dad created
+ * this group chat with you and Grace" and its siblings. The wire has
+ * NO type marker for these — like the transport notices above, they
+ * arrive as ordinary message rows whose body is the server's
+ * pre-rendered event sentence (which is why the created-group line
+ * rendered as a Dad text bubble). Google Messages renders them as
+ * centered inline system text, never bubbles, never sender-attributed.
+ *
+ * The discriminator is therefore the sentence template itself, kept
+ * deliberately narrow: full-string anchored, the actor limited to a
+ * one-or-two-token name ("Dad", "Grace Ambrose", "You") so prose that
+ * merely contains the phrase ("He said Dad created this group chat
+ * with us") does NOT match, and callers apply it ONLY in group
+ * conversations. Member added/removed events are intentionally NOT
+ * matched yet: their canonical wire text ("X added Y") is too close
+ * to ordinary prose to anchor safely without a device-verified
+ * sample; the created/left/renamed forms below name the group in the
+ * sentence, which is what makes them safe to anchor.
+ */
+private const val EVENT_ACTOR = "\\S+(?: \\S+)?"
+private val GroupCreatedNotice =
+    Regex("^$EVENT_ACTOR created this group chat(?: with .+[\\p{L}\\p{N}])?$")
+private val GroupLeftNotice =
+    Regex("^$EVENT_ACTOR left the group$")
+private val GroupRenamedNotice =
+    Regex("^$EVENT_ACTOR (?:changed the group name to|renamed the group to) .+$")
+
+fun isGroupEventNotice(body: String): Boolean {
+    val t = body.trim()
+    return GroupCreatedNotice.matches(t) ||
+        GroupLeftNotice.matches(t) ||
+        GroupRenamedNotice.matches(t)
+}
+
 /** A single conversation thread in the unified inbox. */
 data class Conversation(
     val threadId: Long,
@@ -48,6 +83,16 @@ data class Conversation(
      * per-group avatar cluster in inbox rows. Empty for 1:1 rows.
      */
     val participants: List<Participant> = emptyList(),
+    /**
+     * The FULL participant list (self included, [Participant.isSelf]
+     * flagged) for RCS rows, derived in the SAME pass as [participants]
+     * from the same payload (Garrett 2026-10-20, single source of
+     * truth): the chat screen's sender resolution and the details page
+     * consume THIS stored list — no surface re-derives membership from
+     * a second transport lookup that can miss or disagree with the row.
+     * Empty for Telephony rows (their surfaces query the provider).
+     */
+    val allParticipants: List<Participant> = emptyList(),
     /**
      * The ONE group classification every surface reads (Garrett
      * 2026-10-20): set where the row is built — from the server's

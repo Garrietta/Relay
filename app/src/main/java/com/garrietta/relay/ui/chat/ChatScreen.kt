@@ -149,6 +149,7 @@ import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.allRcsIds
 import com.garrietta.relay.data.repo.CategoryStore
 import com.garrietta.relay.data.model.isUnknownSenderGhost
+import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isTransportSystemNotice
 import com.garrietta.relay.rcs.proto.RcsLocation
 import com.garrietta.relay.rcs.proto.RcsMediaAttachment
@@ -539,7 +540,14 @@ fun ChatScreen(
                         ) { index, message ->
                             // Transport system notices render as centered
                             // inline text — never bubbles, never attributed.
-                            if (isTransportSystemNotice(message.body)) {
+                            // Group EVENT sentences ("Dad created this
+                            // group chat with you and Grace") get the same
+                            // treatment in group chats (Garrett 2026-10-20):
+                            // they are conversation metadata, not messages
+                            // from the person they name.
+                            if (isTransportSystemNotice(message.body) ||
+                                (isGroup && isGroupEventNotice(message.body))
+                            ) {
                                 SystemNotice(text = message.body.trim())
                                 return@itemsIndexed
                             }
@@ -617,8 +625,8 @@ fun ChatScreen(
                             }
                             // reverseLayout: index+1 is visually above, index-1 below.
                             // System notices don't break bubble grouping.
-                            val aboveDiff = nearestNonNotice(messages, index, +1)?.isOutgoing != message.isOutgoing
-                            val belowDiff = nearestNonNotice(messages, index, -1)?.isOutgoing != message.isOutgoing
+                            val aboveDiff = nearestNonNotice(messages, index, +1, isGroup)?.isOutgoing != message.isOutgoing
+                            val belowDiff = nearestNonNotice(messages, index, -1, isGroup)?.isOutgoing != message.isOutgoing
                             val position = when {
                                 aboveDiff && belowDiff -> ItemPosition.SINGLE
                                 aboveDiff -> ItemPosition.FIRST
@@ -2201,13 +2209,21 @@ private fun formatBytes(n: Long): String = when {
 
 /**
  * Nearest timeline entry that is NOT a system notice — notices sit inline
- * but must not break bubble grouping.
+ * but must not break bubble grouping. Group event sentences count as
+ * notices in group chats, matching the render branch.
  */
-private fun nearestNonNotice(messages: List<Message>, index: Int, dir: Int): Message? {
+private fun nearestNonNotice(
+    messages: List<Message>,
+    index: Int,
+    dir: Int,
+    isGroup: Boolean,
+): Message? {
     var i = index + dir
     while (i in messages.indices) {
         val m = messages[i]
-        if (!isTransportSystemNotice(m.body)) return m
+        if (!isTransportSystemNotice(m.body) &&
+            !(isGroup && isGroupEventNotice(m.body))
+        ) return m
         i += dir
     }
     return null

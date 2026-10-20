@@ -827,7 +827,7 @@ sealed interface SessionEvent {
     data class Typing(val conversationId: String, val typing: Boolean) : SessionEvent
 }
 
-class RcsException(message: String, cause: Throwable? = null) : Exception(message, cause)
+open class RcsException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /** Uplink HTTP failure; [code] lets the retry classifier treat 5xx/429 as transient. */
 class RcsHttpException(val code: Int, message: String) : RcsException(message)

@@ -32,6 +32,7 @@ import com.garrietta.relay.rcs.session.SessionEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -241,7 +242,7 @@ class RcsTransport(context: Context) : Transport {
                 session.start()
             }
             if (pullConversationsQuietly()) return@launch
-            while (coroutineContext.isActive) {
+            while (isActive) {
                 delay(60_000L)
                 if (_pairingState.value != RcsPairingState.PAIRED) return@launch
                 if (pullConversationsQuietly()) return@launch

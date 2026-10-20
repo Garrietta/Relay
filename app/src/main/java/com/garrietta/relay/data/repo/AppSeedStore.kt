@@ -10,13 +10,18 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * App-wide "current contact" color seed.
  *
- * Opening a chat whose contact HAS a photo sets the seed from that photo
- * (Palette vibrant). The seed persists across process death and applies to
- * the WHOLE app — backing out to the inbox keeps the last-viewed contact's
- * color identity instead of reverting to the plain wallpaper scheme.
+ * Opening a chat sets the seed from that conversation's resolved contact
+ * color: the Palette vibrant of the contact's photo when they have one,
+ * else their assigned expressive palette's seed
+ * ([com.garrietta.relay.ui.theme.ContactPalettes.resolveContactSeedArgb]).
+ * The seed persists across process death and applies to the WHOLE app —
+ * backing out to the inbox keeps the last-viewed contact's color identity
+ * instead of reverting to the plain wallpaper scheme; the chat details
+ * page themes from it too.
  *
- * Replacement rule: only a chat WITH a new contact photo replaces the seed.
- * Chats without photos keep the current seed. First-ever state (nothing
+ * Replacement rule: EVERY opened chat replaces the seed with its resolved
+ * seed (Garrett 2026-10-20 — a photo-less chat's assigned palette color
+ * tints the app just like a photo color does). First-ever state (nothing
  * opened yet): null → the wallpaper dynamic scheme, as before.
  */
 class AppSeedStore(context: Context) {

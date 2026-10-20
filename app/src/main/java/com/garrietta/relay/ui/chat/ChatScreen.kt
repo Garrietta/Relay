@@ -431,7 +431,9 @@ fun ChatScreen(
     val liveTransportLabel by viewModel.transportLabel.collectAsState()
 
     // Per-contact theming: seed the chat color scheme from the contact's
-    // profile photo (Palette). Falls back to the wallpaper dynamic scheme.
+    // resolved color — their profile photo's Palette seed, or (photo-less)
+    // their assigned expressive palette's seed, per the single rule in
+    // ContactPalettes.resolveContactSeedArgb.
     LaunchedEffect(recipient) { viewModel.loadContactTheme(recipient) }
     val chatScheme = rememberContactChatScheme(seedColor)
 

@@ -1492,8 +1492,9 @@ class UnifiedInboxRepository(
     /**
      * Extracts a Material-3 seed color from the contact's profile photo via
      * the Palette API (vibrant → dominant → muted). Result is cached per
-     * photo URI. Null when there is no photo or extraction fails — callers
-     * fall back to the wallpaper dynamic scheme.
+     * photo URI. Null when there is no photo or extraction fails — theming
+     * callers resolve the null through the assigned-palette rule
+     * (ContactPalettes.resolveContactSeedArgb).
      */
     suspend fun extractContactSeed(photoUri: String): androidx.compose.ui.graphics.Color? =
         withContext(Dispatchers.IO) {

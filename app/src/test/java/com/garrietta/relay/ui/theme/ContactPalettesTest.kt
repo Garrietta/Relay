@@ -143,6 +143,62 @@ class ContactPalettesTest {
     }
 
     @Test
+    fun `chat seed resolution - photo seed beats the assigned palette`() {
+        // A contact WITH a photo: theming must use the photo-derived
+        // seed, byte-for-byte — the palette never overrides a photo.
+        val photoSeed = 0xFF123456.toInt()
+        for (key in listOf(dad, grace, mom, haley)) {
+            assertEquals(
+                photoSeed,
+                ContactPalettes.resolveContactSeedArgb(key, photoSeed),
+            )
+        }
+    }
+
+    @Test
+    fun `chat seed resolution - photo-less contact resolves to the palette seed`() {
+        // No photo (photoSeedArgb = null) → the assigned palette's seed.
+        // A failed photo extraction reports null through the exact same
+        // call shape, so this covers the extraction-failure case too.
+        for (key in fixtureKeys) {
+            assertEquals(
+                ContactPalettes.paletteFor(key).seedArgb,
+                ContactPalettes.resolveContactSeedArgb(key, null),
+            )
+        }
+    }
+
+    @Test
+    fun `chat seed for Mom matches the seed her avatar palette uses`() {
+        // Icon/chat agreement fixture (Garrett 2026-10-20: Mom's chat
+        // rendered unthemed while her avatar wore the peach palette).
+        // The chat scheme's seed for Mom's number must be the seed of
+        // the very palette her avatar resolves — one identity, one color.
+        val chatSeed = ContactPalettes.resolveContactSeedArgb(mom, null)
+        assertEquals(ContactPalettes.paletteFor(mom).seedArgb, chatSeed)
+        // Key formatting cannot split them either: the avatar and the
+        // chat both key off the raw address, normalized identically.
+        assertEquals(
+            chatSeed,
+            ContactPalettes.resolveContactSeedArgb("7653182837", null),
+        )
+        assertEquals(
+            chatSeed,
+            ContactPalettes.resolveContactSeedArgb("+1 (765) 318-2837", null),
+        )
+    }
+
+    @Test
+    fun `chat seed for Grace matches her avatar palette`() {
+        // The other half of his video evidence: Grace's 1:1 rendered in
+        // the wallpaper scheme while her avatar wore her teal palette.
+        assertEquals(
+            ContactPalettes.paletteFor(grace).seedArgb,
+            ContactPalettes.resolveContactSeedArgb(grace, null),
+        )
+    }
+
+    @Test
     fun `cluster nudge cascades past a taken next slot`() {
         // Kevin + Seth collide; Adam's own assignment is the slot
         // Seth would nudge into, so Adam must move one further.

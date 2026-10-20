@@ -19,6 +19,7 @@ import com.garrietta.relay.data.repo.ScrollPosition
 import com.garrietta.relay.data.repo.UnifiedInboxRepository
 import com.garrietta.relay.data.transport.SendResult
 import com.garrietta.relay.ui.theme.ContactPalettes
+import androidx.compose.ui.graphics.toArgb
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -631,14 +632,34 @@ class ChatViewModel(
     }
 
     fun loadContactTheme(recipient: String) {
+        // No identity, no theme: a blank recipient resolves nothing and
+        // leaves both seeds untouched, exactly as before.
+        if (recipient.isBlank()) return
         viewModelScope.launch {
-            val uri = repository.resolvePhotoUri(recipient) ?: return@launch
+            val uri = repository.resolvePhotoUri(recipient)
             _photoUri.value = uri
-            val seed = repository.extractContactSeed(uri)
+            // ONE seed-resolution rule everywhere contact theming
+            // consumes a color (Garrett 2026-10-20,
+            // [ContactPalettes.resolveContactSeedArgb]): the
+            // photo-derived seed when the contact has a photo (and
+            // extraction succeeds), else their assigned expressive
+            // palette's seed — the same identity key their avatar
+            // resolves, so the icon's color and the chat's theme can
+            // never diverge. This resolved seed feeds BOTH the chat
+            // scheme (via _seedColor → rememberContactChatScheme) and
+            // the app-wide persistent tint ([AppSeedStore]) that the
+            // details page rides on: a photo-less chat now themes from
+            // its palette instead of leaving the wallpaper scheme (and
+            // a stale previous contact's tint) in place.
+            val photoSeed = uri?.let { repository.extractContactSeed(it) }
+            val seed = androidx.compose.ui.graphics.Color(
+                ContactPalettes.resolveContactSeedArgb(recipient, photoSeed?.toArgb()),
+            )
             _seedColor.value = seed
-            // App-wide persistent seed (Item 5): only a chat WITH a contact
-            // photo replaces it. Chats without photos keep the current seed.
-            if (seed != null) appSeedStore.setSeed(seed)
+            // App-wide persistent seed: EVERY opened chat replaces it
+            // with its resolved seed — photo chats with their photo
+            // color, photo-less chats with their assigned palette.
+            appSeedStore.setSeed(seed)
         }
     }
 

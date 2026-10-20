@@ -124,6 +124,22 @@ object ContactPalettes {
     fun paletteFor(key: String): ContactPalette = all[paletteIndexFor(key)]
 
     /**
+     * THE contact-theming seed rule (Garrett 2026-10-20): a contact's
+     * color identity is ONE seed everywhere — the photo-derived seed
+     * when they have a photo (and extraction succeeds), else the seed
+     * of their assigned palette, resolved from the SAME identity key
+     * their avatar uses. So the icon's assigned color and the chat's
+     * theme can never diverge: a photo-less contact's chat themes from
+     * their palette instead of falling back to the wallpaper scheme.
+     *
+     * [photoSeedArgb] is null both when there is no photo and when
+     * extraction failed — the palette covers both. The rule works in
+     * ARGB ints so it is unit-testable without a Compose runtime.
+     */
+    fun resolveContactSeedArgb(identityKey: String, photoSeedArgb: Int?): Int =
+        photoSeedArgb ?: paletteFor(identityKey).seedArgb
+
+    /**
      * Palette indexes for one avatar cluster's members, in member
      * order. If two members' assigned palettes collide exactly, the
      * LATER member nudges to the next palette in the set (wrapping)

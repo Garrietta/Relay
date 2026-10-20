@@ -47,6 +47,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -58,6 +59,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -89,6 +96,22 @@ class RcsSession(context: Context) {
         private const val TAG = "RcsSession"
         /** Gaia pairing message TTL (300s, in microseconds) — reference CustomTTL. */
         const val GAIA_TTL_MICROS = 300_000_000L
+
+        /** Total attempts for one logical RPC (1 initial + transient retries). */
+        private const val MAX_RPC_ATTEMPTS = 3
+
+        /**
+         * Read-only actions whose response WAIT may be retried after a
+         * timeout: re-issuing them is idempotent. Writes (SEND_MESSAGE,
+         * SEND_REACTION, MESSAGE_READ) keep the single wait — a response
+         * that never correlated does not prove the write never landed,
+         * and a duplicate send is worse than a surfaced timeout.
+         */
+        private val RETRYABLE_TIMEOUT_ACTIONS = setOf(
+            Rpc.ACTION_LIST_CONVERSATIONS,
+            Rpc.ACTION_LIST_MESSAGES,
+            Rpc.ACTION_GET_OR_CREATE_CONVERSATION,
+        )
     }
     private val _incoming = MutableSharedFlow<RcsMessage>(extraBufferCapacity = 64)
     val incoming: SharedFlow<RcsMessage> = _incoming.asSharedFlow()
@@ -133,6 +156,14 @@ class RcsSession(context: Context) {
     @Volatile private var lastResponseTimeMs: Long = 0L
     /** Request id of the last correlated response (null = none yet). */
     @Volatile private var lastResponseRequestId: String? = null
+    /** RPC attempts retried after transient network-class failures. */
+    @Volatile private var transientRetryCount: Int = 0
+    /**
+     * Most recent transient (network-class) failure the RPC layer rode
+     * out or exhausted on. Kept after recovery so Diagnostics records
+     * that a blip happened even when no error reached the user.
+     */
+    @Volatile private var lastTransientError: String? = null
 
     /**
      * One-line transport state for the Diagnostics screen and verbose
@@ -152,7 +183,9 @@ class RcsSession(context: Context) {
             "poll=$pollState, " +
             "lastRpc=${lastRpcAction?.let { "${Rpc.actionName(it)}@${age(lastRpcTimeMs)}" } ?: "none"}, " +
             "lastResponse=${lastResponseRequestId?.let { "correlated@${age(lastResponseTimeMs)}" } ?: "none"}, " +
-            "lastPollError=${pollLastError ?: "none"}"
+            "lastPollError=${pollLastError ?: "none"}, " +
+            "transientRetries=$transientRetryCount, " +
+            "lastTransientError=${lastTransientError ?: "none"}"
     }
 
     /** True while the session coroutine scope is up. */
@@ -300,24 +333,58 @@ class RcsSession(context: Context) {
     // ---------- RPC plumbing ----------
 
     /**
-     * Sends one action RPC and suspends until the response arrives via the
-     * long-poll (correlated by requestID) or 60s elapse. Returns the inner
-     * pblite response string.
-     */
-    /**
      * Sends one encrypted RPC and awaits the correlated response as raw
-     * bytes.
+     * bytes, riding out transient network failures before surfacing
+     * anything.
      *
      * The sealed inner payload is BINARY protobuf (the reference
      * proto.Marshals the request message before encrypting); the decrypted
      * response bytes are returned raw for the caller to decode with
      * ProtoCodec. Timeouts carry live session diagnostics so a failure on
      * Garrett's device says exactly what was (not) happening.
+     *
+     * TRANSIENT RESILIENCE (Garrett 2026-10-20): a momentary DNS failure
+     * for the Tachyon host killed the long-poll AND starved a
+     * LIST_CONVERSATIONS into its 60s timeout — surfaced to him as a hard
+     * "Conversations sync failed" while the session reported itself
+     * alive. Network-class failures (DNS, connect/read timeouts, socket
+     * resets, uplink HTTP 5xx/429) are now retried with backoff on FRESH
+     * connections (pools evicted, so no pooled connection pins a stale
+     * resolver result). A response wait that times out is retried only
+     * for idempotent reads ([RETRYABLE_TIMEOUT_ACTIONS]); when the budget
+     * is exhausted the ORIGINAL error (verbatim timeout text included)
+     * is thrown unchanged — a genuinely dead server still fails loudly.
      */
     private suspend fun rpc(action: Int, payloadProto: ByteArray): ByteArray {
         val a = currentAuth() ?: throw RcsException("not paired")
-        val requestId = UUID.randomUUID().toString()
         val sealed = RcsCrypto.seal(a.aesKey, a.hmacKey, payloadProto)
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                return rpcAttempt(action, sealed, a)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RpcResponseTimeoutException) {
+                // The uplink landed but the response never correlated —
+                // in the field this is the long-poll being knocked out by
+                // the same blip. Re-issue within budget for reads only.
+                if (action !in RETRYABLE_TIMEOUT_ACTIONS || attempt >= MAX_RPC_ATTEMPTS) throw e
+                noteTransientFailure("timeout awaiting ${Rpc.actionName(action)} response")
+                evictConnectionPools()
+                delay(rpcBackoffMs(attempt))
+            } catch (e: Exception) {
+                if (!isNetworkClassFailure(e) || attempt >= MAX_RPC_ATTEMPTS) throw e
+                noteTransientFailure(e.message ?: e.javaClass.simpleName)
+                evictConnectionPools()
+                delay(rpcBackoffMs(attempt))
+            }
+        }
+    }
+
+    /** One RPC attempt: fresh request id + waiter, one POST, one 60s wait. */
+    private suspend fun rpcAttempt(action: Int, sealed: ByteArray, a: AuthData): ByteArray {
+        val requestId = UUID.randomUUID().toString()
         val rpcData = encodeOutgoingRpcData(requestId, action, sealed, a.sessionId)
         val body = buildOutgoingRpcPblite(mobile, requestId, rpcData, a.tachyonToken, a.sessionId)
         val waiter = CompletableDeferred<ByteArray>()
@@ -336,19 +403,43 @@ class RcsSession(context: Context) {
             } else {
                 postRpc(rpcClient, RelayApi.PATH_SEND_MESSAGE, RelayApi.CT_PBLITE, body.toByteArray())
             }
-            if (!res.isOk()) throw RcsException("uplink HTTP ${res.code}: ${res.text.take(200)}")
+            if (!res.isOk()) throw RcsHttpException(res.code, "uplink HTTP ${res.code}: ${res.text.take(200)}")
             try {
                 return withTimeout(60_000) { waiter.await() }
             } catch (e: TimeoutCancellationException) {
-                // Rethrow as a plain RcsException (TimeoutCancellationException
-                // has no public constructor): the message carries the live
-                // transport diagnostics for the device.
-                throw RcsException("Timed out waiting for 60000 ms (${diagnostics()})")
+                // Parent-scope cancellation also surfaces here; only a
+                // live scope's expiry is a real response timeout.
+                if (!currentCoroutineContext().isActive) throw e
+                // RpcResponseTimeoutException (an RcsException): the
+                // message carries the live transport diagnostics for the
+                // device, verbatim as before.
+                throw RpcResponseTimeoutException("Timed out waiting for 60000 ms (${diagnostics()})")
             }
         } finally {
             waiters.remove(requestId)
         }
     }
+
+    /** Records a transient failure for Diagnostics and the log. */
+    private fun noteTransientFailure(detail: String) {
+        transientRetryCount++
+        lastTransientError = detail
+        Log.w(TAG, "transient network failure (retry #$transientRetryCount): $detail")
+    }
+
+    /**
+     * Drops every pooled connection on both clients: the next attempt
+     * re-resolves DNS and re-connects instead of reusing a connection
+     * that may pin a stale resolver result or a dead socket.
+     */
+    private fun evictConnectionPools() {
+        runCatching { rpcClient.connectionPool.evictAll() }
+        runCatching { pollClient.connectionPool.evictAll() }
+    }
+
+    /** Backoff between RPC attempts: 1s, 2s, 4s… capped at 30s. */
+    private fun rpcBackoffMs(failedAttempt: Int): Long =
+        minOf(1000L shl (failedAttempt - 1), 30_000L)
 
     /**
      * Sends one UNENCRYPTED Gaia pairing message (CLIENT_INIT / CLIENT_FINISHED)
@@ -478,6 +569,13 @@ class RcsSession(context: Context) {
                     pollLastError = "long-poll error: ${e.message ?: e.javaClass.simpleName}"
                     Log.w(TAG, "GaiaPairing $pollLastError")
                 }
+                // Fresh connection on the next attempt: evict the pool so
+                // a dead socket or a stale DNS result can't pin the retry
+                // (Garrett 2026-10-20: a transient DNS failure for the
+                // Tachyon host kept the poll failing while DNS had already
+                // recovered). The loop itself already retries forever with
+                // backoff; eviction makes each retry a clean reconnect.
+                runCatching { pollClient.connectionPool.evictAll() }
                 _events.emit(SessionEvent.PollError(e.message ?: "poll failed"))
                 delay(backoffMs)
                 backoffMs = minOf(backoffMs * 2, 60_000)
@@ -730,3 +828,31 @@ sealed interface SessionEvent {
 }
 
 class RcsException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** Uplink HTTP failure; [code] lets the retry classifier treat 5xx/429 as transient. */
+class RcsHttpException(val code: Int, message: String) : RcsException(message)
+
+/** The uplink POST landed but no correlated response arrived within the wait. */
+private class RpcResponseTimeoutException(message: String) : RcsException(message)
+
+/**
+ * True when [t] (or anything in its cause chain) is a transient
+ * network-class failure: DNS resolution, connect/read timeouts, socket
+ * errors/resets, or an uplink HTTP 5xx/429. These are ridden out with
+ * retries on fresh connections; everything else (auth, protocol,
+ * decode, our own timeouts) is NOT network-class and never retried
+ * under this classifier.
+ */
+internal fun isNetworkClassFailure(t: Throwable): Boolean {
+    var cur: Throwable? = t
+    while (cur != null) {
+        when (cur) {
+            is RcsHttpException -> if (cur.code == 429 || cur.code in 500..599) return true
+            is UnknownHostException, is SocketTimeoutException, is ConnectException,
+            is SocketException, is InterruptedIOException -> return true
+            is IOException -> return true
+        }
+        cur = cur.cause
+    }
+    return false
+}

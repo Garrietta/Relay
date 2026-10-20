@@ -168,10 +168,18 @@ class RcsTransport(context: Context) : Transport {
     suspend fun refreshConversations() {
         try {
             _rcsConversations.value = session.listConversations()
+            onConversationsRecovered()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val msg = "Conversations sync failed: ${e.message ?: e.javaClass.simpleName}"
             Log.w(TAG, msg, e)
             _syncError.value = msg
+            // Don't sit dead on a transient failure: the session layer
+            // already retried this pull, so now the background recovery
+            // loop keeps trying (and restarts the session once) until it
+            // lands or the pairing goes away.
+            scheduleConversationRecovery()
             return
         }
         // Deeper history in the background (Garrett 2026-10-19: "way more
@@ -187,6 +195,66 @@ class RcsTransport(context: Context) : Transport {
         } catch (e: Exception) {
             Log.w(TAG, "Deep conversation fill failed: ${e.message}", e)
         }
+    }
+
+    /** Background recovery job for an exhausted conversation sync. */
+    @Volatile private var conversationRecoveryJob: Job? = null
+
+    /**
+     * A conversation pull landed: clear a previously surfaced sync error
+     * and stop the background recovery loop — recovery is visible in the
+     * UI (the error clears) and in Diagnostics (the session keeps the
+     * transient-failure record).
+     */
+    private fun onConversationsRecovered() {
+        if (_syncError.value?.startsWith("Conversations sync failed") == true) {
+            _syncError.value = null
+        }
+        conversationRecoveryJob?.cancel()
+        conversationRecoveryJob = null
+    }
+
+    /**
+     * Keeps retrying a failed conversation sync in the background so a
+     * transient network blip never leaves the inbox dead until the user
+     * pull-refreshes (Garrett 2026-10-20: a momentary DNS failure
+     * surfaced as a hard sync failure while the session was alive).
+     * Schedule: quick retries (5s/15s/45s), then ONE session restart
+     * from the stored session id — the existing recovery mechanism, no
+     * re-pair — then a slow 60s retry for as long as we're paired.
+     * Genuinely unrecoverable states still surface: the original
+     * verbatim error stays in [syncError] until a pull lands.
+     */
+    private fun scheduleConversationRecovery() {
+        if (conversationRecoveryJob?.isActive == true) return
+        conversationRecoveryJob = scope.launch {
+            for (backoffMs in listOf(5_000L, 15_000L, 45_000L)) {
+                delay(backoffMs)
+                if (pullConversationsQuietly()) return@launch
+            }
+            runCatching {
+                session.stop()
+                session.start()
+            }
+            if (pullConversationsQuietly()) return@launch
+            while (coroutineContext.isActive) {
+                delay(60_000L)
+                if (_pairingState.value != RcsPairingState.PAIRED) return@launch
+                if (pullConversationsQuietly()) return@launch
+            }
+        }
+    }
+
+    /** One quiet conversation pull for the background recovery loop. */
+    private suspend fun pullConversationsQuietly(): Boolean = try {
+        _rcsConversations.value = session.listConversations()
+        onConversationsRecovered()
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "Background conversation retry failed: ${e.message}", e)
+        false
     }
 
     /** Resolves a number to a server conversation, creating it if needed. */

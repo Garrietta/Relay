@@ -21,7 +21,6 @@ sealed interface Screen {
         val isGroup: Boolean = false,
     ) : Screen
     data object Settings : Screen
-    data object NewConversation : Screen
     data object RcsPairing : Screen
     /**
      * Conversation details (Garrett 2026-10-19): tapping any chat header

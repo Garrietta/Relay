@@ -172,7 +172,7 @@ class RcsTransport(context: Context) : Transport {
             "splicesRejected=${splicesRejected.get()}, " +
             "mediaVerified=${mediaVerified.get()}, " +
             "mediaHealed=${mediaHealed.get()}, " +
-            "mediaUnhealable=${mediaUnhealable.get()}, ${ghostScanDiagnostics()}""
+            "mediaUnhealable=${mediaUnhealable.get()}, ${ghostScanDiagnostics()}"
     }
 
     /** Tachyon token expiry (epoch ms) for Diagnostics; null when not paired. */

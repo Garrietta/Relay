@@ -21,6 +21,7 @@ import com.garrietta.relay.data.transport.SmsTransport
 import com.garrietta.relay.data.transport.Transport
 import com.garrietta.relay.rcs.proto.cleanRcsParticipantList
 import com.garrietta.relay.rcs.proto.displayNameOrNumber
+import com.garrietta.relay.rcs.proto.resolveMessageDirection
 import com.garrietta.relay.ui.chat.parseReaction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -462,13 +463,16 @@ class UnifiedInboxRepository(
         participantAnomalies.values.sorted()
 
     /**
-     * Self-sender contradictions corrected by the guard in
-     * [rcsMessagesSingle] (Garrett 2026-10-20): messages whose sender —
-     * resolved against the conversation's OWN participant table — is
-     * the user, while the wire direction claimed incoming. Each one
-     * would have rendered as an incoming group message under Garrett's
-     * own name and photo; the per-conversation isMe determination wins
-     * and the message renders outgoing instead.
+     * True direction-metadata contradictions counted in
+     * [rcsMessagesSingle] (Garrett 2026-10-20): messages whose sender
+     * entry — resolved against the conversation's OWN participant
+     * table — is the isMe-flagged self entry, yet which carry an
+     * explicit INCOMING_* status marker. Two independent wire signals
+     * disagree; the entry determination wins and the message renders
+     * outgoing. (The earlier guard also counted — and force-flipped —
+     * any sender whose NUMBER matched Garrett's; that person-level
+     * match is gone: it flattened the self conversation's two distinct
+     * self entries, whose messages are legitimately both directions.)
      */
     private val selfSenderLock = Any()
     private var selfSenderContradictions: Int = 0
@@ -535,28 +539,30 @@ class UnifiedInboxRepository(
                 }
             }
         }
-        // Self-sender guard (Garrett 2026-10-20): the sender is resolved
-        // against THIS conversation's own participant table only. When
-        // that resolution says the sender is Garrett himself — the
-        // entry isMe-flagged, or its number is one of his own numbers
-        // (the server sometimes leaves a self entry unflagged) — the
-        // message is OUTGOING, whatever the wire direction claimed.
-        // Without this, his own messages rendered as incoming group
-        // bubbles under the name "Garrett Marietta" with his photo.
-        val selfDigits = selfNumberSet()
-            .map { it.filter(Char::isDigit) }
-            .filter { it.isNotEmpty() }
+        // Direction is PER-MESSAGE and ENTRY-LEVEL (Garrett 2026-10-20):
+        // the sender entry — resolved by the message's participantID
+        // within THIS conversation's own participant table — decides.
+        // Outgoing iff that entry is this table's isMe-flagged entry;
+        // incoming otherwise. NO person-level number matching: his self
+        // conversation holds two entries for his own number (the
+        // flagged sender-side entry and the unflagged recipient-side
+        // entry), and the previous number-match guard flattened them,
+        // rendering every self-chat message outgoing. The "Garrett
+        // Marietta" incoming bubbles that guard fought came from
+        // resolving senders against ANOTHER conversation's table (the
+        // cross-conversation merge) — the teardown removed that, so no
+        // force-outgoing override remains. When the participantID does
+        // not resolve, [RcsMessage.fromMe] stands: it already carries
+        // decode's MessageStatus fallback (resolveFromMe). A flagged
+        // entry carrying an explicit INCOMING_* status is a true
+        // metadata contradiction — the entry wins, and it is counted.
         val byPid = participants.associateBy { it.participantId }
         server.map { m ->
             val sender = byPid[m.participantId]
             val senderNumber = sender?.number.orEmpty()
-            val senderDigits = senderNumber.filter(Char::isDigit)
-            val senderIsSelf = sender != null &&
-                (sender.isMe || (senderDigits.isNotEmpty() && selfDigits.any { s ->
-                    senderDigits.takeLast(10) == s.takeLast(10)
-                }))
-            val outgoing = m.fromMe || senderIsSelf
-            if (senderIsSelf && !m.fromMe) {
+            val direction = resolveMessageDirection(sender, m.fromMe, m.status)
+            val outgoing = direction.outgoing
+            if (direction.contradiction) {
                 synchronized(selfSenderLock) { selfSenderContradictions++ }
             }
             Message(

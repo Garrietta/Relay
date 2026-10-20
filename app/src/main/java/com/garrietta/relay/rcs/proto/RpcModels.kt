@@ -1047,6 +1047,43 @@ fun resolveFromMe(
     return fallback
 }
 
+/** Outcome of the final, mapping-time direction decision for one message. */
+data class MessageDirection(
+    /** True = outgoing (rendered on Garrett's side); false = incoming. */
+    val outgoing: Boolean,
+    /**
+     * True when the wire metadata contradicts itself: the sender entry is
+     * this conversation's isMe-flagged entry, yet the message carries an
+     * explicit INCOMING_* status marker (>=100). The entry determination
+     * wins ([outgoing] is true); the contradiction is only counted.
+     */
+    val contradiction: Boolean,
+)
+
+/**
+ * Final direction decision for one decoded message (Garrett 2026-10-20):
+ * PER-MESSAGE and ENTRY-LEVEL. The sender ENTRY — resolved by the
+ * message's participantID within the message's OWN conversation's
+ * participant table — decides: outgoing iff that entry is the table's
+ * isMe-flagged entry, incoming otherwise. No person-level matching
+ * (by number, by name) anywhere: one conversation can hold TWO entries
+ * for the same person — his self chat has his sender-side flagged entry
+ * AND his recipient-side unflagged entry — and the earlier
+ * number-match force-outgoing guard flattened exactly that distinction,
+ * rendering every self-chat message outgoing. When the participantID
+ * does not resolve to an entry, the wire direction ([wireFromMe], which
+ * already carries the MessageStatus fallback from [resolveFromMe])
+ * stands as-is.
+ */
+fun resolveMessageDirection(
+    sender: RcsParticipant?,
+    wireFromMe: Boolean,
+    status: Int,
+): MessageDirection = MessageDirection(
+    outgoing = sender?.isMe ?: wireFromMe,
+    contradiction = sender?.isMe == true && status >= 100,
+)
+
 /** events.MessageEvent{2:[Message]} → messages. */
 fun decodeMessageEvent(
     m: Map<Int, List<FieldVal>>,

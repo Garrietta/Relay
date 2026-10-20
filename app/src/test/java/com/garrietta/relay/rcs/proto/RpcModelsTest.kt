@@ -195,6 +195,101 @@ class RpcModelsTest {
         assertEquals(false, decodeRcsMessage(ProtoCodec.decode(unk)).fromMe)
     }
 
+    // ---------- mapping-time direction: ENTRY-LEVEL (Garrett 2026-10-20) ----------
+    // Direction is decided by the sender ENTRY (the participant-table row
+    // the message's participantID names), never by matching the PERSON
+    // behind the entry. A self conversation holds two entries for the
+    // same number — the isMe-flagged sender-side entry and the unflagged
+    // recipient-side entry — and its messages are legitimately BOTH
+    // directions. The retired number-match guard flattened them all to
+    // outgoing; these fixtures pin the entry-level rule.
+
+    /** The repository's mapping decision for one decoded wire message. */
+    private fun decisionFor(
+        wire: ByteArray,
+        parts: List<RcsParticipant>,
+    ): MessageDirection {
+        val decoded = decodeRcsMessage(ProtoCodec.decode(wire), parts)
+        val sender = parts.firstOrNull { it.participantId == decoded.participantId }
+        return resolveMessageDirection(sender, decoded.fromMe, decoded.status)
+    }
+
+    @Test fun `self conversation directions follow the sender entry both ways`() {
+        val myNumber = "+17655550100"
+        val parts = listOf(
+            RcsParticipant("p-me-sender", myNumber, "Garrett", "Garrett Marietta", true),
+            RcsParticipant("p-me-recipient", myNumber, "Garrett", "Garrett Marietta", false),
+        )
+        // Alternating sender entries, same number on both rows: the
+        // ENTRY decides, so the directions alternate too.
+        val sent1 = bmsg(1 to FieldVal.Str("s1"), 9 to FieldVal.Str("p-me-sender"))
+        val received1 = bmsg(1 to FieldVal.Str("r1"), 9 to FieldVal.Str("p-me-recipient"))
+        val sent2 = bmsg(1 to FieldVal.Str("s2"), 9 to FieldVal.Str("p-me-sender"))
+        val received2 = bmsg(1 to FieldVal.Str("r2"), 9 to FieldVal.Str("p-me-recipient"))
+        assertEquals(true, decisionFor(sent1, parts).outgoing)
+        assertEquals(false, decisionFor(received1, parts).outgoing)
+        assertEquals(true, decisionFor(sent2, parts).outgoing)
+        assertEquals(false, decisionFor(received2, parts).outgoing)
+        // No metadata contradiction in a healthy self chat.
+        assertEquals(false, decisionFor(sent1, parts).contradiction)
+        assertEquals(false, decisionFor(received1, parts).contradiction)
+    }
+
+    @Test fun `one to one directions follow the sender entry`() {
+        val parts = listOf(
+            RcsParticipant("p-me", "+17655550100", "Garrett", "Garrett Marietta", true),
+            RcsParticipant("p-dad", "+17655550200", "Dad", "Dad", false),
+        )
+        val mine = bmsg(
+            1 to FieldVal.Str("m1"), 9 to FieldVal.Str("p-me"),
+            4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(2))),
+        )
+        val dads = bmsg(
+            1 to FieldVal.Str("m2"), 9 to FieldVal.Str("p-dad"),
+            4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(108))),
+        )
+        assertEquals(true, decisionFor(mine, parts).outgoing)
+        assertEquals(false, decisionFor(mine, parts).contradiction)
+        assertEquals(false, decisionFor(dads, parts).outgoing)
+        assertEquals(false, decisionFor(dads, parts).contradiction)
+    }
+
+    @Test fun `flagged entry with an incoming status marker is a counted contradiction`() {
+        val parts = listOf(
+            RcsParticipant("p-me", "+17655550100", "Garrett", "Garrett Marietta", true),
+            RcsParticipant("p-dad", "+17655550200", "Dad", "Dad", false),
+        )
+        // Entry says self; status marker says INCOMING_* (108). The entry
+        // determination wins (outgoing) and the clash is reported.
+        val clash = bmsg(
+            1 to FieldVal.Str("m1"), 9 to FieldVal.Str("p-me"),
+            4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(108))),
+        )
+        val d = decisionFor(clash, parts)
+        assertEquals(true, d.outgoing)
+        assertTrue(d.contradiction)
+    }
+
+    @Test fun `unresolved sender entry keeps the wire direction`() {
+        val parts = listOf(
+            RcsParticipant("p-me", "+17655550100", "Garrett", "Garrett Marietta", true),
+        )
+        // participantID names no entry in this table: the wire direction
+        // (MessageStatus fallback at decode) stands, both ways.
+        val out = bmsg(
+            1 to FieldVal.Str("m1"), 9 to FieldVal.Str("p-gone"),
+            4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(2))),
+        )
+        val inc = bmsg(
+            1 to FieldVal.Str("m2"), 9 to FieldVal.Str("p-gone"),
+            4 to FieldVal.Bytes(bmsg(2 to FieldVal.Varint(108))),
+        )
+        assertEquals(true, decisionFor(out, parts).outgoing)
+        assertEquals(false, decisionFor(inc, parts).outgoing)
+        assertEquals(false, decisionFor(out, parts).contradiction)
+        assertEquals(false, decisionFor(inc, parts).contradiction)
+    }
+
     @Test fun `message decodes participantId and transport type`() {
         val m = bmsg(
             1 to FieldVal.Str("m1"),

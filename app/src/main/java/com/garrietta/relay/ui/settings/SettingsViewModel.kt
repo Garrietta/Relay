@@ -151,10 +151,10 @@ class SettingsViewModel(
         repository.rcsTransport.currentRcsConversations().size
 
     /**
-     * Messages the self-sender guard corrected (Garrett 2026-10-20):
-     * wire-incoming messages whose sender — resolved against the
-     * conversation's OWN participant table — is Garrett himself. Each
-     * would have rendered as an incoming bubble under his own name;
+     * True direction-metadata contradictions (Garrett 2026-10-20):
+     * messages whose sender entry is the conversation's isMe-flagged
+     * self entry yet which carry an explicit INCOMING_* status marker.
+     * The entry determination wins (the message renders outgoing);
      * Diagnostics shows the count as selfSenderContradictions=N.
      */
     fun selfSenderContradictionCount(): Int =
@@ -217,9 +217,10 @@ class SettingsViewModel(
     /**
      * On-disk cache sizes for Diagnostics: the RCS media cache
      * (cacheDir/rcs_media/v4) and the chat-history LRU
-     * (filesDir/chat_history_v2 — v1 was retired with the
-     * cross-conversation merge, whose mixed histories must never be
-     * served again). Blocking file walk — call off the main thread.
+     * (filesDir/chat_history_v3 — v1 was retired with the
+     * cross-conversation merge and v2 with the person-level
+     * direction guard; neither generation's histories may be served
+     * again). Blocking file walk — call off the main thread.
      */
     fun storageStats(): StorageStats {
         fun walk(dir: java.io.File): Pair<Int, Long> {
@@ -235,7 +236,7 @@ class SettingsViewModel(
             return files to bytes
         }
         val media = walk(java.io.File(context.cacheDir, "rcs_media/v4"))
-        val history = walk(java.io.File(context.filesDir, "chat_history_v2"))
+        val history = walk(java.io.File(context.filesDir, "chat_history_v3"))
         return StorageStats(media.first, media.second, history.first, history.second)
     }
 }

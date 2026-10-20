@@ -101,6 +101,15 @@ class RcsTransport(context: Context) : Transport {
     fun noDownloadIdImageCount(): Int = noDownloadIdImages.get()
 
     /**
+     * Downloads whose encrypted wire was smaller than the declared
+     * (MediaContent field 5) size but decrypted to a fully valid image
+     * (GCM auth + trailer + decode all pass) — accepted as a complete
+     * smaller rendition instead of failed as "truncated". Surfaced in
+     * Diagnostics so a real mismatch pattern stays visible.
+     */
+    private val renditionSizeMismatch = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
      * Remote typing state (Garrett 2026-10-19): the paired web protocol
      * delivers `UpdateEvents.typingEvent` on the long-poll — the wire
      * carries it, but nothing consumed it until now. Emitted as
@@ -124,7 +133,8 @@ class RcsTransport(context: Context) : Transport {
     fun transportDiagnostics(): String {
         val pairing = _pairingState.value
         return "pairing=$pairing, ${session.diagnostics()}, " +
-            "noDownloadIdImages=${noDownloadIdImages.get()}, ${ghostScanDiagnostics()}"
+            "noDownloadIdImages=${noDownloadIdImages.get()}, " +
+            "renditionSizeMismatch=${renditionSizeMismatch.get()}, ${ghostScanDiagnostics()}"
     }
 
     /**
@@ -975,14 +985,20 @@ class RcsTransport(context: Context) : Transport {
                 if (wireChunk <= 28) {
                     throw IllegalStateException("media unavailable: bad media chunk size")
                 }
-                // The declared size is the ENCRYPTED wire size. A short wire
-                // is a truncated download — fail fast (retryable) instead of
-                // decrypting garbage.
-                if (declaredWireSize > 0 && encrypted.size < (declaredWireSize * 0.95).toLong()) {
-                    throw RetryableMediaException(
-                        "media unavailable: truncated download (got ${encrypted.size} of ~${declaredWireSize} encrypted bytes)",
-                    )
-                }
+                // The declared size (MediaContent field 5) is USUALLY the
+                // encrypted wire size — but the server sometimes serves a
+                // smaller COMPLETE rendition for the same mediaId (Garrett
+                // 2026-10-19: a GIRTH image deterministically serves
+                // 614,494 bytes against ~3,132,125 declared, byte-identical
+                // across builds — a complete HTTP body, not a cut stream,
+                // so resume can't engage). A short wire is therefore NOT
+                // proof of truncation: decrypt and validate the bytes on
+                // their own merits. Genuine truncation still fails below —
+                // GCM auth rejects a partial final chunk, the trailer check
+                // rejects a stream cut at a chunk boundary, and the decode
+                // gate rejects garbage.
+                val declaredShortfall = declaredWireSize > 0 &&
+                    encrypted.size < (declaredWireSize * 0.95).toLong()
                 val plain = aesGcmDecryptChunked(key, encrypted)
                 // Exact plaintext check, derived from the wire itself:
                 // wire - 2B header - 28B (nonce+tag) per chunk. AES-GCM is
@@ -1012,6 +1028,10 @@ class RcsTransport(context: Context) : Transport {
                         throw IllegalStateException("media unavailable: downloaded bytes do not decode as an image")
                     }
                 }
+                // Every gate passed: the bytes are a complete, valid image
+                // even if smaller than the declared size — accept the
+                // rendition and note it for Diagnostics.
+                if (declaredShortfall) renditionSizeMismatch.incrementAndGet()
                 return plain
             }
             // Retry (Garrett 2026-10-19): transient failures — network IO,

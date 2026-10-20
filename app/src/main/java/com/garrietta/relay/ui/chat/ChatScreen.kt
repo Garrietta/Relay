@@ -19,6 +19,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -87,6 +89,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1042,31 +1045,65 @@ private fun MediaBubble(
         val b = bytes
         if (b != null && media.isImage) {
             Dialog(onDismissRequest = { zoomed = false }) {
-                if (isFullSize) {
-                    AsyncImage(
-                        model = b,
-                        contentDescription = "Shared image fullscreen",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    // Thumbnail-only bytes: show at natural size, NEVER
-                    // upscaled — upscaling is the "corrupt" look.
-                    val fb = loadedBounds
-                    if (fb != null) {
-                        val density = LocalDensity.current
-                        val nw = with(density) { fb.first.toDp() }
-                        val nh = with(density) { fb.second.toDp() }
-                        AsyncImage(
-                            model = b,
-                            contentDescription = "Shared image preview",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.size(nw, nh),
-                        )
-                    }
-                }
+                ZoomableFullscreenImage(
+                    bytes = b,
+                    contentDescription = "Shared image fullscreen",
+                )
             }
         }
+    }
+}
+
+/**
+ * Fullscreen image viewer (Garrett 2026-10-19): pinch-to-zoom, pan while
+ * zoomed, double-tap to toggle zoom — Google Photos / Messages style.
+ * The image starts fit-to-screen at a legible size; zoom range 1x-5x with
+ * a bouncy snap back to 1x on double-tap-out.
+ */
+@Composable
+private fun ZoomableFullscreenImage(
+    bytes: ByteArray,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        val newScale = (scale * zoomChange).coerceIn(1f, 5f)
+        offset = if (newScale <= 1f) Offset.Zero else offset + panChange * newScale
+        scale = newScale
+    }
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .transformable(transformState)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        if (scale > 1.5f) {
+                            scale = 1f
+                            offset = Offset.Zero
+                        } else {
+                            scale = 3f
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        AsyncImage(
+            model = bytes,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+        )
     }
 }
 

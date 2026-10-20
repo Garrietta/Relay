@@ -59,4 +59,68 @@ object ChatHeaderLogic {
      */
     fun groupClusterCollapsed(isGroup: Boolean, scrollCollapsed: Boolean): Boolean =
         isGroup && scrollCollapsed
+
+    /**
+     * What tapping "Add contact?" prefills in the system Contacts
+     * app's new-contact page (Garrett 2026-10-20): the peer's phone
+     * number, or their email for an email-identity peer (RCS iCloud
+     * participants carry an email instead of a number).
+     */
+    sealed interface AddContactTarget {
+        data class Phone(val number: String) : AddContactTarget
+        data class Email(val email: String) : AddContactTarget
+    }
+
+    /**
+     * Whether the 1:1 header shows "Add contact?" under the transport
+     * tag, and what it prefills. The peer is UNKNOWN exactly when no
+     * resolved name stands in front of their identity — the same
+     * signal the inbox's Unknown category keys on for numbers
+     * (Conversation.isUnknownNumber): the header title IS the bare
+     * number. Groups and the self-chat never qualify, whatever their
+     * titles say. The prefilled value is the peer's own address —
+     * the full form Relay resolved for this conversation, the same
+     * address the details page's Call/Video actions use — never the
+     * possibly reformatted title.
+     */
+    fun addContactTarget(
+        isGroup: Boolean,
+        isSelf: Boolean,
+        peerName: String,
+        peerAddress: String,
+    ): AddContactTarget? {
+        if (isGroup || isSelf) return null
+        val address = peerAddress.trim()
+        if (address.isEmpty()) return null
+        val title = peerName.trim()
+        return if ('@' in address) {
+            // Email identity: unknown while the title is the address
+            // itself (or any email form) — a resolved contact name in
+            // the title (e.g. the iCloud participant who IS in his
+            // contacts) means they're already known.
+            if (title == address || '@' in title) {
+                AddContactTarget.Email(address)
+            } else {
+                null
+            }
+        } else {
+            if (isBareNumberTitle(title)) {
+                AddContactTarget.Phone(address)
+            } else {
+                null
+            }
+        }
+    }
+
+    /**
+     * A title that is nothing but a phone number — the
+     * Conversation.isUnknownNumber test applied to a title string: at
+     * least one digit, and every character is a digit or phone
+     * punctuation. A resolved contact name always fails this; the
+     * UNKNOWN_SENDER! ghost's title fails it too (letters).
+     */
+    private fun isBareNumberTitle(title: String): Boolean {
+        if (title.isEmpty() || !title.any { it.isDigit() }) return false
+        return title.all { it.isDigit() || it in "+-(). " }
+    }
 }

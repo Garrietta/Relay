@@ -83,6 +83,7 @@ import androidx.compose.material.icons.filled.Forward
 import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.SentimentSatisfied
@@ -177,6 +178,7 @@ import com.garrietta.relay.ui.theme.senderBubbleColors
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.provider.ContactsContract
 import android.content.pm.PackageManager
 import android.webkit.MimeTypeMap
 import android.widget.Toast
@@ -694,6 +696,15 @@ fun ChatScreen(
                     backgroundColor = if (bgOption != null) bgTop else null,
                     onBack = onBack,
                     onOpenDetails = onOpenDetails,
+                    onAddContact = { target ->
+                        if (!openNewContact(chatContext, target)) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    "No contacts app available",
+                                )
+                            }
+                        }
+                    },
                 )
             },
             // Seamless with the thread container below — the header
@@ -1333,6 +1344,32 @@ private fun TypingDot(phaseDelayMs: Int) {
 // 2026-10-20): one status language per message, never two markers.
 
 /** Which header layout a thread gets — from the OTHER-participant count (self excluded, deduped). */
+/**
+ * "Add contact?" (Garrett 2026-10-20): opens the system Contacts app
+ * at its NEW contact page with the peer's number (or email) prefilled —
+ * the standard ACTION_INSERT contract over the Contacts content type,
+ * resolved by the system to his default contacts app; the same
+ * default-app intent family as Chat Details' Call / Video / Contact
+ * info. Returns false when nothing can take the intent so the caller
+ * can say so with a snackbar — never a crash.
+ */
+private fun openNewContact(
+    context: Context,
+    target: ChatHeaderLogic.AddContactTarget,
+): Boolean = runCatching {
+    val intent = Intent(Intent.ACTION_INSERT).apply {
+        type = ContactsContract.Contacts.CONTENT_TYPE
+        when (target) {
+            is ChatHeaderLogic.AddContactTarget.Phone ->
+                putExtra(ContactsContract.Intents.Insert.PHONE, target.number)
+            is ChatHeaderLogic.AddContactTarget.Email ->
+                putExtra(ContactsContract.Intents.Insert.EMAIL, target.email)
+        }
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+}.isSuccess
+
 private enum class HeaderMode { OneToOne, Group }
 
 /**
@@ -1366,6 +1403,7 @@ private fun ChatHeader(
     backgroundColor: Color? = null,
     onBack: () -> Unit,
     onOpenDetails: (focusAddress: String?) -> Unit,
+    onAddContact: (ChatHeaderLogic.AddContactTarget) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1386,6 +1424,19 @@ private fun ChatHeader(
                     peer.isUnknownSenderGhost() -> peer.address.ifBlank { displayName }
                     else -> peer.displayName.ifBlank { peer.address }.ifBlank { displayName }
                 }
+                // "Add contact?" (Garrett 2026-10-20): shown only
+                // when this peer is unknown — no resolved name in
+                // front of their bare number / email identity (the
+                // Unknown-category signal). The peer identity is the
+                // participant's own address (recipient fallback while
+                // participants load), the same address the details
+                // page's Call/Video actions use.
+                val addContactTarget = ChatHeaderLogic.addContactTarget(
+                    isGroup = false,
+                    isSelf = peer?.isSelf == true,
+                    peerName = peerName,
+                    peerAddress = peer?.address ?: recipient,
+                )
                 OneToOneHeader(
                     name = peerName,
                     photoUri = peer?.photoUri ?: photoUri,
@@ -1393,9 +1444,13 @@ private fun ChatHeader(
                     threadId = threadId,
                     transportLabel = transportLabel,
                     scrolled = scrolled,
+                    addContactTarget = addContactTarget,
                     onBack = onBack,
                     // Tapping the header opens details for the peer.
                     onOpenDetails = { onOpenDetails(peer?.address) },
+                    onAddContact = {
+                        addContactTarget?.let { onAddContact(it) }
+                    },
                 )
             }
             HeaderMode.Group -> GroupHeader(
@@ -1428,8 +1483,12 @@ private fun OneToOneHeader(
     threadId: Long,
     transportLabel: String,
     scrolled: Boolean,
+    /** Non-null = this peer is unknown; the expanded header offers
+     * "Add contact?" under the transport tag (Garrett 2026-10-20). */
+    addContactTarget: ChatHeaderLogic.AddContactTarget?,
     onBack: () -> Unit,
     onOpenDetails: () -> Unit,
+    onAddContact: () -> Unit,
 ) {
     AnimatedContent(
         targetState = scrolled,
@@ -1547,6 +1606,25 @@ private fun OneToOneHeader(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
                     )
+                    // "Add contact?" (Garrett 2026-10-20): directly
+                    // under the transport tag, expanded form only —
+                    // the collapsed row never carries it. It rides
+                    // inside the header's details-tap column but
+                    // consumes its own tap, so it opens the Contacts
+                    // app's new-contact page, never details. Part of
+                    // the expanded content, so the scroll-collapse
+                    // crossfade and its height behavior are untouched.
+                    if (addContactTarget != null) {
+                        TextButton(onClick = onAddContact) {
+                            Icon(
+                                Icons.Filled.PersonAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Add contact?")
+                        }
+                    }
                 }
             }
         }

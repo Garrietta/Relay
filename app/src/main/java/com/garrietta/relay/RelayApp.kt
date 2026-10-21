@@ -343,11 +343,6 @@ class RelayApp : Application() {
             isGroup = isGroup,
             missed = missed,
         )
-        // Garrett 2026-10-19: a posted notification FORCES the RCS refresh
-        // (the same one the Diagnostics Refresh button does) so the inbox
-        // and chat panes pick the message up — notification and UI stay
-        // in sync instead of the notification arriving alone.
-        repository.refresh()
     }
 
     /** First poll baseline: everything currently on the server is "seen". */
@@ -397,4 +392,3 @@ class RelayApp : Application() {
         }
     }
 }
-

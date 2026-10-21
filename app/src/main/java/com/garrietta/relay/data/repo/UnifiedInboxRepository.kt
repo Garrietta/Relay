@@ -14,6 +14,8 @@ import com.garrietta.relay.data.model.Message
 import com.garrietta.relay.data.model.Participant
 import com.garrietta.relay.data.model.isGroupEventNotice
 import com.garrietta.relay.data.model.isUnknownSenderGhostName
+import com.garrietta.relay.rcs.proto.RcsMessage
+import com.garrietta.relay.rcs.proto.RcsParticipant
 import com.garrietta.relay.rcs.proto.isUnknownSenderGhost
 import com.garrietta.relay.data.model.rcsStatusToDelivery
 import com.garrietta.relay.data.transport.IncomingMessage
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -61,11 +64,9 @@ private data class RawThread(
 /**
  * Merges all [Transport]s into one chronological unified inbox.
  *
- * Conversation/message reads go through the Telephony providers
- * (content://mms-sms/...), which the SMS receiver keeps up to date. A
- * [ContentObserver] refreshes the list on any provider change, and incoming
- * transport events force a refresh too — so RCS messages will appear here with
- * zero repository changes once [RcsTransport] is real.
+ * Unpaired conversation reads go through the Telephony providers
+ * (content://mms-sms/...). A [ContentObserver] refreshes those rows; paired
+ * RCS conversation events update the server snapshot directly.
  */
 class UnifiedInboxRepository(
     private val context: Context,
@@ -231,8 +232,9 @@ class UnifiedInboxRepository(
             )
         } catch (_: Exception) { /* no SMS permission yet */ }
 
-        // Transport-level incoming events also refresh (covers future RCS).
-        transports.forEach { transport ->
+        // SMS arrivals refresh the Telephony provider; RCS arrivals update
+        // the paired snapshot directly and signal through conversationUpdateTick.
+        transports.filter { it !== rcsTransport }.forEach { transport ->
             scope.launch {
                 transport.observeIncoming().collect {
                     refresh()
@@ -246,13 +248,19 @@ class UnifiedInboxRepository(
             rcsTransport.pairingState.collect { refresh() }
         }
 
+        scope.launch {
+            rcsTransport.conversationUpdateTick.drop(1).collect {
+                refresh(syncRcs = false)
+            }
+        }
+
         scope.launch { refresh() }
     }
 
     /** Last LIST_CONVERSATIONS pull (paired mode) — bounds recovery refreshes. */
     private var lastRcsSyncMs = 0L
 
-    fun refresh() {
+    fun refresh(syncRcs: Boolean = true) {
         scope.launch {
             // A failed load must NEVER clobber the last good list — that
             // single defect is what wiped the inbox on reopen. Null means
@@ -263,11 +271,12 @@ class UnifiedInboxRepository(
                 // by a pre-response message); an empty/stale list recovers
                 // here instead of showing "No conversations yet" forever.
                 // Failures surface verbatim via rcsSyncErrors (snackbar).
-                if (rcsTransport.isPairedNow) {
+                if (syncRcs && rcsTransport.isPairedNow) {
                     val now = System.currentTimeMillis()
                     if (rcsTransport.currentRcsConversations().isEmpty() || now - lastRcsSyncMs > 60_000) {
-                        rcsTransport.refreshConversations()
-                        lastRcsSyncMs = now
+                        if (rcsTransport.refreshConversations(notifyInbox = false)) {
+                            lastRcsSyncMs = now
+                        }
                     }
                 }
                 val loaded = loadConversations()
@@ -795,7 +804,6 @@ class UnifiedInboxRepository(
     private suspend fun rcsMessagesSingle(conversationId: String, count: Long = 50L): List<Message> = withContext(Dispatchers.IO) {
         val conv = rcsTransport.currentRcsConversations().firstOrNull { it.id == conversationId }
         val participants = conv?.participants ?: emptyList()
-        val threadKey = ("rcs:" + conversationId).hashCode().toLong()
         val server = rcsTransport.rcsMessages(conversationId, participants, count)
         synchronized(rcsServerMessages) { rcsServerMessages[conversationId] = server }
         // Participant-integrity evidence (Garrett 2026-10-20): does this
@@ -967,49 +975,63 @@ class UnifiedInboxRepository(
         // decode's MessageStatus fallback (resolveFromMe). A flagged
         // entry carrying an explicit INCOMING_* status is a true
         // metadata contradiction — the entry wins, and it is counted.
-        val byPid = participants.associateBy { it.participantId }
-        server.map { m ->
-            val sender = byPid[m.participantId]
-            val senderNumber = sender?.number.orEmpty()
-            val direction = resolveMessageDirection(sender, m.fromMe, m.status)
-            val outgoing = direction.outgoing
-            if (direction.contradiction) {
-                synchronized(selfSenderLock) { selfSenderContradictions++ }
-            }
-            Message(
-                id = m.id.hashCode().toLong(),
-                threadId = threadKey,
-                address = senderNumber,
-                body = m.body,
-                date = m.timestampMs,
-                isOutgoing = outgoing,
-                isMms = false,
-                read = true,
-                tmpId = m.tmpId.ifBlank { null },
-                media = m.media,
-                location = m.location,
-                deliveryStatus = rcsStatusToDelivery(m.status, outgoing),
-                serverId = m.id.ifBlank { null },
-                reactions = m.wireReactions.flatMap { wr ->
-                    wr.participantIds.ifEmpty { listOf("") }.map { pid ->
-                        val reactor = participants.firstOrNull { it.participantId == pid }
-                        com.garrietta.relay.data.model.MessageReaction(
-                            emoji = wr.emoji,
-                            reactorName = when {
-                                reactor?.isMe == true -> "You"
-                                reactor != null -> reactor.displayNameOrNumber()
-                                pid == m.participantId && m.fromMe -> "You"
-                                else -> "Someone"
-                            },
-                            fromMe = reactor?.isMe == true,
-                            timestampMs = m.timestampMs,
-                        )
-                    }
-                },
-            )
-        }.sortedByDescending { it.date }
+        server.map { mapRcsMessage(it, conversationId, participants) }
             // Write-through to the instant-open cache.
             .also { putCachedMessages(conversationId, it) }
+    }
+
+    /** Maps a live server event without fetching the conversation history again. */
+    fun mapLiveRcsMessage(conversationId: String, message: RcsMessage): Message {
+        val participants = rcsTransport.currentRcsConversations()
+            .firstOrNull { it.id == conversationId }
+            ?.participants
+            .orEmpty()
+        return mapRcsMessage(message, conversationId, participants)
+    }
+
+    private fun mapRcsMessage(
+        message: RcsMessage,
+        conversationId: String,
+        participants: List<RcsParticipant>,
+    ): Message {
+        val sender = participants.firstOrNull { it.participantId == message.participantId }
+        val direction = resolveMessageDirection(sender, message.fromMe, message.status)
+        if (direction.contradiction) {
+            synchronized(selfSenderLock) { selfSenderContradictions++ }
+        }
+        return Message(
+            id = message.id.hashCode().toLong(),
+            threadId = ("rcs:" + conversationId).hashCode().toLong(),
+            address = sender?.number.orEmpty(),
+            body = message.body,
+            date = message.timestampMs,
+            isOutgoing = direction.outgoing,
+            isMms = false,
+            read = true,
+            tmpId = message.tmpId.ifBlank { null },
+            media = message.media,
+            location = message.location,
+            deliveryStatus = rcsStatusToDelivery(message.status, direction.outgoing),
+            serverId = message.id.ifBlank { null },
+            reactions = message.wireReactions.flatMap { reaction ->
+                reaction.participantIds.ifEmpty { listOf("") }.map { participantId ->
+                    val reactor = participants.firstOrNull {
+                        it.participantId == participantId
+                    }
+                    com.garrietta.relay.data.model.MessageReaction(
+                        emoji = reaction.emoji,
+                        reactorName = when {
+                            reactor?.isMe == true -> "You"
+                            reactor != null -> reactor.displayNameOrNumber()
+                            participantId == message.participantId && message.fromMe -> "You"
+                            else -> "Someone"
+                        },
+                        fromMe = reactor?.isMe == true,
+                        timestampMs = message.timestampMs,
+                    )
+                }
+            },
+        )
     }
 
     /** Downloads + decrypts an RCS media attachment (disk-cached in transport). */

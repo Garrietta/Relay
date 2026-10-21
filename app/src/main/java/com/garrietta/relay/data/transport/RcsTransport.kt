@@ -21,6 +21,7 @@ import com.garrietta.relay.rcs.proto.encodeDevice
 import com.garrietta.relay.rcs.proto.encodeDownloadAttachmentRequest
 import com.garrietta.relay.rcs.proto.encodeUploadMediaRequest
 import com.garrietta.relay.rcs.proto.UploadedMediaRef
+import com.garrietta.relay.rcs.proto.displayNameOrNumber
 import com.garrietta.relay.rcs.media.aesGcmDecryptChunked
 import com.garrietta.relay.rcs.media.aesGcmEncryptChunked
 import okhttp3.MediaType.Companion.toMediaType
@@ -46,6 +47,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,9 +87,78 @@ class RcsTransport(context: Context) : Transport {
     private val _incoming = MutableSharedFlow<IncomingMessage>(extraBufferCapacity = 64)
     override fun observeIncoming(): Flow<IncomingMessage> = _incoming.asSharedFlow()
 
-    /** RCS-side conversation list for future inbox merging. */
+    /** Latest paired Google Messages conversation snapshot. */
     private val _rcsConversations = MutableStateFlow<List<RcsConversation>>(emptyList())
     val rcsConversations: Flow<List<RcsConversation>> = _rcsConversations.asStateFlow()
+    private val _conversationUpdateTick = MutableStateFlow(0)
+    val conversationUpdateTick: StateFlow<Int> = _conversationUpdateTick.asStateFlow()
+    private val conversationLock = Any()
+    private val deepConversationLock = Any()
+    private var deepConversationJob: Job? = null
+
+    private fun replaceRcsConversations(
+        conversations: List<RcsConversation>,
+        notify: Boolean = false,
+    ) {
+        val changed = synchronized(conversationLock) {
+            if (_rcsConversations.value == conversations) {
+                false
+            } else {
+                _rcsConversations.value = conversations
+                true
+            }
+        }
+        if (notify && changed) _conversationUpdateTick.update { it + 1 }
+    }
+
+    private fun applyConversationUpdates(updates: List<RcsConversation>) {
+        val changed = synchronized(conversationLock) {
+            val current = _rcsConversations.value
+            val merged = mergeRcsConversationUpdates(current, updates)
+            if (merged == current) {
+                false
+            } else {
+                _rcsConversations.value = merged
+                true
+            }
+        }
+        if (changed) _conversationUpdateTick.update { it + 1 }
+    }
+
+    private fun applyIncomingConversationMessage(message: RcsMessage) {
+        val changed = synchronized(conversationLock) {
+            val current = _rcsConversations.value
+            val index = current.indexOfFirst { it.id == message.conversationId }
+            if (index < 0 || message.timestampMs < current[index].timestampMs) {
+                false
+            } else {
+                val conversation = current[index]
+                val senderName = conversation.participants
+                    .firstOrNull { it.participantId == message.participantId }
+                    ?.displayNameOrNumber()
+                val updated = conversation.copy(
+                    snippet = message.body.ifBlank { conversation.snippet },
+                    timestampMs = maxOf(conversation.timestampMs, message.timestampMs),
+                    unread = conversation.unread || !message.fromMe,
+                    latestFromMe = message.fromMe,
+                    latestSenderName = if (message.fromMe) {
+                        conversation.latestSenderName
+                    } else {
+                        senderName?.takeIf { it.isNotBlank() } ?: conversation.latestSenderName
+                    },
+                )
+                if (updated == conversation) {
+                    false
+                } else {
+                    _rcsConversations.value = current.toMutableList().also {
+                        it[index] = updated
+                    }.sortedByDescending { it.timestampMs }
+                    true
+                }
+            }
+        }
+        if (changed) _conversationUpdateTick.update { it + 1 }
+    }
 
     /**
      * Verbatim sync/send errors for the UI — Garrett has no logcat access,
@@ -231,10 +302,19 @@ class RcsTransport(context: Context) : Transport {
         else "ghostMiss=" + misses.joinToString("; ")
     }
 
-    /** Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim. */
-    suspend fun refreshConversations() {
+    /**
+     * Re-pulls LIST_CONVERSATIONS; failures go to [syncError], verbatim.
+     * The initial page is applied immediately; the deeper page is scheduled
+     * separately so it cannot delay inbox refresh or message delivery.
+     *
+     * @return true when the initial conversation page loaded successfully.
+     */
+    suspend fun refreshConversations(notifyInbox: Boolean = true): Boolean {
         try {
-            _rcsConversations.value = session.listConversations()
+            replaceRcsConversations(
+                session.listConversations(),
+                notify = notifyInbox,
+            )
             onConversationsRecovered()
         } catch (e: CancellationException) {
             throw e
@@ -247,20 +327,25 @@ class RcsTransport(context: Context) : Transport {
             // loop keeps trying (and restarts the session once) until it
             // lands or the pairing goes away.
             scheduleConversationRecovery()
-            return
+            return false
         }
-        // Deeper history in the background (Garrett 2026-10-19: "way more
-        // messages here"). The first pull stays fast (50); a larger pull
-        // then fills in older conversations without blocking the UI.
-        // Merged by id, newest first. Best-effort: failures only log.
-        try {
-            val deep = session.listConversations(count = 400L)
-            if (deep.isNotEmpty()) {
-                _rcsConversations.value =
-                    (deep + _rcsConversations.value).distinctBy { it.id }
+        scheduleDeepConversationFill()
+        return true
+    }
+
+    private fun scheduleDeepConversationFill() {
+        synchronized(deepConversationLock) {
+            if (deepConversationJob?.isActive == true) return
+            deepConversationJob = scope.launch {
+                try {
+                    val deep = session.listConversations(count = 400L)
+                    if (deep.isNotEmpty()) applyConversationUpdates(deep)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Deep conversation fill failed: ${e.message}", e)
+                }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Deep conversation fill failed: ${e.message}", e)
         }
     }
 
@@ -314,7 +399,7 @@ class RcsTransport(context: Context) : Transport {
 
     /** One quiet conversation pull for the background recovery loop. */
     private suspend fun pullConversationsQuietly(): Boolean = try {
-        _rcsConversations.value = session.listConversations()
+        replaceRcsConversations(session.listConversations(), notify = true)
         onConversationsRecovered()
         true
     } catch (e: CancellationException) {
@@ -427,6 +512,8 @@ class RcsTransport(context: Context) : Transport {
                                 }
                         }
                     }
+                    is SessionEvent.ConversationsChanged ->
+                        applyConversationUpdates(event.conversations)
                     is SessionEvent.AuthExpired, SessionEvent.Unpaired -> {
                         // One recovery attempt before declaring the pairing
                         // dead: refresh the Tachyon token and restart the
@@ -458,6 +545,7 @@ class RcsTransport(context: Context) : Transport {
         }
         scope.launch {
             session.incoming.collect { msg ->
+                applyIncomingConversationMessage(msg)
                 // A landed message ends typing in that conversation (GM
                 // semantics) — clear the store entry the moment it arrives
                 // instead of waiting for the TTL.
@@ -842,7 +930,9 @@ class RcsTransport(context: Context) : Transport {
             // The session is already up in Gaia mode; refresh the conversation
             // list and start the foreground service.
             scope.launch {
-                runCatching { _rcsConversations.value = session.listConversations() }
+                runCatching {
+                    replaceRcsConversations(session.listConversations(), notify = true)
+                }
             }
             com.garrietta.relay.rcs.service.RcsService.start(appContext)
             return true

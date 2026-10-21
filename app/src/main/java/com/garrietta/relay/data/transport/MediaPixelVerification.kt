@@ -404,10 +404,9 @@ private fun decodeBoundedPixels(bytes: ByteArray): Triple<IntArray, Int, Int>? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth < 1 || bounds.outHeight < 1) return null
+        val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
         var sample = 1
-        while (bounds.outWidth / (sample * 2) >= 160 &&
-            bounds.outHeight / (sample * 2) >= 160
-        ) {
+        while (longEdge / sample >= 320) {
             sample *= 2
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }

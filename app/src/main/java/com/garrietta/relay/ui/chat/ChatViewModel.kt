@@ -515,15 +515,9 @@ class ChatViewModel(
             }
         }
         viewModelScope.launch {
-            // Inbox tick reload (Garrett 2026-10-19): the notification
-            // path forces repository.refresh() when it posts — the open
-            // chat re-pulls its thread so the message appears in-app, not
-            // just in the notification shade. The reload also re-runs the
-            // sender census, and a refresh can re-derive membership from
-            // a changed payload — either way the header's others are
-            // re-derived through the refined seam, never left stale.
+            // Inbox changes can carry updated conversation membership;
+            // refresh the header without re-fetching message history.
             repository.inboxChanges().collect {
-                publishMessages(repository.rcsMessages(conversationId, rcsHistoryCount))
                 refreshRcsOthers(conversationId)
             }
         }
@@ -582,46 +576,75 @@ class ChatViewModel(
     /**
      * Live RCS arrival. A server echo carries the optimistic bubble's tmpId
      * and replaces it; a status-only push (same server id, new status)
-     * updates just the ticks; anything else is genuinely new — reload to
-     * stay consistent rather than risking a duplicate.
+     * updates just the ticks; a new message is mapped from the live event
+     * and inserted directly rather than waiting for a history RPC.
      */
     private fun onRcsIncoming(msg: com.garrietta.relay.rcs.proto.RcsMessage) {
         val tmpId = msg.tmpId.ifBlank { null }
         val optimistic = tmpId?.let { pendingOptimistic.remove(it) }
         if (optimistic == null) {
-            // Status-only update? Match by server id and patch the ticks
-            // without a full reload.
-            val serverId = msg.id.hashCode().toLong()
-            val newStatus = rcsStatusToDelivery(msg.status, msg.fromMe)
-            val current = _messages.value
-            val idx = current.indexOfFirst { it.id == serverId }
-            if (idx >= 0 && current[idx].deliveryStatus != newStatus &&
-                newStatus != DeliveryStatus.NONE
-            ) {
-                setMessages(
-                    current.toMutableList().also {
-                        // A terminal status retires the live-send flag:
-                        // the send is no longer happening, and the flag
-                        // must never outlive it (preserveLiveSendFlags
-                        // enforces the same rule on wholesale loads).
-                        val terminal = newStatus == DeliveryStatus.DELIVERED ||
-                            newStatus == DeliveryStatus.READ
-                        it[idx] = it[idx].copy(
-                            deliveryStatus = newStatus,
-                            sendInFlight = it[idx].sendInFlight && !terminal,
-                        )
-                    },
-                )
+            if (msg.id.isBlank()) {
+                viewModelScope.launch {
+                    publishMessages(
+                        repository.rcsMessages(
+                            rcsConversationId ?: return@launch,
+                            rcsHistoryCount,
+                        ),
+                    )
+                }
                 return
             }
-            viewModelScope.launch {
-                publishMessages(
-                    repository.rcsMessages(
-                        rcsConversationId ?: return@launch,
-                        rcsHistoryCount,
-                    ),
-                )
+            val conversationId = rcsConversationId ?: return
+            val mapped = repository.mapLiveRcsMessage(conversationId, msg)
+            val newStatus = rcsStatusToDelivery(msg.status, msg.fromMe)
+            val current = _messages.value
+            val idx = current.indexOfFirst {
+                it.serverId == msg.id || it.id == mapped.id
             }
+            val hasContent = msg.body.isNotBlank() ||
+                msg.media != null ||
+                msg.location != null ||
+                msg.wireReactions.isNotEmpty()
+            if (idx < 0 && !hasContent) return
+            if (idx >= 0) {
+                val existing = current[idx]
+                if (!hasContent) {
+                    if (newStatus != DeliveryStatus.NONE &&
+                        existing.deliveryStatus != newStatus
+                    ) {
+                        val terminal = newStatus == DeliveryStatus.DELIVERED ||
+                            newStatus == DeliveryStatus.READ
+                        setMessages(
+                            current.toMutableList().also {
+                                it[idx] = existing.copy(
+                                    deliveryStatus = newStatus,
+                                    sendInFlight = existing.sendInFlight && !terminal,
+                                )
+                            },
+                        )
+                    }
+                    return
+                }
+                val terminal = newStatus == DeliveryStatus.DELIVERED ||
+                    newStatus == DeliveryStatus.READ
+                val merged = mapped.copy(
+                    body = mapped.body.ifBlank { existing.body },
+                    media = mapped.media ?: existing.media,
+                    location = mapped.location ?: existing.location,
+                    deliveryStatus = if (newStatus == DeliveryStatus.NONE) {
+                        existing.deliveryStatus
+                    } else {
+                        newStatus
+                    },
+                    reactions = mapped.reactions.ifEmpty { existing.reactions },
+                    sendInFlight = existing.sendInFlight && !terminal,
+                )
+                if (merged != existing) {
+                    setMessages(current.toMutableList().also { it[idx] = merged })
+                }
+                return
+            }
+            setMessages((current + mapped).sortedByDescending { it.date })
             return
         }
         val echoStatus = rcsStatusToDelivery(msg.status, true)
@@ -635,6 +658,8 @@ class ChatViewModel(
             isMms = false,
             read = true,
             tmpId = tmpId,
+            serverId = msg.id.ifBlank { null },
+            media = msg.media ?: optimistic.media,
             location = msg.location ?: optimistic.location,
             deliveryStatus = echoStatus,
             // The echo swap keeps the send's live provenance while
@@ -1469,4 +1494,3 @@ fun attachReactions(
             } ?: m
         }
 }
-
